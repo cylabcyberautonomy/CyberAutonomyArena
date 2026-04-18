@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
-from .c2c import build_c2c_image, start_c2c_server, stop_c2c_server
+from .c2c import start_c2c_server, stop_c2c_server
 from .config import ExperimentManagerConfig
 from .deployer import deploy_environment
-from .models import Experiment, ExperimentSpecs, ExperimentStatus
-from .registry import Registry
+from .experiment import Experiment, ExperimentSpecs, ExperimentStatus
+from .experiment_registry import Registry
 from .teardown import teardown_environment
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,6 @@ async def lifespan(app: FastAPI):
     global cfg, registry
     cfg = ExperimentManagerConfig.load()
     registry = Registry(cfg.registry_path)
-    await build_c2c_image(cfg)
     await _clean_slate()
     yield
 
@@ -74,7 +73,7 @@ async def _teardown(experiment: Experiment) -> None:
 
 async def _run_experiment(experiment: Experiment) -> None:
     try:
-        container_id, c2c_server = await start_c2c_server(experiment.experiment_name, cfg)
+        container_id, c2c_server = await start_c2c_server(experiment.experiment_name, experiment.attacker.c2c_image, cfg)
         experiment.c2c_container_id = container_id
         await registry.update(experiment)
     except Exception:

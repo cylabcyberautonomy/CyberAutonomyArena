@@ -1,5 +1,1 @@
 incalmo_dir: /home/lakshmi/Incalmo
-output_dir: /home/lakshmi/experiment_harness/output
-registry_path: /home/lakshmi/experiment_harness/registry.yaml
-c2c_port: 8888
-c2c_image: incalmo/attacker:latest

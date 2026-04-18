@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 
 import yaml
 
-from .models import Experiment
+from .experiment import Experiment
 
 
 class Registry:
-    def __init__(self, path: str = "registry.yaml"):
+    def __init__(self, path: str = "experiment_registry.yaml"):
         self._path = Path(path)
         self._lock = asyncio.Lock()
 

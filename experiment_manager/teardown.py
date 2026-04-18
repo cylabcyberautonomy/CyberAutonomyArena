@@ -1,4 +1,4 @@
-from .models import Experiment
+from .experiment import Experiment
 
 
 async def teardown_environment(experiment: Experiment) -> None:

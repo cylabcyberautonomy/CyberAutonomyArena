@@ -4,45 +4,49 @@ import logging
 import aiohttp
 
 from .config import ExperimentManagerConfig
+from .attacker_plugins.base import AttackerPlugin
 
 logger = logging.getLogger(__name__)
 
-STARTUP_TIMEOUT = 60  # seconds to wait for C2 server to be ready
+STARTUP_TIMEOUT = 60
 POLL_INTERVAL = 2
+
+_built_images: set[str] = set()
 
 
 def _container_name(experiment_name: str) -> str:
     return f"incalmo-c2c-{experiment_name}"
 
 
-async def build_c2c_image(cfg: ExperimentManagerConfig) -> None:
-    """Build the C2 server Docker image from the experiment_harness Dockerfile."""
-    logger.info("Building C2 server image '%s'...", cfg.c2c_image_tag)
+async def _ensure_image_built(image: str, cfg: ExperimentManagerConfig) -> None:
+    if image in _built_images:
+        return
+    logger.info("Building C2 server image '%s'...", image)
     proc = await asyncio.create_subprocess_exec(
-        "docker", "build",
-        "-t", cfg.c2c_image_tag,
-        str(cfg.c2c_dockerfile_dir),
+        "docker", "build", "-t", image, str(cfg.c2c_dockerfile_dir),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"Failed to build C2 image: {stderr.decode().strip()}")
-    logger.info("C2 server image built successfully.")
+        raise RuntimeError(f"Failed to build C2 image '{image}': {stderr.decode().strip()}")
+    _built_images.add(image)
+    logger.info("Built '%s' successfully.", image)
 
 
-async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -> tuple[str, str]:
+async def start_c2c_server(experiment_name: str, c2c_image: str, cfg: ExperimentManagerConfig) -> tuple[str, str]:
     """
     Start the C2 server as a Docker container with a dynamic host port.
     Returns (container_id, c2c_url).
     """
+    await _ensure_image_built(c2c_image, cfg)
     name = _container_name(experiment_name)
 
     proc = await asyncio.create_subprocess_exec(
         "docker", "run", "-d",
         "--name", name,
         "-p", "127.0.0.1::8888",
-        cfg.c2c_image_tag,
+        c2c_image,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -77,7 +81,6 @@ async def _get_mapped_port(container_name: str) -> int:
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
-    # output format: "127.0.0.1:XXXXX"
     return int(stdout.decode().strip().split(":")[-1])
 
 

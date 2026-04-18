@@ -1,4 +1,5 @@
-from .models import Experiment, DeployedEnvironment
+from .environment import DeployedEnvironment
+from .experiment import Experiment
 
 
 async def deploy_environment(experiment: Experiment) -> DeployedEnvironment:

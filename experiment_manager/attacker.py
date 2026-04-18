@@ -1,59 +1,52 @@
 import asyncio
 import json
-import os
-from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from pydantic import BaseModel
+from pydantic_core import core_schema
 
 from .config import ExperimentManagerConfig
-from .models import DeployedEnvironment
+from .environment import DeployedEnvironment
+from .attacker_plugins.base import AttackerPlugin
+from . import attacker_plugins  # noqa: F401 — triggers auto-discovery
 
-# Inline runner: bypasses ConfigService (which hardcodes ./config/config.json)
-# by importing Incalmo internals directly and loading config from a given path.
-_RUNNER = """\
-import asyncio, json, sys
-from pathlib import Path
-from config.attacker_config import AttackerConfig
-from incalmo.c2server.state_store import StateStore
-from incalmo.incalmo_runner import run_incalmo_strategy
 
-config = AttackerConfig(**json.loads(Path(sys.argv[1]).read_text()))
-StateStore.initialize()
-asyncio.run(run_incalmo_strategy(config, task_id=sys.argv[2]))
-"""
+class AttackerConfig:
+    """Dynamic type — validated against whichever plugins are registered."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any):
+        def validate(value: Any) -> BaseModel:
+            if isinstance(value, BaseModel):
+                return value
+            if isinstance(value, dict):
+                type_key = value.get("type")
+                attacker_cls = AttackerPlugin._registry.get(type_key)
+                if attacker_cls is None:
+                    raise ValueError(
+                        f"Unknown attacker type: {type_key!r}. "
+                        f"Available: {list(AttackerPlugin._registry)}"
+                    )
+                return attacker_cls.model_validate(value)
+            raise ValueError(f"Expected dict or attacker config, got {type(value)}")
+
+        return core_schema.no_info_plain_validator_function(
+            validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: v.model_dump(),
+                info_arg=False,
+            ),
+        )
 
 
 async def run_attacker(
-    strategy: str,
+    attacker: AttackerConfig,
     environment: Optional[DeployedEnvironment],
     experiment_name: str,
     cfg: ExperimentManagerConfig,
-    c2c_server: Optional[str] = None,  # TEST ONLY: bypasses environment-derived URL
+    c2c_server: Optional[str] = None,  # TEST ONLY
 ) -> asyncio.subprocess.Process:
-    """
-    Spawn an Incalmo attacker strategy as a subprocess against the deployed OpenStack environment.
-    Returns the Process so the caller can await its exit code and track its PID.
-    EM writes result.json after process.wait() returns.
-    """
-    resolved_c2c = c2c_server or f"http://{environment.ip}:{cfg.c2c_port}"
-    config = {
-        "name": experiment_name,
-        "strategy": {"name": strategy},
-        "environment": environment.spec if environment else "none",
-        "c2c_server": resolved_c2c,
-        "blacklist_ips": [],
-    }
-
-    config_path = cfg.output_dir / experiment_name / "incalmo_config.json"
+    config_path = cfg.output_dir / experiment_name / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(config, indent=2))
-
-    incalmo_python = cfg.incalmo_dir / ".venv" / "bin" / "python"
-
-    env = {**os.environ, "C2C_SERVER": resolved_c2c}
-
-    return await asyncio.create_subprocess_exec(
-        str(incalmo_python), "-c", _RUNNER,
-        str(config_path), experiment_name,
-        cwd=str(cfg.incalmo_dir),
-        env=env,
-    )
+    config_path.write_text(json.dumps(attacker.build_config(experiment_name, environment, c2c_server), indent=2))
+    return await attacker.run(config_path, experiment_name, cfg, c2c_server)
