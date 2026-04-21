@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import yaml
 
-from .experiment import Experiment
+from .models import Experiment
 
 
 class Registry:
@@ -49,6 +49,11 @@ class Registry:
                     self._write(experiments)
                     return
             raise KeyError(f"Experiment '{experiment.experiment_name}' not found")
+
+    async def remove(self, experiment_name: str) -> None:
+        async with self._lock:
+            experiments = self.load()
+            self._write([e for e in experiments if e.experiment_name != experiment_name])
 
     async def clear(self) -> None:
         async with self._lock:

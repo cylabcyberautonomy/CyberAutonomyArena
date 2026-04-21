@@ -10,6 +10,8 @@ dependencies = [
     "aiohttp>=3.9.0",
     "python-openstackclient>=6.0.0",
     "python-heatclient>=3.0.0",
+    "cryptography>=42.0.0",
+    "openstacksdk>=2.0.0",
 ]
 
 [project.scripts]

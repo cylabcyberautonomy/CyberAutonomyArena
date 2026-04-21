@@ -1,9 +1,0 @@
-{
-  "name": "test-attacker",
-  "strategy": {
-    "name": "GraphSearch"
-  },
-  "environment": "none",
-  "c2c_server": "http://127.0.0.1:32769",
-  "blacklist_ips": []
-}

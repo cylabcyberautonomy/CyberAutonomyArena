@@ -1,1 +1,4 @@
 incalmo_dir: /home/lakshmi/Incalmo
+incalmo_python: /opt/miniconda3/bin/python3.13
+mhbench_dir: /home/lakshmi/v3_MHBench
+host_ip: 10.81.1.1

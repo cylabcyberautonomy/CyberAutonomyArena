@@ -3,12 +3,13 @@ from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime
 
-from .attacker import AttackerConfig
-from .environment import DeployedEnvironment
+from ..attacker import AttackerConfig
+from ..environment import DeployedEnvironment
 
 
 class ExperimentStatus(str, Enum):
     QUEUED = "Queued"
+    DEPLOYING = "Deploying"
     READY = "Ready"
     RUNNING = "Running"
     ERROR = "Error"
