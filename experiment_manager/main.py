@@ -21,14 +21,16 @@ logger = logging.getLogger(__name__)
 cfg: ExperimentManagerConfig
 registry: Registry
 _openstack_semaphore: asyncio.Semaphore
+_experiment_semaphore: asyncio.Semaphore
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_semaphore
+    global cfg, registry, _openstack_semaphore, _experiment_semaphore
     cfg = ExperimentManagerConfig.load()
     registry = Registry(cfg.registry_path)
     _openstack_semaphore = asyncio.Semaphore(1)
+    _experiment_semaphore = asyncio.Semaphore(cfg.max_concurrent_experiments)
     await _clean_slate()
     yield
 
@@ -75,105 +77,111 @@ async def _teardown(experiment: Experiment) -> None:
     try:
         async with _openstack_semaphore:
             await teardown_environment(experiment, cfg)
+        
+        try:
+            await registry.remove(experiment.experiment_name)
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Failed to remove '%s' from registry", experiment.experiment_name)
+    
     except Exception:
         get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
 
-
 async def _run_experiment(experiment: Experiment) -> None:
-    name = experiment.experiment_name
-    exp_log = init_logger(name, cfg.output_dir)
+    async with _experiment_semaphore:
+        name = experiment.experiment_name
+        exp_log = init_logger(name, cfg.output_dir)
 
-    config_path = cfg.output_dir / name / "experiment" / "experiment_config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(experiment.model_dump_json(indent=2))
+        config_path = cfg.output_dir / name / "experiment" / "experiment_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(experiment.model_dump_json(indent=2))
 
-    kali_c2c_url = None
-    local_c2c_url = None
+        kali_c2c_url = None
+        local_c2c_url = None
 
-    try:
-        container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
-        if container_id:
-            experiment.c2c_container_id = container_id
-            await registry.update(experiment)
-        if local_c2c_url:
-            await experiment.attacker.wait_c2c_ready(local_c2c_url, experiment.experiment_name)
-    except Exception:
-        exp_log.exception("Failed to start C2 server for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)
-        return
-
-    experiment.deployed_environment = DeployedEnvironment(
-        topology_spec=str(cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"),
-    )
-    await registry.update(experiment)
-
-    mgmt_ip = None
-    try:
-        async with _openstack_semaphore:
-
-            experiment.status = ExperimentStatus.DEPLOYING
-            await registry.update(experiment)
-
-            try:
-                deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
-                experiment.deployed_environment = deployed
+        try:
+            container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
+            if container_id:
+                experiment.c2c_container_id = container_id
                 await registry.update(experiment)
-            except NotImplementedError:
-                experiment.deployed_environment = None
-                exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
-            
-            await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
-        
-        experiment.status = ExperimentStatus.READY
-        await registry.update(experiment)
-    except Exception:
-        exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)
-        return
+            if local_c2c_url:
+                await experiment.attacker.wait_c2c_ready(local_c2c_url, experiment.experiment_name)
+        except Exception:
+            exp_log.exception("Failed to start C2 server for '%s'", experiment.experiment_name)
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            await _teardown(experiment)
+            return
 
-    try:
-        if local_c2c_url:
-            await experiment.attacker.wait_c2c_agent(local_c2c_url, experiment.experiment_name)
-    except Exception:
-        exp_log.exception("No agent beaconed for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
+        experiment.deployed_environment = DeployedEnvironment(
+            topology_spec=str(cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"),
+        )
+        await registry.update(experiment)
+
+        mgmt_ip = None
+        try:
+            async with _openstack_semaphore:
+
+                experiment.status = ExperimentStatus.DEPLOYING
+                await registry.update(experiment)
+
+                try:
+                    deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
+                    experiment.deployed_environment = deployed
+                    await registry.update(experiment)
+                except NotImplementedError:
+                    experiment.deployed_environment = None
+                    exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
+
+                await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
+
+            experiment.status = ExperimentStatus.READY
+            await registry.update(experiment)
+        except Exception:
+            exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            await _teardown(experiment)
+            return
+
+        try:
+            if local_c2c_url:
+                await experiment.attacker.wait_c2c_agent(local_c2c_url, experiment.experiment_name)
+        except Exception:
+            exp_log.exception("No agent beaconed for '%s'", experiment.experiment_name)
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            await _teardown(experiment)  # disabled for debugging
+            return
+
+        try:
+            process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, c2c_server=kali_c2c_url)
+        except Exception:
+            exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            await _teardown(experiment)  # disabled for debugging
+            return
+
+        experiment.pid = process.pid
+        experiment.status = ExperimentStatus.RUNNING
+        await registry.update(experiment)
+
+        returncode = None
+        try:
+            returncode = await process.wait()
+            status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
+        except Exception:
+            exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
+            status = ExperimentStatus.ERROR
+
+        exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
+        result_file = cfg.output_dir / experiment.experiment_name / "experiment" / "result.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text(json.dumps({"status": status}))
+
+        experiment.status = status
         await registry.update(experiment)
         await _teardown(experiment)  # disabled for debugging
-        return
-
-    try:
-        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, c2c_server=kali_c2c_url)
-    except Exception:
-        exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)  # disabled for debugging
-        return
-
-    experiment.pid = process.pid
-    experiment.status = ExperimentStatus.RUNNING
-    await registry.update(experiment)
-
-    returncode = None
-    try:
-        returncode = await process.wait()
-        status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
-    except Exception:
-        exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
-        status = ExperimentStatus.ERROR
-
-    exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
-    result_file = cfg.output_dir / experiment.experiment_name / "experiment" / "result.json"
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    result_file.write_text(json.dumps({"status": status}))
-
-    experiment.status = status
-    await registry.update(experiment)
-    await _teardown(experiment)  # disabled for debugging
 
 
 app = FastAPI(title="Experiment Manager", lifespan=lifespan)

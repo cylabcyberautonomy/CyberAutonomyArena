@@ -15,6 +15,7 @@ class ExperimentManagerConfig(BaseModel):
     host_ip: str
     output_dir: Path = _HERE / "output"
     registry_path: Path = _HERE / "experiment_registry.yaml"
+    max_concurrent_experiments: int = 40
 
     def get_incalmo_python(self) -> Path:
         return self.incalmo_python or (self.incalmo_dir / ".venv" / "bin" / "python")
