@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -80,15 +81,69 @@ async def _teardown(experiment: Experiment) -> None:
                 await teardown_environment(experiment, cfg)
             except Exception:
                 get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
-                return # if teardown fails, skip registry removal so we can investigate
-        
+                return  # skip registry removal so we can investigate
+
         try:
             await registry.remove(experiment.experiment_name)
         except Exception:
             get_logger(experiment.experiment_name).exception("Failed to remove '%s' from registry", experiment.experiment_name)
-    
+
     except Exception:
         get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
+
+async def _schedule_retry(experiment: Experiment) -> None:
+    if cfg.max_retries <= 0:
+        return
+
+    base = experiment.base_name or experiment.experiment_name
+    next_retry_count = experiment.retry_count + 1
+
+    if next_retry_count > cfg.max_retries:
+        get_logger(experiment.experiment_name).warning(
+            "[%s] Retry budget exhausted (%d/%d), giving up.",
+            experiment.experiment_name, experiment.retry_count, cfg.max_retries,
+        )
+        return
+
+    src = cfg.output_dir / experiment.experiment_name
+    dst = cfg.output_dir / "failed" / experiment.experiment_name
+    src.mkdir(parents=True, exist_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, shutil.move, str(src), str(dst))
+    get_logger(experiment.experiment_name).info(
+        "[%s] Moved failed output to %s", experiment.experiment_name, dst
+    )
+
+    retry_name = f"{base}_{next_retry_count}"
+    now = datetime.now(timezone.utc)
+    retry_experiment = Experiment(
+        experiment_name=retry_name,
+        status=ExperimentStatus.QUEUED,
+        environment_spec=experiment.environment_spec,
+        attacker=experiment.attacker,
+        defender=experiment.defender,
+        retry_count=next_retry_count,
+        base_name=base,
+        created_at=now,
+        updated_at=now,
+    )
+
+    try:
+        await registry.add(retry_experiment)
+    except ValueError:
+        get_logger(experiment.experiment_name).exception(
+            "[%s] Failed to register retry '%s' (name collision?)",
+            experiment.experiment_name, retry_name,
+        )
+        return
+
+    asyncio.create_task(_run_experiment(retry_experiment))
+    get_logger(experiment.experiment_name).info(
+        "[%s] Retry %d/%d scheduled as '%s'",
+        experiment.experiment_name, next_retry_count, cfg.max_retries, retry_name,
+    )
+
 
 async def _run_experiment(experiment: Experiment) -> None:
     async with _experiment_semaphore:
@@ -114,6 +169,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.status = ExperimentStatus.ERROR
             await registry.update(experiment)
             await _teardown(experiment)
+            await _schedule_retry(experiment)
             return
 
         experiment.deployed_environment = DeployedEnvironment(
@@ -145,6 +201,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.status = ExperimentStatus.ERROR
             await registry.update(experiment)
             await _teardown(experiment)
+            await _schedule_retry(experiment)
             return
 
         try:
@@ -154,7 +211,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             exp_log.exception("No agent beaconed for '%s'", experiment.experiment_name)
             experiment.status = ExperimentStatus.ERROR
             await registry.update(experiment)
-            await _teardown(experiment)  # disabled for debugging
+            tore_down = await _teardown(experiment)  # disabled for debugging
+            if tore_down:
+                await _schedule_retry(experiment)
             return
 
         try:
@@ -163,7 +222,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
             experiment.status = ExperimentStatus.ERROR
             await registry.update(experiment)
-            await _teardown(experiment)  # disabled for debugging
+            tore_down = await _teardown(experiment)  # disabled for debugging
+            if tore_down:
+                await _schedule_retry(experiment)
             return
 
         experiment.pid = process.pid
@@ -186,6 +247,8 @@ async def _run_experiment(experiment: Experiment) -> None:
         experiment.status = status
         await registry.update(experiment)
         await _teardown(experiment)  # disabled for debugging
+        if status == ExperimentStatus.ERROR:
+            await _schedule_retry(experiment)
 
 
 app = FastAPI(title="Experiment Manager", lifespan=lifespan)

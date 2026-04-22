@@ -33,5 +33,7 @@ class Experiment(BaseModel):
     deployed_environment: Optional[DeployedEnvironment] = None
     pid: Optional[int] = None
     c2c_container_id: Optional[str] = None
+    retry_count: int = 0
+    base_name: str = ""
     created_at: datetime
     updated_at: datetime
