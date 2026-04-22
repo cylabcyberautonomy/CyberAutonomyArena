@@ -47,7 +47,7 @@ async def run_attacker(
     cfg: ExperimentManagerConfig,
     c2c_server: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
-    config_path = cfg.output_dir / experiment_name / "attacker_config.json"
+    config_path = cfg.output_dir / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     built = attacker.build_config(experiment_name, environment, c2c_server)
     config_path.write_text(json.dumps(built, indent=2))

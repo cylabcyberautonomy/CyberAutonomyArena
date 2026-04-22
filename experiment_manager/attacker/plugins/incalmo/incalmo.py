@@ -58,7 +58,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
         }
 
     async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
-        log_path = cfg.output_dir / experiment_name / "attacker.log"
+        log_path = cfg.output_dir / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
@@ -68,7 +68,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name),
+                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
@@ -96,7 +96,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         }
 
     async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
-        log_path = cfg.output_dir / experiment_name / "attacker.log"
+        log_path = cfg.output_dir / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
@@ -106,7 +106,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name),
+                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,

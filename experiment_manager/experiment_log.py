@@ -12,7 +12,7 @@ def init_logger(experiment_name: str, output_dir: Path) -> logging.Logger:
     """Create and register a file logger for an experiment. Call once when cfg is available."""
     if experiment_name in _loggers:
         return _loggers[experiment_name]
-    log_path = output_dir / experiment_name / "experiment.log"
+    log_path = output_dir / experiment_name / "experiment" / "experiment.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"experiment.{experiment_name}")
     logger.setLevel(logging.INFO)
@@ -31,7 +31,7 @@ def init_attacker_logger(experiment_name: str, output_dir: Path) -> logging.Logg
     """Create and register a file logger writing to attacker.log."""
     if experiment_name in _attacker_loggers:
         return _attacker_loggers[experiment_name]
-    log_path = output_dir / experiment_name / "attacker.log"
+    log_path = output_dir / experiment_name / "attacker" / "attacker.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"attacker.{experiment_name}")
     logger.setLevel(logging.INFO)

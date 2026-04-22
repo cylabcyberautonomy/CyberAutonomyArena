@@ -58,7 +58,8 @@ async def _clean_slate() -> None:
 async def _teardown(experiment: Experiment) -> None:
     if experiment.attacker and experiment.c2c_container_id:
         try:
-            c2c_log_path = cfg.output_dir / experiment.experiment_name / "c2c_server.log"
+            c2c_log_path = cfg.output_dir / experiment.experiment_name / "attacker" / "c2c_server.log"
+            c2c_log_path.parent.mkdir(parents=True, exist_ok=True)
             proc = await asyncio.create_subprocess_exec(
                 "docker", "logs", experiment.c2c_container_id,
                 stdout=open(c2c_log_path, "w"), stderr=asyncio.subprocess.STDOUT,
@@ -82,7 +83,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     name = experiment.experiment_name
     exp_log = init_logger(name, cfg.output_dir)
 
-    config_path = cfg.output_dir / name / "experiment_config.json"
+    config_path = cfg.output_dir / name / "experiment" / "experiment_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(experiment.model_dump_json(indent=2))
 
@@ -108,34 +109,30 @@ async def _run_experiment(experiment: Experiment) -> None:
     )
     await registry.update(experiment)
 
-    experiment.status = ExperimentStatus.DEPLOYING
-    await registry.update(experiment)
-
     mgmt_ip = None
     try:
         async with _openstack_semaphore:
-            deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
-        experiment.deployed_environment = deployed
-        await registry.update(experiment)
-    except NotImplementedError:
-        experiment.deployed_environment = None
-        exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
-    except Exception:
-        exp_log.exception("Failed to provision environment for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)  # disabled for debugging
-        return
 
-    try:
-        await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
+            experiment.status = ExperimentStatus.DEPLOYING
+            await registry.update(experiment)
+
+            try:
+                deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
+                experiment.deployed_environment = deployed
+                await registry.update(experiment)
+            except NotImplementedError:
+                experiment.deployed_environment = None
+                exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
+            
+            await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
+        
         experiment.status = ExperimentStatus.READY
         await registry.update(experiment)
     except Exception:
-        exp_log.exception("Failed to configure environment for '%s'", experiment.experiment_name)
+        exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
         experiment.status = ExperimentStatus.ERROR
         await registry.update(experiment)
-        await _teardown(experiment)  # disabled for debugging
+        await _teardown(experiment)
         return
 
     try:
@@ -170,7 +167,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         status = ExperimentStatus.ERROR
 
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
-    result_file = cfg.output_dir / experiment.experiment_name / "result.json"
+    result_file = cfg.output_dir / experiment.experiment_name / "experiment" / "result.json"
     result_file.parent.mkdir(parents=True, exist_ok=True)
     result_file.write_text(json.dumps({"status": status}))
 

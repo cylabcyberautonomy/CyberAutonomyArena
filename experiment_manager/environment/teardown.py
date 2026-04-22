@@ -16,7 +16,7 @@ def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None
     cli = mhbench_dir / "cli.py"
 
     init_logger(name, cfg.output_dir)
-    mhbench_log = cfg.output_dir / name / "mhbench.log"
+    mhbench_log = cfg.output_dir / name / "environment" / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
     log(name, f"Tearing down environment via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
