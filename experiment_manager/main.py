@@ -76,7 +76,11 @@ async def _teardown(experiment: Experiment) -> None:
 
     try:
         async with _openstack_semaphore:
-            await teardown_environment(experiment, cfg)
+            try:
+                await teardown_environment(experiment, cfg)
+            except Exception:
+                get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
+                return # if teardown fails, skip registry removal so we can investigate
         
         try:
             await registry.remove(experiment.experiment_name)
