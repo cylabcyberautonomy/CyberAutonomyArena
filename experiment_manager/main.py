@@ -194,8 +194,6 @@ async def _run_experiment(experiment: Experiment) -> None:
 
                 await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
 
-            experiment.status = ExperimentStatus.READY
-            await registry.update(experiment)
         except Exception:
             exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
             experiment.status = ExperimentStatus.ERROR

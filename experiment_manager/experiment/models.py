@@ -10,7 +10,6 @@ from ..environment import DeployedEnvironment
 class ExperimentStatus(str, Enum):
     QUEUED = "Queued"
     DEPLOYING = "Deploying"
-    READY = "Ready"
     RUNNING = "Running"
     ERROR = "Error"
     FINISHED = "Finished"
