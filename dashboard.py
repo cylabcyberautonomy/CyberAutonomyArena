@@ -16,7 +16,7 @@ def fmt_time(raw):
         return "—"
     try:
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(EST)
-        return dt.strftime("%-I:%M %p EST")
+        return dt.strftime("%b %-d, %-I:%M %p EST")
     except Exception:
         return str(raw)
 
@@ -64,7 +64,7 @@ def render_html(experiments):
         env = e.get("environment_spec", "—")
         attacker = (e.get("attacker") or {}).get("strategy", "—")
         updated = fmt_time(e.get("updated_at"))
-        pid = e.get("pid") or "—"
+        created = fmt_time(e.get("created_at"))
         retries = e.get("retry_count", 0)
         icon, color, bg = STATUS_STYLE.get(status, ("⬜", "#6b7280", "#f3f4f6"))
         badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {color}">{icon} {status}</span>'
@@ -75,7 +75,7 @@ def render_html(experiments):
           <td>{badge}{retry_html}</td>
           <td>{env}</td>
           <td>{attacker}</td>
-          <td>{pid}</td>
+          <td class="time-cell">{created}</td>
           <td class="time-cell">{updated}</td>
         </tr>"""
 
@@ -152,7 +152,7 @@ def _inner_html(total, summary_cards, rows):
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Name</th><th>Status</th><th>Environment</th><th>Attacker</th><th>PID</th><th>Updated</th>
+        <th>Name</th><th>Status</th><th>Environment</th><th>Attacker</th><th>Created</th><th>Updated</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -189,12 +189,12 @@ class Handler(BaseHTTPRequestHandler):
                 env = e.get("environment_spec", "—")
                 attacker = (e.get("attacker") or {}).get("strategy", "—")
                 updated = fmt_time(e.get("updated_at"))
-                pid = e.get("pid") or "—"
+                created = fmt_time(e.get("created_at"))
                 retries = e.get("retry_count", 0)
                 icon, color, bg = STATUS_STYLE.get(status, ("⬜", "#6b7280", "#f3f4f6"))
                 badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {color}">{icon} {status}</span>'
                 retry_html = f' <span class="retry-badge">↩ {retries}</span>' if retries else ""
-                rows += f'<tr><td class="name-cell">{name}</td><td>{badge}{retry_html}</td><td>{env}</td><td>{attacker}</td><td>{pid}</td><td class="time-cell">{updated}</td></tr>'
+                rows += f'<tr><td class="name-cell">{name}</td><td>{badge}{retry_html}</td><td>{env}</td><td>{attacker}</td><td class="time-cell">{created}</td><td class="time-cell">{updated}</td></tr>'
             payload = json.dumps({"html": _inner_html(total, summary_cards, rows)})
             self._respond(200, "application/json", payload)
         else:
