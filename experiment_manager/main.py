@@ -83,11 +83,6 @@ async def _teardown(experiment: Experiment) -> None:
                 get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
                 return  # skip registry removal so we can investigate
 
-        try:
-            await registry.remove(experiment.experiment_name)
-        except Exception:
-            get_logger(experiment.experiment_name).exception("Failed to remove '%s' from registry", experiment.experiment_name)
-
     except Exception:
         get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
 
