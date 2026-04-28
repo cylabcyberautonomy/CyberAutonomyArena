@@ -265,13 +265,6 @@ async def _schedule_retry(experiment: Experiment) -> None:
     base = experiment.base_name or experiment.experiment_name
     next_retry_count = experiment.retry_count + 1
 
-    if next_retry_count > cfg.max_retries:
-        get_logger(experiment.experiment_name).warning(
-            "[%s] Retry budget exhausted (%d/%d), giving up.",
-            experiment.experiment_name, experiment.retry_count, cfg.max_retries,
-        )
-        return
-
     src = cfg.output_dir / experiment.experiment_name
     dst = cfg.output_dir / "failed" / experiment.experiment_name
     src.mkdir(parents=True, exist_ok=True)
@@ -283,6 +276,13 @@ async def _schedule_retry(experiment: Experiment) -> None:
     get_logger(experiment.experiment_name).info(
         "[%s] Moved failed output to %s", experiment.experiment_name, dst
     )
+
+    if next_retry_count > cfg.max_retries:
+        get_logger(experiment.experiment_name).warning(
+            "[%s] Retry budget exhausted (%d/%d), giving up.",
+            experiment.experiment_name, experiment.retry_count, cfg.max_retries,
+        )
+        return
 
     retry_name = f"{base}_{next_retry_count}"
     now = datetime.now(timezone.utc)
