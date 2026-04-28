@@ -6,10 +6,36 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
+from pydantic import field_validator
+
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from ....config import ExperimentManagerConfig
 from ....environment import DeployedEnvironment
+from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
+
+_LLM_GROUPS = [
+    {"group_label": "Anthropic", "options": [
+        "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6",
+        "claude-4.5-sonnet", "claude-3.7-sonnet", "claude-3.5-sonnet", "claude-3.5-haiku",
+    ]},
+    {"group_label": "OpenAI", "options": [
+        "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+        "gpt-4o", "gpt-4o-mini",
+        "o4-mini", "o3-mini", "o3",
+        "gpt-5", "gpt-5-mini",
+    ]},
+    {"group_label": "Google", "options": [
+        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
+    ]},
+    {"group_label": "DeepSeek", "options": ["deepseek-v3", "deepseek-r1"]},
+]
+
+_ABSTRACTION_LEVELS = [
+    "incalmo", "shell", "low_level_actions", "no_services",
+    "agent_scan", "agent_lateral_move", "agent_privilege_escalation",
+    "agent_exfiltrate_data", "agent_find_information", "agent_all",
+]
 
 # Bypasses ConfigService (which hardcodes ./config/config.json) by loading
 # config from a path passed as argv[1].
@@ -48,6 +74,29 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
     type: Literal["incalmo_strategy"]
     strategy: str  # e.g. "GraphSearch", "Darkside", "EquifaxStrategy"
 
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _normalize_strategy(cls, value):
+        if isinstance(value, list):
+            return value[0] if value else "GraphSearch"
+        return value
+
+    @classmethod
+    def ui_schema(cls) -> PluginUISchema:
+        return {
+            "config_type": "incalmo_strategy",
+            "label": "Incalmo Strategy",
+            "cartesian_product": False,
+            "fields": [
+                {
+                    "field_type": "flat_checkboxes",
+                    "label": "Strategy",
+                    "key": "strategy",
+                    "options": ["GraphSearch", "Darkside", "EquifaxStrategy"],
+                },
+            ],
+        }
+
     def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
         return {
             "name": experiment_name,
@@ -81,6 +130,34 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     planning_llm: str
     execution_llm: str
     abstraction: str = "incalmo"
+
+    @classmethod
+    def ui_schema(cls) -> PluginUISchema:
+        return {
+            "config_type": "incalmo_llm",
+            "label": "Incalmo LLM",
+            "cartesian_product": True,
+            "fields": [
+                {
+                    "field_type": "grouped_checkboxes",
+                    "label": "Planning LLM",
+                    "key": "planning_llm",
+                    "groups": _LLM_GROUPS,
+                },
+                {
+                    "field_type": "grouped_checkboxes",
+                    "label": "Execution LLM",
+                    "key": "execution_llm",
+                    "groups": _LLM_GROUPS,
+                },
+                {
+                    "field_type": "flat_checkboxes",
+                    "label": "Abstraction",
+                    "key": "abstraction",
+                    "options": _ABSTRACTION_LEVELS,
+                },
+            ],
+        }
 
     def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
         return {

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
 from ...environment import DeployedEnvironment
+from ...ui_schema import PluginUISchema
 
 
 class AttackerPlugin(BaseModel):
@@ -16,6 +17,10 @@ class AttackerPlugin(BaseModel):
         super().__init_subclass__(**kwargs)
         if config_type is not None:
             AttackerPlugin._registry[config_type] = cls
+
+    @classmethod
+    def ui_schema(cls) -> PluginUISchema:
+        raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
 
     @abstractmethod
     def build_config(
