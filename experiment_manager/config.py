@@ -17,9 +17,14 @@ class ExperimentManagerConfig(BaseModel):
     registry_path: Path = _HERE / "experiment_registry.yaml"
     max_concurrent_experiments: int = 1
     max_retries: int = 3
+    deception_dir: Optional[Path] = None
+    deception_python: Optional[Path] = None
 
     def get_incalmo_python(self) -> Path:
         return self.incalmo_python or (self.incalmo_dir / ".venv" / "bin" / "python")
+
+    def get_deception_python(self) -> Path:
+        return self.deception_python or (self.deception_dir / ".venv" / "bin" / "python")
 
     @classmethod
     def load(cls, path: Path = _DEFAULT_CONFIG_PATH) -> "ExperimentManagerConfig":
