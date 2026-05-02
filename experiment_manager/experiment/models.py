@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from datetime import datetime
 
 from ..attacker import AttackerConfig
@@ -35,8 +35,16 @@ class Experiment(BaseModel):
     c2c_container_id: Optional[str] = None
     retry_count: int = 0
     base_name: str = ""
+    vcpus_reserved: Optional[int] = None
+    ram_mb_reserved: Optional[int] = None
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _default_updated_at(self) -> "Experiment":
+        if self.updated_at is None:
+            self.updated_at = self.created_at
+        return self
     environment_deploy_started_at: Optional[datetime] = None
     environment_deploy_finished_at: Optional[datetime] = None
     defender_started_at: Optional[datetime] = None

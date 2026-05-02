@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from .attacker import run_attacker
 from .defender import run_defender
 from .environment import DeployedEnvironment
+from .environment.capacity import CapacityTracker, count_vm_specs
 from .environment.deployer import provision_environment, configure_environment
 from .environment.teardown import teardown_environment
 from .config import ExperimentManagerConfig
@@ -59,16 +60,20 @@ _PRIORITY_DEPLOY = 1
 cfg: ExperimentManagerConfig
 registry: Registry
 _openstack_lock: _PriorityLock
+_capacity: CapacityTracker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_lock
+    global cfg, registry, _openstack_lock, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
+    os.environ["OS_CLOUD"] = cfg.os_cloud
     registry = Registry(cfg.registry_path)
-    _openstack_lock = _PriorityLock(cfg.max_concurrent_experiments)
+    _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)
     await _clean_slate()
+    _capacity = CapacityTracker()
+    await _capacity.initialize()
     yield
 
 
@@ -251,6 +256,8 @@ async def _teardown(experiment: Experiment) -> None:
                 await teardown_environment(experiment, cfg)
                 experiment.teardown_finished_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
+                if experiment.vcpus_reserved is not None:
+                    _capacity.release(experiment.experiment_name)
             except Exception:
                 get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
                 return  # skip registry removal so we can investigate
@@ -347,6 +354,14 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     mgmt_ip = None
     try:
+        topology_path = cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
+        vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir)
+        vcpus_reserved, ram_reserved = await _capacity.reserve(vm_specs, name)
+        experiment.vcpus_reserved = vcpus_reserved
+        experiment.ram_mb_reserved = ram_reserved
+        config_path.write_text(experiment.model_dump_json(indent=2))
+        await registry.update(experiment)
+
         async with _openstack_lock.acquire(_PRIORITY_DEPLOY):
 
             experiment.status = ExperimentStatus.DEPLOYING

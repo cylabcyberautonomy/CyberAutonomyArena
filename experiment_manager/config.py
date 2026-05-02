@@ -15,7 +15,8 @@ class ExperimentManagerConfig(BaseModel):
     host_ip: str
     output_dir: Path = _HERE / "output"
     registry_path: Path = _HERE / "experiment_registry.yaml"
-    max_concurrent_experiments: int = 1
+    os_cloud: str = "openstack"
+    max_concurrent_openstack_ops: int = 3
     max_retries: int = 3
     deception_dir: Optional[Path] = None
     deception_python: Optional[Path] = None
