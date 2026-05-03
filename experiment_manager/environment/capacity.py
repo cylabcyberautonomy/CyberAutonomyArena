@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -49,109 +48,67 @@ async def count_vm_specs(topology_path: Path, mhbench_dir: Path) -> list[tuple[i
     return list(specs)
 
 
-@dataclass
-class _HypervisorState:
-    name: str
-    free_vcpus: int
-    free_ram_mb: int
-
-
-async def _query_hypervisor_states() -> list[_HypervisorState]:
+async def _query_cluster_capacity() -> tuple[int, int]:
+    """Return (free_vcpus, free_ram_mb) for the whole cluster."""
     proc = await asyncio.create_subprocess_exec(
-        "openstack", "hypervisor", "list", "--long", "-f", "json",
+        "openstack", "hypervisor", "stats", "show", "-f", "json",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
     stdout, _ = await proc.communicate()
-    result = []
-    for h in json.loads(stdout.decode()):
-        if h.get("State") == "up" and h.get("Status") == "enabled":
-            result.append(_HypervisorState(
-                name=h["Hypervisor Hostname"],
-                free_vcpus=int(h["vCPUs"]) - int(h["vCPUs Used"]),
-                free_ram_mb=int(h["Memory MB"]) - int(h["Memory MB Used"]),
-            ))
-    return result
-
-
-def _simulate_placement(
-    hypervisors: list[_HypervisorState],
-    vm_specs: list[tuple[int, int]],
-) -> list[int] | None:
-    """
-    Greedy placement mirroring Nova's RAM weigher: each VM goes to the host
-    with the most free RAM that can fit it. Returns per-VM hypervisor indices,
-    or None if any VM cannot be placed.
-    """
-    free = [(h.free_vcpus, h.free_ram_mb) for h in hypervisors]
-    assignment: list[int] = []
-    for vcpus, ram in vm_specs:
-        best = max(
-            ((i, fv, fr) for i, (fv, fr) in enumerate(free) if fv >= vcpus and fr >= ram),
-            key=lambda x: x[2],
-            default=None,
-        )
-        if best is None:
-            return None
-        i, fv, fr = best
-        free[i] = (fv - vcpus, fr - ram)
-        assignment.append(i)
-    return assignment
+    data = json.loads(stdout.decode())
+    free_vcpus = int(data["vcpus"]) - int(data["vcpus_used"])
+    free_ram_mb = int(data["free_ram_mb"])
+    return free_vcpus, free_ram_mb
 
 
 class CapacityTracker:
-    """Tracks per-hypervisor cluster capacity.
+    """Tracks cluster-wide free vCPUs and RAM.
 
-    Simulates Nova's greedy RAM-weigher placement to decide whether an
-    experiment's VMs can be scheduled before allowing deployment to proceed.
+    Checks aggregate capacity before allowing deployment to proceed.
     Re-queries OpenStack after each teardown to stay in sync with actual state.
     """
 
     def __init__(self) -> None:
-        self._hypervisors: list[_HypervisorState] = []
+        self._free_vcpus: int = 0
+        self._free_ram_mb: int = 0
         self._condition = asyncio.Condition()
 
     async def initialize(self) -> None:
-        self._hypervisors = await _query_hypervisor_states()
+        self._free_vcpus, self._free_ram_mb = await _query_cluster_capacity()
         logger.info(
-            "Cluster capacity at startup: %d hypervisors, %d vCPUs / %d MB RAM free",
-            len(self._hypervisors),
-            sum(h.free_vcpus for h in self._hypervisors),
-            sum(h.free_ram_mb for h in self._hypervisors),
+            "Cluster capacity at startup: %d vCPUs / %d MB RAM free",
+            self._free_vcpus, self._free_ram_mb,
         )
 
     async def reserve(self, vm_specs: list[tuple[int, int]], experiment_name: str) -> tuple[int, int]:
-        """Block until all VMs can be placed; return (total_vcpus, total_ram_mb) reserved."""
+        """Block until the cluster has enough aggregate capacity; return (total_vcpus, total_ram_mb) reserved."""
         total_vcpus = sum(v for v, _ in vm_specs)
         total_ram = sum(r for _, r in vm_specs)
         async with self._condition:
             while True:
-                assignment = _simulate_placement(self._hypervisors, vm_specs)
-                if assignment is not None:
-                    for idx, (vcpus, ram) in zip(assignment, vm_specs):
-                        self._hypervisors[idx].free_vcpus -= vcpus
-                        self._hypervisors[idx].free_ram_mb -= ram
+                if self._free_vcpus >= total_vcpus and self._free_ram_mb >= total_ram:
+                    self._free_vcpus -= total_vcpus
+                    self._free_ram_mb -= total_ram
                     logger.info(
                         "[%s] Capacity reserved: %d vCPUs / %d MB RAM across %d VMs",
                         experiment_name, total_vcpus, total_ram, len(vm_specs),
                     )
                     return total_vcpus, total_ram
                 logger.info(
-                    "[%s] Waiting for capacity: need to place %d VMs (%d vCPUs / %d MB RAM total)",
-                    experiment_name, len(vm_specs), total_vcpus, total_ram,
+                    "[%s] Waiting for capacity: need %d vCPUs / %d MB RAM, cluster has %d vCPUs / %d MB RAM free",
+                    experiment_name, total_vcpus, total_ram, self._free_vcpus, self._free_ram_mb,
                 )
                 await self._condition.wait()
 
     def release(self, experiment_name: str) -> None:
-        """Re-query actual hypervisor state from OpenStack and wake waiting experiments."""
+        """Re-query actual cluster capacity from OpenStack and wake waiting experiments."""
         async def _release() -> None:
             async with self._condition:
-                self._hypervisors = await _query_hypervisor_states()
+                self._free_vcpus, self._free_ram_mb = await _query_cluster_capacity()
                 logger.info(
                     "[%s] Capacity released; cluster now: %d vCPUs / %d MB RAM free",
-                    experiment_name,
-                    sum(h.free_vcpus for h in self._hypervisors),
-                    sum(h.free_ram_mb for h in self._hypervisors),
+                    experiment_name, self._free_vcpus, self._free_ram_mb,
                 )
                 self._condition.notify_all()
 
