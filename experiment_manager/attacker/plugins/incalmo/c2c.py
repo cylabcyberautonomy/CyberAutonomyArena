@@ -61,10 +61,12 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
     )
     await cleanup.wait()
 
+    (cfg.incalmo_dir / "state_store.db").unlink(missing_ok=True)
+
     proc = await asyncio.create_subprocess_exec(
         "docker", "run", "-d",
         "--name", name,
-        "-p", "0.0.0.0::8888",
+        "-p", "0.0.0.0:8888:8888",
         "-v", f"{cfg.incalmo_dir}:/incalmo",
         _C2C_IMAGE,
         stdout=asyncio.subprocess.PIPE,

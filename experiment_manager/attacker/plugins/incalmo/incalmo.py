@@ -117,7 +117,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name / "attacker"),
+                "INCALMO_OUTPUT_DIR": str(cfg.incalmo_dir / "output" / experiment_name),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
@@ -183,7 +183,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.output_dir / experiment_name / "attacker"),
+                "INCALMO_OUTPUT_DIR": str(cfg.incalmo_dir / "output" / experiment_name),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,

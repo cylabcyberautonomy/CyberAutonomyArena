@@ -56,6 +56,7 @@ class _PriorityLock:
 
 _PRIORITY_TEARDOWN = 0
 _PRIORITY_DEPLOY = 1
+_ACTIVE_STATUSES = {ExperimentStatus.DEPLOYING, ExperimentStatus.RUNNING}
 
 cfg: ExperimentManagerConfig
 registry: Registry
@@ -230,7 +231,7 @@ async def _clean_slate() -> None:
             logger.exception("Failed to remove '%s' from registry", experiment.experiment_name)
 
 
-async def _teardown(experiment: Experiment) -> None:
+async def _teardown(experiment: Experiment, delete_c2: bool = True) -> None:
     experiment.teardown_started_at = datetime.now(timezone.utc)
     await registry.update(experiment)
 
@@ -245,10 +246,17 @@ async def _teardown(experiment: Experiment) -> None:
             await proc.wait()
         except Exception:
             get_logger(experiment.experiment_name).exception("Failed to save C2 container logs for '%s'", experiment.experiment_name)
-        try:
-            await experiment.attacker.stop_c2c(experiment.c2c_container_id)
-        except Exception:
-            get_logger(experiment.experiment_name).exception("Failed to stop C2 container for '%s'", experiment.experiment_name)
+        if delete_c2:
+            try:
+                await experiment.attacker.stop_c2c(experiment.c2c_container_id)
+            except Exception:
+                get_logger(experiment.experiment_name).exception("Failed to stop C2 container for '%s'", experiment.experiment_name)
+        else:
+            get_logger(experiment.experiment_name).info(
+                "Preserving C2 container %s for '%s' (delete_c2=False)",
+                experiment.c2c_container_id,
+                experiment.experiment_name,
+            )
 
     try:
         async with _openstack_lock.acquire(_PRIORITY_TEARDOWN):
@@ -264,6 +272,45 @@ async def _teardown(experiment: Experiment) -> None:
 
     except Exception:
         get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
+
+
+async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
+    """Stop stale C2 containers before launching a new C2 for this experiment."""
+    if not experiment.attacker:
+        return
+
+    for previous in registry.load():
+        if not previous.c2c_container_id:
+            continue
+
+        # Keep currently active experiments untouched. Clean up stale/finished ones,
+        # and always clean up leftovers with the same experiment name.
+        should_stop = (
+            previous.experiment_name == experiment.experiment_name
+            or previous.status not in _ACTIVE_STATUSES
+        )
+        if not should_stop:
+            continue
+
+        stopper = previous.attacker or experiment.attacker
+        if not stopper:
+            continue
+
+        try:
+            await stopper.stop_c2c(previous.c2c_container_id)
+            get_logger(experiment.experiment_name).info(
+                "Stopped stale C2 container %s from '%s'",
+                previous.c2c_container_id,
+                previous.experiment_name,
+            )
+            previous.c2c_container_id = None
+            await registry.update(previous)
+        except Exception:
+            get_logger(experiment.experiment_name).exception(
+                "Failed to stop stale C2 container %s from '%s'",
+                previous.c2c_container_id,
+                previous.experiment_name,
+            )
 
 async def _schedule_retry(experiment: Experiment) -> None:
     if cfg.max_retries <= 0:
@@ -331,6 +378,11 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     kali_c2c_url = None
     local_c2c_url = None
+
+    try:
+        await _teardown_stale_c2_before_launch(experiment)
+    except Exception:
+        exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
 
     try:
         container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
