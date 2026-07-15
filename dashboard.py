@@ -878,7 +878,7 @@ def render_html(experiments):
                 const parts = [namePrefix, atkItem.slug, defItem.slug, envStem, String(i)].filter(Boolean);
                 const expName = parts.join('_');
                 const payload = {{ experiment_name: expName, environment: envSpec,
-                                   attacker: atkItem.config, defender: defItem.config }};
+                                   attacker: atkItem.config, defender: defItem.config, trial: i }};
                 try {{
                   const resp = await fetch('/submit', {{
                     method: 'POST',
