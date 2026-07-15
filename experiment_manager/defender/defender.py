@@ -8,7 +8,7 @@ from pydantic_core import core_schema
 from ..config import ExperimentManagerConfig
 from ..environment import DeployedEnvironment
 from .plugins.base import DefenderPlugin
-from ..experiment_log import log
+from ..experiment_log import log, output_root
 from . import plugins  # noqa: F401 — triggers auto-discovery
 
 
@@ -46,12 +46,12 @@ async def run_defender(
     experiment_name: str,
     cfg: ExperimentManagerConfig,
 ) -> asyncio.subprocess.Process:
-    config_path = cfg.output_dir / experiment_name / "defender" / "defender_config.json"
+    config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     built = defender.build_config(experiment_name, environment)
     built["deception_dir"] = str(cfg.deception_dir)
     built["management_ip"] = cfg.host_ip
-    built["log_dir"] = str(cfg.output_dir / experiment_name / "defender")
+    built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")
     process = await defender.run(config_path, experiment_name, cfg)

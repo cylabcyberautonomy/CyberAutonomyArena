@@ -5,7 +5,7 @@ import subprocess
 
 from ..config import ExperimentManagerConfig
 from ..experiment import Experiment
-from ..experiment_log import init_logger, log
+from ..experiment_log import init_logger, log, output_root
 
 
 def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
@@ -15,8 +15,8 @@ def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
 
-    init_logger(name, cfg.output_dir)
-    mhbench_log = cfg.output_dir / name / "environment" / "mhbench.log"
+    init_logger(name, output_root(name, cfg))
+    mhbench_log = output_root(name, cfg) / name / "environment" / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
     log(name, f"Tearing down environment via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:

@@ -9,7 +9,7 @@ from typing import Optional
 from ..config import ExperimentManagerConfig
 from .models import DeployedEnvironment
 from ..experiment import Experiment
-from ..experiment_log import init_logger, log
+from ..experiment_log import init_logger, log, output_root
 
 
 def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
@@ -32,7 +32,7 @@ def _provision_sync(
     topology_path = mhbench_dir / "environments" / f"{environment_spec}.json"
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
-    provision_result_path = cfg.output_dir / experiment_name / "environment" / "provision_result.json"
+    provision_result_path = output_root(experiment_name, cfg) / experiment_name / "environment" / "provision_result.json"
 
     cmd = [
         str(python), str(cli), "provision", str(topology_path),
@@ -42,8 +42,8 @@ def _provision_sync(
     if c2c_url:
         cmd += ["--c2c-url", c2c_url]
 
-    init_logger(experiment_name, cfg.output_dir)
-    mhbench_log = cfg.output_dir / experiment_name / "environment" / "mhbench.log"
+    init_logger(experiment_name, output_root(experiment_name, cfg))
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "environment" / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
     log(experiment_name, f"Provisioning environment via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
@@ -87,7 +87,7 @@ def _configure_sync(
     if c2c_url:
         cmd += ["--c2c-url", c2c_url]
 
-    mhbench_log = cfg.output_dir / experiment_name / "environment" / "mhbench.log"
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "environment" / "mhbench.log"
     log(experiment_name, "Running Ansible configuration via MHBench CLI...")
     with open(mhbench_log, "a") as lf:
         result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)

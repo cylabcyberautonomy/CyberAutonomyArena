@@ -8,7 +8,7 @@ from pydantic_core import core_schema
 from ..config import ExperimentManagerConfig
 from ..environment import DeployedEnvironment
 from .plugins.base import AttackerPlugin
-from ..experiment_log import log
+from ..experiment_log import log, output_root
 from . import plugins  # noqa: F401 — triggers auto-discovery
 
 
@@ -47,7 +47,7 @@ async def run_attacker(
     cfg: ExperimentManagerConfig,
     c2c_server: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
-    config_path = cfg.output_dir / experiment_name / "attacker" / "attacker_config.json"
+    config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     built = attacker.build_config(experiment_name, environment, c2c_server)
     config_path.write_text(json.dumps(built, indent=2))

@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
+from ....experiment_log import output_root
 from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
@@ -72,7 +73,7 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
-        log_path = cfg.output_dir / experiment_name / "defender" / "defender.log"
+        log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         python = str(cfg.get_deception_python())
