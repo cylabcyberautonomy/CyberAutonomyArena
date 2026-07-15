@@ -12,6 +12,7 @@ class ExperimentStatus(str, Enum):
     QUEUED = "Queued"
     DEPLOYING = "Deploying"
     RUNNING = "Running"
+    RETRYING = "Retrying"   # non-terminal: an attempt failed but the harness is auto-retrying it in place
     ERROR = "Error"
     FINISHED = "Finished"
 
@@ -22,6 +23,9 @@ class ExperimentSpecs(BaseModel):
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
     c2c_server: Optional[str] = None  # TEST ONLY: bypasses C2 container startup
+    trial: int = 0
+    output_dir: Optional[str] = None  # write this experiment's output tree here instead of cfg.output_dir
+    teardown: bool = True  # set False to leave the env + C2 standing (success AND failure) to run an exploit by hand
 
 
 class Experiment(BaseModel):
@@ -37,6 +41,7 @@ class Experiment(BaseModel):
     base_name: str = ""
     vcpus_reserved: Optional[int] = None
     ram_mb_reserved: Optional[int] = None
+    teardown: bool = True
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -53,3 +58,4 @@ class Experiment(BaseModel):
     attacker_finished_at: Optional[datetime] = None
     teardown_started_at: Optional[datetime] = None
     teardown_finished_at: Optional[datetime] = None
+    trial: int = 0

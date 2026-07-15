@@ -18,7 +18,7 @@ from .environment.deployer import provision_environment, configure_environment
 from .environment.teardown import teardown_environment
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
-from .experiment_log import get_logger, init_logger, log
+from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ async def lifespan(app: FastAPI):
     _capacity = CapacityTracker()
     await _capacity.initialize()
     yield
+    await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
 
 
 async def _openstack_clean_slate() -> None:
@@ -231,13 +232,36 @@ async def _clean_slate() -> None:
             logger.exception("Failed to remove '%s' from registry", experiment.experiment_name)
 
 
-async def _teardown(experiment: Experiment, delete_c2: bool = True) -> None:
+async def _shutdown_cleanup() -> None:
+    """On Ctrl-C / SIGTERM: leave nothing behind. Kill stray ansible (MHBench provision/configure children,
+    which aren't tracked as PIDs), then the same clean-slate startup runs (attacker procs → C2 containers →
+    OpenStack teardown except external), then flush all logs."""
+    try:  # ponytail: blunt pkill — this is a dedicated experiment host; narrow the pattern if it ever isn't
+        proc = await asyncio.create_subprocess_exec(
+            "pkill", "-9", "-f", "ansible",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
+    except Exception:
+        logger.exception("Failed to kill ansible processes on shutdown")
+    try:
+        await _clean_slate()  # attacker procs, C2 containers, OpenStack clean-slate (external survives)
+    except Exception:
+        logger.exception("Clean-slate on shutdown failed")
+    logging.shutdown()  # flush + close every log handler so the run's logs are fully dumped to disk
+
+
+async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # True iff the env was cleanly destroyed
+    if not experiment.teardown:  # leave env + C2 standing to run an exploit by hand
+        get_logger(experiment.experiment_name).info(
+            "teardown=False — preserving environment + C2 for '%s'", experiment.experiment_name
+        )
+        return False  # env NOT destroyed: stops _handle_failure from redeploying over the standing host
     experiment.teardown_started_at = datetime.now(timezone.utc)
     await registry.update(experiment)
 
     if experiment.attacker and experiment.c2c_container_id:
         try:
-            c2c_log_path = cfg.output_dir / experiment.experiment_name / "attacker" / "c2c_server.log"
+            c2c_log_path = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "attacker" / "c2c_server.log"
             c2c_log_path.parent.mkdir(parents=True, exist_ok=True)
             proc = await asyncio.create_subprocess_exec(
                 "docker", "logs", experiment.c2c_container_id,
@@ -266,12 +290,14 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> None:
                 await registry.update(experiment)
                 if experiment.vcpus_reserved is not None:
                     _capacity.release(experiment.experiment_name)
+                return True
             except Exception:
                 get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
-                return  # skip registry removal so we can investigate
+                return False  # env not cleanly destroyed — caller must not redeploy over it
 
     except Exception:
         get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
+    return False
 
 
 async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
@@ -312,92 +338,53 @@ async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
                 previous.experiment_name,
             )
 
-async def _schedule_retry(experiment: Experiment) -> None:
-    if cfg.max_retries <= 0:
-        return
+async def _handle_failure(experiment: Experiment) -> None:
+    """One attempt failed. Tear it down, then retry IN PLACE (same name, so the polling caller keeps
+    tracking it) as status RETRYING — until the retry budget is spent, at which point escalate a terminal
+    ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling."""
+    name = experiment.experiment_name
+    tore_down = await _teardown(experiment)  # frees VMs + capacity; keeps the registry row
 
-    base = experiment.base_name or experiment.experiment_name
-    next_retry_count = experiment.retry_count + 1
+    # archive this attempt's output so the retry starts clean and each try stays inspectable
+    src = output_root(name, cfg) / name
+    if src.exists():
+        dst = output_root(name, cfg) / "failed" / f"{name}_{experiment.retry_count}"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            shutil.rmtree(str(dst))
+        await asyncio.get_event_loop().run_in_executor(None, shutil.move, str(src), str(dst))
 
-    src = cfg.output_dir / experiment.experiment_name
-    dst = cfg.output_dir / "failed" / experiment.experiment_name
-    src.mkdir(parents=True, exist_ok=True)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        shutil.rmtree(str(dst))
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, shutil.move, str(src), str(dst))
-    get_logger(experiment.experiment_name).info(
-        "[%s] Moved failed output to %s", experiment.experiment_name, dst
-    )
-
-    if next_retry_count > cfg.max_retries:
-        get_logger(experiment.experiment_name).warning(
-            "[%s] Retry budget exhausted (%d/%d), giving up.",
-            experiment.experiment_name, experiment.retry_count, cfg.max_retries,
-        )
-        return
-
-    retry_name = f"{base}_{next_retry_count}"
-    now = datetime.now(timezone.utc)
-    retry_experiment = Experiment(
-        experiment_name=retry_name,
-        status=ExperimentStatus.QUEUED,
-        environment_spec=experiment.environment_spec,
-        attacker=experiment.attacker,
-        defender=experiment.defender,
-        retry_count=next_retry_count,
-        base_name=base,
-        created_at=now,
-        updated_at=now,
-    )
-
-    try:
-        await registry.add(retry_experiment)
-    except ValueError:
-        get_logger(experiment.experiment_name).exception(
-            "[%s] Failed to register retry '%s' (name collision?)",
-            experiment.experiment_name, retry_name,
-        )
-        return
-
-    asyncio.create_task(_run_experiment(retry_experiment))
-    get_logger(experiment.experiment_name).info(
-        "[%s] Retry %d/%d scheduled as '%s'",
-        experiment.experiment_name, next_retry_count, cfg.max_retries, retry_name,
-    )
+    # retry only over a CLEANLY torn-down env — never redeploy on top of a half-destroyed one
+    if tore_down and cfg.max_retries > 0 and experiment.retry_count < cfg.max_retries:
+        experiment.retry_count += 1
+        experiment.status = ExperimentStatus.RETRYING
+        experiment.deployed_environment = experiment.c2c_container_id = experiment.pid = None
+        experiment.vcpus_reserved = experiment.ram_mb_reserved = None
+        for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
+                  "defender_started_at", "defender_finished_at", "attacker_started_at",
+                  "attacker_finished_at", "teardown_started_at", "teardown_finished_at"):
+            setattr(experiment, f, None)
+        await registry.update(experiment)
+        get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
+                              name, experiment.retry_count, cfg.max_retries)
+        asyncio.create_task(_run_experiment(experiment))
+    else:
+        experiment.status = ExperimentStatus.ERROR  # escalate to the caller (phdpt)
+        await registry.update(experiment)
+        reason = "teardown failed, not retrying" if not tore_down else f"failed after {experiment.retry_count} retries"
+        get_logger(name).warning("[%s] Escalating ERROR — %s", name, reason)
 
 
 async def _run_experiment(experiment: Experiment) -> None:
     name = experiment.experiment_name
-    exp_log = init_logger(name, cfg.output_dir)
+    exp_log = init_logger(name, output_root(name, cfg))
 
-    config_path = cfg.output_dir / name / "experiment" / "experiment_config.json"
+    config_path = output_root(name, cfg) / name / "experiment" / "experiment_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(experiment.model_dump_json(indent=2))
 
     kali_c2c_url = None
     local_c2c_url = None
-
-    try:
-        await _teardown_stale_c2_before_launch(experiment)
-    except Exception:
-        exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
-
-    try:
-        container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
-        if container_id:
-            experiment.c2c_container_id = container_id
-            await registry.update(experiment)
-        if local_c2c_url:
-            await experiment.attacker.wait_c2c_ready(local_c2c_url, experiment.experiment_name)
-    except Exception:
-        exp_log.exception("Failed to start C2 server for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)
-        await _schedule_retry(experiment)
-        return
 
     experiment.deployed_environment = DeployedEnvironment(
         topology_spec=str(cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"),
@@ -420,6 +407,24 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.environment_deploy_started_at = datetime.now(timezone.utc)
             await registry.update(experiment)
 
+            # Launch the C2 only now that we hold a deploy slot, so queued experiments don't each idle a
+            # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
+            # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
+            try:
+                await _teardown_stale_c2_before_launch(experiment)
+            except Exception:
+                exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
+            try:
+                container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
+                if container_id:
+                    experiment.c2c_container_id = container_id
+                    await registry.update(experiment)
+                if local_c2c_url:
+                    await experiment.attacker.wait_c2c_ready(local_c2c_url, experiment.experiment_name)
+            except Exception:
+                exp_log.exception("Failed to start C2 server for '%s'", experiment.experiment_name)
+                raise
+
             try:
                 deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
                 experiment.deployed_environment = deployed
@@ -434,10 +439,7 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     except Exception:
         exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        await _teardown(experiment)
-        await _schedule_retry(experiment)
+        await _handle_failure(experiment)
         return
 
     try:
@@ -445,11 +447,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             await experiment.attacker.wait_c2c_agent(local_c2c_url, experiment.experiment_name)
     except Exception:
         exp_log.exception("No agent beaconed for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
-        tore_down = await _teardown(experiment)  # disabled for debugging
-        if tore_down:
-            await _schedule_retry(experiment)
+        await _handle_failure(experiment)
         return
 
     defender_process = None
@@ -470,17 +468,13 @@ async def _run_experiment(experiment: Experiment) -> None:
         process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, c2c_server=kali_c2c_url)
     except Exception:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
-        experiment.status = ExperimentStatus.ERROR
-        await registry.update(experiment)
         if defender_process:
             try:
                 defender_process.terminate()
                 await defender_process.wait()
             except Exception:
                 pass
-        tore_down = await _teardown(experiment)  # disabled for debugging
-        if tore_down:
-            await _schedule_retry(experiment)
+        await _handle_failure(experiment)
         return
 
     experiment.pid = process.pid
@@ -506,15 +500,16 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
-    result_file = cfg.output_dir / experiment.experiment_name / "experiment" / "result.json"
+    if status == ExperimentStatus.ERROR:  # a nonzero attacker exit is a failure — retry or escalate
+        await _handle_failure(experiment)
+        return
+
+    result_file = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "result.json"
     result_file.parent.mkdir(parents=True, exist_ok=True)
     result_file.write_text(json.dumps({"status": status}))
-
     experiment.status = status
     await registry.update(experiment)
-    await _teardown(experiment)  # disabled for debugging
-    if status == ExperimentStatus.ERROR:
-        await _schedule_retry(experiment)
+    await _teardown(experiment)
 
 
 app = FastAPI(title="Experiment Manager", lifespan=lifespan)
@@ -523,12 +518,15 @@ app = FastAPI(title="Experiment Manager", lifespan=lifespan)
 @app.post("/experiments", status_code=201)
 async def add_experiment(data: ExperimentSpecs):
     now = datetime.now(timezone.utc)
+    register_output_root(data.experiment_name, data.output_dir)  # route this run's output tree, if requested
     experiment = Experiment(
         experiment_name=data.experiment_name,
         status=ExperimentStatus.QUEUED,
         environment_spec=data.environment,
         attacker=data.attacker,
         defender=data.defender,
+        trial=data.trial,
+        teardown=data.teardown,
         created_at=now,
         updated_at=now,
     )
