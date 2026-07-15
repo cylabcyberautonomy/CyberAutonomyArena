@@ -6,7 +6,7 @@ import logging
 from urllib.parse import urlparse
 
 from ....config import ExperimentManagerConfig
-from ....experiment_log import attacker_log as log, init_attacker_logger as init_logger
+from ....experiment_log import attacker_log as log, init_attacker_logger as init_logger, output_root
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,9 @@ POLL_INTERVAL = 2
 
 _C2C_IMAGE = "incalmo/c2c:latest"
 _built_images: set[str] = set()
+# Serialises all Docker container start/stop operations so that concurrent
+# iptables rule additions/removals cannot race and leave port mappings broken.
+_docker_lock = asyncio.Lock()
 
 
 def _container_name(experiment_name: str) -> str:
@@ -50,34 +53,40 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
     local_url uses 127.0.0.1 and is reachable from this host.
     Call wait_for_c2c_ready(local_url) after saving container_id to the registry.
     """
-    init_logger(experiment_name, cfg.output_dir)
+    init_logger(experiment_name, output_root(experiment_name, cfg))
     await _ensure_image_built(experiment_name, cfg)
     name = _container_name(experiment_name)
 
-    cleanup = await asyncio.create_subprocess_exec(
-        "docker", "rm", "-f", name,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await cleanup.wait()
+    # Hold the lock for the entire rm→delete-db→run→port-query sequence so that
+    # concurrent experiment launches cannot race on Docker iptables rule insertion
+    # or corrupt the shared state_store.db by deleting it while another container
+    # is still using it.
+    async with _docker_lock:
+        cleanup = await asyncio.create_subprocess_exec(
+            "docker", "rm", "-f", name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await cleanup.wait()
 
-    (cfg.incalmo_dir / "state_store.db").unlink(missing_ok=True)
+        (cfg.incalmo_dir / "state_store.db").unlink(missing_ok=True)
 
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "run", "-d",
-        "--name", name,
-        "-p", "0.0.0.0:8888:8888",
-        "-v", f"{cfg.incalmo_dir}:/incalmo",
-        _C2C_IMAGE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Failed to start C2 container: {stderr.decode().strip()}")
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "run", "-d",
+            "--name", name,
+            "-p", "0.0.0.0::8888",
+            "-v", f"{cfg.incalmo_dir}:/incalmo",
+            _C2C_IMAGE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to start C2 container: {stderr.decode().strip()}")
 
-    container_id = stdout.decode().strip()
-    port = await _get_mapped_port(name)
+        container_id = stdout.decode().strip()
+        port = await _get_mapped_port(name)
+
     kali_url = f"http://{cfg.host_ip}:{port}"
     local_url = f"http://127.0.0.1:{port}"
     log(experiment_name, f"C2 container started at {kali_url}")
@@ -85,10 +94,12 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
 
 
 async def stop_c2c_server(container_id: str) -> None:
-    """Stop and remove the C2 container."""
-    for action in ("stop", "rm"):
+    """Force-kill and remove the C2 container. `rm -f` (SIGKILL) skips `docker stop`'s 10s SIGTERM grace —
+    these are throwaway containers, and on shutdown they're stopped one-by-one, so that grace × N was
+    minutes of dead time before the host teardown could even start."""
+    async with _docker_lock:
         proc = await asyncio.create_subprocess_exec(
-            "docker", action, container_id,
+            "docker", "rm", "-f", container_id,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
