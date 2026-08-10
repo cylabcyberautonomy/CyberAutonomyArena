@@ -18,8 +18,10 @@ class ExperimentManagerConfig(BaseModel):
     ansible_log_dir: str = "experiment/ansible"  # per-experiment subpath under output_dir/<exp>/ for per-host ansible logs
     registry_path: Path = _HERE / "experiment_registry.yaml"
     os_cloud: str = "openstack"
-    max_concurrent_openstack_ops: int = 3
+    max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
+    max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_retries: int = 3
+    max_deployed: int = 10  # back-pressure: cap experiments in the deploy stage (DEPLOYING+DEPLOYED). A deploy slot is held from provision-start until configure-start, so when configure backs up, provisioning halts instead of piling up idle hosts.
     ansible_verbosity: int = int(os.environ.get("ANSIBLE_VERBOSITY", "0"))  # 0-4 (-vvvv); default from $ANSIBLE_VERBOSITY (main.sh), config.yaml overrides
     deception_dir: Optional[Path] = None
     deception_python: Optional[Path] = None

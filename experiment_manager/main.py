@@ -8,6 +8,7 @@ import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
@@ -16,6 +17,8 @@ from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs
 from .environment.deployer import provision_environment, configure_environment
 from .environment.teardown import teardown_environment
+from .environment.collect import collect_environment
+from .environment.rotate import rotate_environment
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -56,22 +59,33 @@ class _PriorityLock:
 
 _PRIORITY_TEARDOWN = 0
 _PRIORITY_DEPLOY = 1
-_ACTIVE_STATUSES = {ExperimentStatus.DEPLOYING, ExperimentStatus.RUNNING}
+_ACTIVE_STATUSES = {  # non-terminal / in-flight: their C2 must survive other experiments' launches — only ERROR/FINISHED C2s are stale
+    ExperimentStatus.QUEUED, ExperimentStatus.DEPLOYING, ExperimentStatus.DEPLOYED,
+    ExperimentStatus.CONFIGURING, ExperimentStatus.CONFIGURED, ExperimentStatus.RUNNING,
+    ExperimentStatus.RETRYING,
+}
+_NUKE_BATCH = 20  # clean-slate deletes servers this many at a time — a whole-cluster batch overwhelmed nova/neutron
 
 cfg: ExperimentManagerConfig
 registry: Registry
 _openstack_lock: _PriorityLock
+_configure_lock: _PriorityLock
+_deploy_buffer: asyncio.Semaphore
 _capacity: CapacityTracker
+_tasks: dict[str, asyncio.Task] = {}  # experiment_name -> its _run_experiment task; lets a single run be cancelled/evicted (rerun) without a whole-harness restart
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_lock, _capacity
+    global cfg, registry, _openstack_lock, _configure_lock, _deploy_buffer, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
+    load_dotenv(cfg.incalmo_dir / ".env")  # LLM keys into os.environ so the Incalmo subprocess (env={**os.environ,…}) always inherits them, however the harness was launched (bare uvicorn or main.sh). override=False → an already-exported key still wins.
     os.environ["OS_CLOUD"] = cfg.os_cloud
     registry = Registry(cfg.registry_path)
-    _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)
+    _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
+    _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
+    _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     await _clean_slate()
     _capacity = CapacityTracker()
     await _capacity.initialize()
@@ -107,20 +121,25 @@ async def _openstack_clean_slate() -> None:
         logger.info("External networks (will be preserved): %s", external_net_ids)
 
     logger.info("=== Deleting servers ===")
-    for sid in (await _run("server", "list", "--all-projects", "-f", "value", "-c", "ID")).splitlines():
-        if not sid:
-            continue
-        logger.info("Deleting server %s", sid)
-        if not await _exec("server", "delete", sid, "--wait"):
-            logger.warning("Failed to delete server %s", sid)
+    sids = [s for s in (await _run("server", "list", "--all-projects", "-f", "value", "-c", "ID")).splitlines() if s]
+    if sids:
+        # Delete in chunks of _NUKE_BATCH, each `server delete ... --wait` blocking until that chunk is gone
+        # before the next starts — so nova/neutron tear down at most _NUKE_BATCH VMs at once. A single
+        # whole-cluster batch overwhelmed them (VIF-unplug + volume-detach storm). The CLI attempts every ID
+        # in the chunk and reports failures at the end, so a straggler doesn't abort the rest of its chunk.
+        logger.info("Deleting %d servers in batches of %d", len(sids), _NUKE_BATCH)
+        for i in range(0, len(sids), _NUKE_BATCH):
+            batch = sids[i:i + _NUKE_BATCH]
+            logger.info("Deleting servers %d–%d of %d", i + 1, i + len(batch), len(sids))
+            if not await _exec("server", "delete", *batch, "--wait"):
+                logger.warning("Batch server delete reported a failure (some servers may remain)")
 
     logger.info("=== Releasing floating IPs ===")
-    for fid in (await _run("floating", "ip", "list", "-f", "value", "-c", "ID")).splitlines():
-        if not fid:
-            continue
-        logger.info("Deleting floating IP %s", fid)
-        if not await _exec("floating", "ip", "delete", fid):
-            logger.warning("Failed to delete floating IP %s", fid)
+    fids = [f for f in (await _run("floating", "ip", "list", "-f", "value", "-c", "ID")).splitlines() if f]
+    if fids:
+        logger.info("Deleting %d floating IPs in one batch", len(fids))
+        if not await _exec("floating", "ip", "delete", *fids):
+            logger.warning("Batch floating IP delete reported a failure")
 
     logger.info("=== Cleaning up routers ===")
     for rid in (await _run("router", "list", "-f", "value", "-c", "ID")).splitlines():
@@ -143,6 +162,7 @@ async def _openstack_clean_slate() -> None:
 
     logger.info("=== Deleting orphaned internal ports ===")
     port_raw = await _run("port", "list", "-f", "value", "-c", "ID", "-c", "network_id", "-c", "device_owner")
+    orphan_pids = []
     for line in port_raw.splitlines():
         parts = line.split(None, 2)
         if len(parts) < 2:
@@ -159,9 +179,11 @@ async def _openstack_clean_slate() -> None:
             "network:ha_router_replicated_interface",
         }:
             continue
-        logger.info("Deleting port %s (owner: %s)", pid, device_owner)
-        if not await _exec("port", "delete", pid):
-            logger.warning("Failed to delete port %s", pid)
+        orphan_pids.append(pid)
+    if orphan_pids:
+        logger.info("Deleting %d orphaned ports in one batch", len(orphan_pids))
+        if not await _exec("port", "delete", *orphan_pids):
+            logger.warning("Batch port delete reported a failure")
 
     logger.info("=== Deleting internal subnets ===")
     subnet_raw = await _run("subnet", "list", "-f", "value", "-c", "ID", "-c", "Name")
@@ -208,6 +230,19 @@ async def _openstack_clean_slate() -> None:
 
 async def _clean_slate() -> None:
     """On startup, kill all running processes, stop C2 containers, tear down environments."""
+    # Reap MHBench provision/configure/collect subprocesses (+ their ansible children) left over from a
+    # prior harness that died without cleaning up: orphaned to init, they keep hammering torn-down bastions
+    # for the full check_if_host_up timeout (~18 min) and write stale host-logs into reused same-name output
+    # dirs, polluting the fresh run. A fresh start has no legit ones running, so a blunt pkill is safe here.
+    for pattern in ("MHBench/cli.py", "ansible"):  # cli.py parents first, then their ansible children
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-9", "-f", pattern,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+        except Exception:
+            logger.exception("Failed to pkill '%s' on clean-slate", pattern)
+
     experiments = registry.load()
 
     for experiment in experiments:
@@ -233,18 +268,10 @@ async def _clean_slate() -> None:
 
 
 async def _shutdown_cleanup() -> None:
-    """On Ctrl-C / SIGTERM: leave nothing behind. Kill stray ansible (MHBench provision/configure children,
-    which aren't tracked as PIDs), then the same clean-slate startup runs (attacker procs → C2 containers →
-    OpenStack teardown except external), then flush all logs."""
-    try:  # ponytail: blunt pkill — this is a dedicated experiment host; narrow the pattern if it ever isn't
-        proc = await asyncio.create_subprocess_exec(
-            "pkill", "-9", "-f", "ansible",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await proc.wait()
-    except Exception:
-        logger.exception("Failed to kill ansible processes on shutdown")
+    """On Ctrl-C / SIGTERM: leave nothing behind. _clean_slate reaps stray MHBench/ansible subprocesses,
+    kills attacker procs + C2 containers, and tears down OpenStack (external survives); then flush all logs."""
     try:
-        await _clean_slate()  # attacker procs, C2 containers, OpenStack clean-slate (external survives)
+        await _clean_slate()  # pkills MHBench/ansible subprocs, attacker procs, C2 containers, OpenStack teardown
     except Exception:
         logger.exception("Clean-slate on shutdown failed")
     logging.shutdown()  # flush + close every log handler so the run's logs are fully dumped to disk
@@ -282,22 +309,27 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
                 experiment.experiment_name,
             )
 
+    # Pull ground-truth host logs while the range is still up. Best-effort: a collection failure
+    # must never block teardown (leaking VMs is worse than losing logs), and it needs no op-slot
+    # (SSH via the bastion, not an OpenStack API call), so it runs before we acquire one.
     try:
-        async with _openstack_lock.acquire(_PRIORITY_TEARDOWN):
-            try:
-                await teardown_environment(experiment, cfg)
-                experiment.teardown_finished_at = datetime.now(timezone.utc)
-                await registry.update(experiment)
-                if experiment.vcpus_reserved is not None:
-                    _capacity.release(experiment.experiment_name)
-                return True
-            except Exception:
-                get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
-                return False  # env not cleanly destroyed — caller must not redeploy over it
-
+        await collect_environment(experiment, cfg)
     except Exception:
-        get_logger(experiment.experiment_name).exception("Teardown failed for experiment '%s'", experiment.experiment_name)
-    return False
+        get_logger(experiment.experiment_name).exception("Host-log collection failed for '%s'", experiment.experiment_name)
+
+    # Teardown is UNCAPPED (no _openstack_lock): a failed/finished env must reclaim its VMs immediately
+    # instead of queueing behind provisions — deletion is far lighter than creation (no image pull/expand),
+    # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
+    try:
+        await teardown_environment(experiment, cfg)
+        experiment.teardown_finished_at = datetime.now(timezone.utc)
+        await registry.update(experiment)
+        if experiment.vcpus_reserved is not None:
+            _capacity.release(experiment.experiment_name)
+        return True
+    except Exception:
+        get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
+        return False  # env not cleanly destroyed — caller must not redeploy over it
 
 
 async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
@@ -338,12 +370,20 @@ async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
                 previous.experiment_name,
             )
 
+def _write_result(experiment: Experiment) -> None:
+    """Runtime record (status + all timestamps, grouped) → experiment/experiment_result.json."""
+    p = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "experiment_result.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(experiment.result_json())
+
+
 async def _handle_failure(experiment: Experiment) -> None:
     """One attempt failed. Tear it down, then retry IN PLACE (same name, so the polling caller keeps
     tracking it) as status RETRYING — until the retry budget is spent, at which point escalate a terminal
     ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling."""
     name = experiment.experiment_name
     tore_down = await _teardown(experiment)  # frees VMs + capacity; keeps the registry row
+    _write_result(experiment)  # capture this attempt's timeline before it's archived
 
     # archive this attempt's output so the retry starts clean and each try stays inspectable
     src = output_root(name, cfg) / name
@@ -367,12 +407,54 @@ async def _handle_failure(experiment: Experiment) -> None:
         await registry.update(experiment)
         get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
                               name, experiment.retry_count, cfg.max_retries)
-        asyncio.create_task(_run_experiment(experiment))
+        _tasks[name] = asyncio.create_task(_run_experiment(experiment))
     else:
         experiment.status = ExperimentStatus.ERROR  # escalate to the caller (phdpt)
         await registry.update(experiment)
         reason = "teardown failed, not retrying" if not tore_down else f"failed after {experiment.retry_count} retries"
         get_logger(name).warning("[%s] Escalating ERROR — %s", name, reason)
+
+
+async def _cancel_and_remove(name: str) -> None:
+    """Cancel one experiment and free its name — the no-restart path behind DELETE and overwrite-rerun.
+    Cancels its task, kills its in-flight MHBench subprocess (scoped by --project-name, so peers are
+    untouched), stops its attacker + C2, tears down its VMs BY NAME (robust even mid-provision, since it's
+    name-based not from the in-memory object), releases capacity, then drops it from the registry."""
+    task = _tasks.pop(name, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task  # let its finally blocks release the deploy/configure locks
+        except BaseException:
+            pass
+    try:
+        experiment = registry.get(name)
+    except KeyError:
+        return  # already gone
+    try:  # kill only THIS experiment's provision/configure/collect subprocess (every stage tags --project-name)
+        proc = await asyncio.create_subprocess_exec(
+            "pkill", "-9", "-f", f"cli.py.*--project-name {name}( |$)",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
+    except Exception:
+        logger.exception("Failed to kill MHBench subprocess for '%s'", name)
+    if experiment.pid:
+        try:
+            os.kill(experiment.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if experiment.attacker and experiment.c2c_container_id:
+        try:
+            await experiment.attacker.stop_c2c(experiment.c2c_container_id)
+        except Exception:
+            logger.exception("Failed to stop C2 container for '%s'", name)
+    try:
+        await teardown_environment(experiment, cfg)  # deletes all VMs/networks by project name
+    except Exception:
+        logger.exception("Failed to tear down environment for '%s'", name)
+    if experiment.vcpus_reserved is not None:
+        _capacity.release(name)
+    await registry.remove(name)
 
 
 async def _run_experiment(experiment: Experiment) -> None:
@@ -381,7 +463,7 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     config_path = output_root(name, cfg) / name / "experiment" / "experiment_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(experiment.model_dump_json(indent=2))
+    config_path.write_text(experiment.config_json())
 
     kali_c2c_url = None
     local_c2c_url = None
@@ -392,14 +474,21 @@ async def _run_experiment(experiment: Experiment) -> None:
     await registry.update(experiment)
 
     mgmt_ip = None
+    deploy_slot_held = False
     try:
         topology_path = cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
         vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir)
         vcpus_reserved, ram_reserved = await _capacity.reserve(vm_specs, name)
         experiment.vcpus_reserved = vcpus_reserved
         experiment.ram_mb_reserved = ram_reserved
-        config_path.write_text(experiment.model_dump_json(indent=2))
+        config_path.write_text(experiment.config_json())
         await registry.update(experiment)
+
+        # Enter the deploy stage (DEPLOYING+DEPLOYED ≤ max_deployed). This slot is held until CONFIGURE
+        # actually starts (below) — so when the configure gate is saturated, provisioned envs pile up here
+        # and new provisions block, instead of spinning up hosts that then sit idle waiting to configure.
+        await _deploy_buffer.acquire()
+        deploy_slot_held = True
 
         async with _openstack_lock.acquire(_PRIORITY_DEPLOY):
 
@@ -433,14 +522,28 @@ async def _run_experiment(experiment: Experiment) -> None:
                 experiment.deployed_environment = None
                 exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
 
+        # Provisioning done → DEPLOYED: VMs are up but we still hold the deploy slot while waiting for a
+        # configure slot. The slot only frees once CONFIGURING actually starts (below), so a saturated
+        # configure gate back-pressures onto provisioning (DEPLOYED experiments pile up, new provisions block).
+        experiment.status = ExperimentStatus.DEPLOYED
+        await registry.update(experiment)
+        async with _configure_lock.acquire(_PRIORITY_DEPLOY):
+            _deploy_buffer.release()   # DEPLOYED → CONFIGURING hand-off: free the deploy slot so a queued env can provision now
+            deploy_slot_held = False
+            experiment.status = ExperimentStatus.CONFIGURING
+            await registry.update(experiment)
             await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
             experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
+            experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
 
     except Exception:
         exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
         await _handle_failure(experiment)
         return
+    finally:
+        if deploy_slot_held:
+            _deploy_buffer.release()   # release the deploy slot on any exit before configure started (e.g. provision failure)
 
     try:
         if local_c2c_url:
@@ -463,6 +566,14 @@ async def _run_experiment(experiment: Experiment) -> None:
             await registry.update(experiment)
         except Exception:
             exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+
+    # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
+    # by construction (awaited before run_attacker). Best-effort: a rotation failure must not waste a
+    # full deploy — that host just falls back to needing a timestamp trim at analysis time.
+    try:
+        await rotate_environment(experiment, cfg)
+    except Exception:
+        exp_log.exception("Pre-attack log rotation failed for '%s' — proceeding (logs may include pre-attack noise)", experiment.experiment_name)
 
     try:
         process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, c2c_server=kali_c2c_url)
@@ -504,12 +615,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         await _handle_failure(experiment)
         return
 
-    result_file = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "result.json"
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    result_file.write_text(json.dumps({"status": status}))
     experiment.status = status
     await registry.update(experiment)
     await _teardown(experiment)
+    _write_result(experiment)  # after teardown, so experiment_result.json carries the full timestamp set
 
 
 app = FastAPI(title="Experiment Manager", lifespan=lifespan)
@@ -518,7 +627,18 @@ app = FastAPI(title="Experiment Manager", lifespan=lifespan)
 @app.post("/experiments", status_code=201)
 async def add_experiment(data: ExperimentSpecs):
     now = datetime.now(timezone.utc)
-    register_output_root(data.experiment_name, data.output_dir)  # route this run's output tree, if requested
+    name = data.experiment_name
+    register_output_root(name, data.output_dir)  # route this run's output tree, if requested
+    # Never silently clobber a prior run. A same-named experiment can linger in the registry (in-flight or
+    # terminal) and/or on disk; require an explicit overwrite=true to replace either — otherwise reject.
+    registered = any(e.experiment_name == name for e in registry.load())
+    exp_out = output_root(name, cfg) / name
+    if (registered or exp_out.exists()) and not data.overwrite:
+        raise HTTPException(status_code=409, detail=f"'{name}' already exists; pass overwrite=true to cancel+replace it, or use a different name")
+    if registered:
+        await _cancel_and_remove(name)  # overwrite=true → cancel the prior run + free the name in place (no harness restart)
+    if exp_out.exists():
+        shutil.rmtree(exp_out, ignore_errors=True)  # replace the prior output tree
     experiment = Experiment(
         experiment_name=data.experiment_name,
         status=ExperimentStatus.QUEUED,
@@ -536,21 +656,31 @@ async def add_experiment(data: ExperimentSpecs):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    asyncio.create_task(_run_experiment(experiment))
+    _tasks[experiment.experiment_name] = asyncio.create_task(_run_experiment(experiment))
     return {"experiment_name": experiment.experiment_name, "status": experiment.status}
 
 
 @app.get("/experiments")
 async def list_experiments():
-    return registry.load()
+    return [e.flat() for e in registry.load()]
 
 
 @app.get("/experiments/{experiment_name}")
 async def get_experiment(experiment_name: str):
     try:
-        return registry.get(experiment_name)
+        return registry.get(experiment_name).flat()
     except KeyError:
         raise HTTPException(status_code=404, detail="Experiment not found")
+
+
+@app.delete("/experiments/{experiment_name}")
+async def delete_experiment(experiment_name: str):
+    """Cancel one experiment in place: stop its task + subprocess + attacker + C2, tear down its VMs, free
+    its name — without a harness restart. Peers keep running. Idempotent-ish: 404 if the name isn't live."""
+    if not any(e.experiment_name == experiment_name for e in registry.load()):
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    await _cancel_and_remove(experiment_name)
+    return {"experiment_name": experiment_name, "status": "cancelled"}
 
 
 if __name__ == "__main__":

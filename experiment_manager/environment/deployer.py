@@ -33,7 +33,7 @@ def _provision_sync(
     topology_path = mhbench_dir / "environments" / f"{environment_spec}.json"
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
-    provision_result_path = output_root(experiment_name, cfg) / experiment_name / "environment" / "provision_result.json"
+    provision_result_path = output_root(experiment_name, cfg) / experiment_name / "experiment" / "provision_result.json"
 
     cmd = [
         str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
@@ -45,7 +45,7 @@ def _provision_sync(
         cmd += ["--c2c-url", c2c_url]
 
     init_logger(experiment_name, output_root(experiment_name, cfg))
-    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "environment" / "mhbench.log"
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
     log(experiment_name, f"Provisioning environment via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
@@ -90,7 +90,7 @@ def _configure_sync(
     if c2c_url:
         cmd += ["--c2c-url", c2c_url]
 
-    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "environment" / "mhbench.log"
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
     ansible_log_dir = output_root(experiment_name, cfg) / experiment_name / cfg.ansible_log_dir
     ansible_log_dir.mkdir(parents=True, exist_ok=True)
     log(experiment_name, f"Running Ansible configuration via MHBench CLI (per-host logs: {ansible_log_dir})...")

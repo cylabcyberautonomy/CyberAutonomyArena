@@ -1,66 +1,45 @@
 import asyncio
-from pathlib import Path
-from typing import List
 from datetime import datetime, timezone
-
-import yaml
+from typing import List, Optional
 
 from .models import Experiment
 
 
 class Registry:
-    def __init__(self, path: str = "experiment_registry.yaml"):
-        self._path = Path(path)
+    """In-memory store of live experiments, keyed by name.
+
+    Was a YAML file, but that file was wiped by `_clean_slate` on every startup — so it was never a
+    durable record. Holding the live `Experiment` objects in a dict loses nothing (the objects carry
+    real, current state) and drops all the serialize/deserialize churn.
+    """
+
+    def __init__(self, path: Optional[str] = None) -> None:  # path kept for call-site compatibility; unused
+        self._store: dict[str, Experiment] = {}
         self._lock = asyncio.Lock()
 
-    def _read(self) -> List[dict]:
-        if not self._path.exists():
-            return []
-        with open(self._path) as f:
-            data = yaml.safe_load(f) or {}
-        return data.get("experiments", [])
-
-    def _write(self, experiments: List[Experiment]) -> None:
-        with open(self._path, "w") as f:
-            yaml.dump(
-                {"experiments": [e.model_dump(mode="json") for e in experiments]},
-                f,
-                default_flow_style=False,
-            )
-
     def load(self) -> List[Experiment]:
-        return [Experiment(**e) for e in self._read()]
+        return list(self._store.values())
 
     async def add(self, experiment: Experiment) -> None:
         async with self._lock:
-            experiments = self.load()
-            if any(e.experiment_name == experiment.experiment_name for e in experiments):
+            if experiment.experiment_name in self._store:
                 raise ValueError(f"Experiment '{experiment.experiment_name}' already exists")
-            experiments.append(experiment)
-            self._write(experiments)
+            self._store[experiment.experiment_name] = experiment
 
     async def update(self, experiment: Experiment) -> None:
         async with self._lock:
-            experiments = self.load()
-            for i, e in enumerate(experiments):
-                if e.experiment_name == experiment.experiment_name:
-                    experiment.updated_at = datetime.now(timezone.utc)
-                    experiments[i] = experiment
-                    self._write(experiments)
-                    return
-            raise KeyError(f"Experiment '{experiment.experiment_name}' not found")
+            if experiment.experiment_name not in self._store:
+                raise KeyError(f"Experiment '{experiment.experiment_name}' not found")
+            experiment.updated_at = datetime.now(timezone.utc)
+            self._store[experiment.experiment_name] = experiment  # same object; keeps the interface
 
     async def remove(self, experiment_name: str) -> None:
         async with self._lock:
-            experiments = self.load()
-            self._write([e for e in experiments if e.experiment_name != experiment_name])
+            self._store.pop(experiment_name, None)
 
     async def clear(self) -> None:
         async with self._lock:
-            self._write([])
+            self._store.clear()
 
     def get(self, experiment_name: str) -> Experiment:
-        for e in self.load():
-            if e.experiment_name == experiment_name:
-                return e
-        raise KeyError(f"Experiment '{experiment_name}' not found")
+        return self._store[experiment_name]  # raises KeyError if absent, as before
