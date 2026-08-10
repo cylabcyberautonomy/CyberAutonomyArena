@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -35,7 +36,8 @@ def _provision_sync(
     provision_result_path = output_root(experiment_name, cfg) / experiment_name / "environment" / "provision_result.json"
 
     cmd = [
-        str(python), str(cli), "provision", str(topology_path),
+        str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
+        "provision", str(topology_path),
         "--project-name", experiment_name,
         "--output-file", str(provision_result_path),
     ]
@@ -80,7 +82,8 @@ def _configure_sync(
     cli = mhbench_dir / "cli.py"
 
     cmd = [
-        str(python), str(cli), "configure", str(topology_path),
+        str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
+        "configure", str(topology_path),
         "--project-name", experiment_name,
         "--mgmt-ip", mgmt_ip,
     ]
@@ -88,9 +91,12 @@ def _configure_sync(
         cmd += ["--c2c-url", c2c_url]
 
     mhbench_log = output_root(experiment_name, cfg) / experiment_name / "environment" / "mhbench.log"
-    log(experiment_name, "Running Ansible configuration via MHBench CLI...")
+    ansible_log_dir = output_root(experiment_name, cfg) / experiment_name / cfg.ansible_log_dir
+    ansible_log_dir.mkdir(parents=True, exist_ok=True)
+    log(experiment_name, f"Running Ansible configuration via MHBench CLI (per-host logs: {ansible_log_dir})...")
     with open(mhbench_log, "a") as lf:
-        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)
+        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT,
+                                env={**os.environ, "MHBENCH_ANSIBLE_LOG_DIR": str(ansible_log_dir)})
     if result.returncode != 0:
         raise RuntimeError(f"MHBench configure failed (exit {result.returncode}), see {mhbench_log}")
 
