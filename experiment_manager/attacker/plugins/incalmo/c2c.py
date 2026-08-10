@@ -57,10 +57,9 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
     await _ensure_image_built(experiment_name, cfg)
     name = _container_name(experiment_name)
 
-    # Hold the lock for the entire rm→delete-db→run→port-query sequence so that
-    # concurrent experiment launches cannot race on Docker iptables rule insertion
-    # or corrupt the shared state_store.db by deleting it while another container
-    # is still using it.
+    # Hold the lock for the rm→run→port-query sequence so that concurrent experiment
+    # launches cannot race on Docker iptables rule insertion / port mapping. (Each C2's
+    # state_store.db is now container-local — /tmp — so there is no shared DB to clobber.)
     async with _docker_lock:
         cleanup = await asyncio.create_subprocess_exec(
             "docker", "rm", "-f", name,
@@ -68,8 +67,6 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
             stderr=asyncio.subprocess.DEVNULL,
         )
         await cleanup.wait()
-
-        (cfg.incalmo_dir / "state_store.db").unlink(missing_ok=True)
 
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "-d",

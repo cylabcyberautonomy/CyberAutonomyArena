@@ -10,6 +10,7 @@ from pydantic import field_validator
 
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from ....config import ExperimentManagerConfig
+from ....experiment_log import output_root
 from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
@@ -73,6 +74,7 @@ class _IncalmoAttacker(AttackerPlugin):
 class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
     type: Literal["incalmo_strategy"]
     strategy: str  # e.g. "GraphSearch", "Darkside", "EquifaxStrategy"
+    script_path: Optional[str] = None  # action_script.json path, required by OptimalReplayStrategy
 
     @field_validator("strategy", mode="before")
     @classmethod
@@ -92,22 +94,32 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
                     "field_type": "flat_checkboxes",
                     "label": "Strategy",
                     "key": "strategy",
-                    "options": ["GraphSearch", "Darkside", "EquifaxStrategy"],
+                    "options": ["GraphSearch", "Darkside", "EquifaxStrategy", "MulvalOptimal", "OptimalReplayStrategy"],
+                },
+                {
+                    "field_type": "text_with_suggestions",
+                    "label": "Script path (OptimalReplayStrategy only)",
+                    "key": "script_path",
+                    "suggestions": [],
+                    "default": "",
                 },
             ],
         }
 
     def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
+        strategy = {"name": self.strategy}
+        if self.script_path:
+            strategy["script_path"] = self.script_path
         return {
             "name": experiment_name,
-            "strategy": {"name": self.strategy},
+            "strategy": strategy,
             "environment": environment.spec if environment else "none",
             "c2c_server": c2c_url,
             "blacklist_ips": [],
         }
 
     async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
-        log_path = cfg.output_dir / experiment_name / "attacker" / "attacker.log"
+        log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
@@ -117,7 +129,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.incalmo_dir / "output" / experiment_name),
+                "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
@@ -173,7 +185,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         }
 
     async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
-        log_path = cfg.output_dir / experiment_name / "attacker" / "attacker.log"
+        log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
@@ -183,7 +195,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
-                "INCALMO_OUTPUT_DIR": str(cfg.incalmo_dir / "output" / experiment_name),
+                "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
