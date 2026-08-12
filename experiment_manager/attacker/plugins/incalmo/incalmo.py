@@ -4,7 +4,7 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 from pydantic import field_validator
 
@@ -30,6 +30,7 @@ _LLM_GROUPS = [
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
     ]},
     {"group_label": "DeepSeek", "options": ["deepseek-v3", "deepseek-r1"]},
+    {"group_label": "Moonshot", "options": ["kimi-k3"]},
 ]
 
 _ABSTRACTION_LEVELS = [
@@ -55,6 +56,8 @@ asyncio.run(run_incalmo_strategy(config, task_id=sys.argv[2]))
 
 class _IncalmoAttacker(AttackerPlugin):
     """Shared C2C lifecycle for all Incalmo-based attackers."""
+
+    setup_play: ClassVar[str] = "start_incalmo"
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig

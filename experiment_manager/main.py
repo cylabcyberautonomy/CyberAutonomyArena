@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -246,12 +245,11 @@ async def _clean_slate() -> None:
     experiments = registry.load()
 
     for experiment in experiments:
-        if experiment.pid:
+        if experiment.attacker:
             try:
-                os.kill(experiment.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
+                await experiment.attacker.stop(experiment, cfg)
+            except Exception:
+                logger.exception("Failed to stop attacker process for '%s'", experiment.experiment_name)
         if experiment.attacker and experiment.c2c_container_id:
             try:
                 await experiment.attacker.stop_c2c(experiment.c2c_container_id)
@@ -316,6 +314,15 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         await collect_environment(experiment, cfg)
     except Exception:
         get_logger(experiment.experiment_name).exception("Host-log collection failed for '%s'", experiment.experiment_name)
+
+    if experiment.attacker:
+        try:
+            await experiment.attacker.collect_logs(
+                experiment, cfg,
+                output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "attacker",
+            )
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Attacker-log collection failed for '%s'", experiment.experiment_name)
 
     # Teardown is UNCAPPED (no _openstack_lock): a failed/finished env must reclaim its VMs immediately
     # instead of queueing behind provisions — deletion is far lighter than creation (no image pull/expand),
@@ -438,11 +445,11 @@ async def _cancel_and_remove(name: str) -> None:
         await proc.wait()
     except Exception:
         logger.exception("Failed to kill MHBench subprocess for '%s'", name)
-    if experiment.pid:
+    if experiment.attacker:
         try:
-            os.kill(experiment.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            await experiment.attacker.stop(experiment, cfg)
+        except Exception:
+            logger.exception("Failed to stop attacker process for '%s'", name)
     if experiment.attacker and experiment.c2c_container_id:
         try:
             await experiment.attacker.stop_c2c(experiment.c2c_container_id)
@@ -467,6 +474,7 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     kali_c2c_url = None
     local_c2c_url = None
+    prepared = None
 
     experiment.deployed_environment = DeployedEnvironment(
         topology_spec=str(cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"),
@@ -500,22 +508,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
             # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
             try:
-                await _teardown_stale_c2_before_launch(experiment)
-            except Exception:
-                exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
-            try:
-                container_id, kali_c2c_url, local_c2c_url = await experiment.attacker.launch_c2c(experiment.experiment_name, cfg)
-                if container_id:
-                    experiment.c2c_container_id = container_id
-                    await registry.update(experiment)
-                if local_c2c_url:
-                    await experiment.attacker.wait_c2c_ready(local_c2c_url, experiment.experiment_name)
-            except Exception:
-                exp_log.exception("Failed to start C2 server for '%s'", experiment.experiment_name)
-                raise
-
-            try:
-                deployed, mgmt_ip = await provision_environment(experiment, kali_c2c_url, cfg)
+                deployed, mgmt_ip = await provision_environment(experiment, None, cfg)
                 experiment.deployed_environment = deployed
                 await registry.update(experiment)
             except NotImplementedError:
@@ -532,7 +525,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             deploy_slot_held = False
             experiment.status = ExperimentStatus.CONFIGURING
             await registry.update(experiment)
-            await configure_environment(experiment, mgmt_ip, kali_c2c_url, cfg)
+            await configure_environment(experiment, mgmt_ip, None, cfg)
             experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
@@ -545,11 +538,20 @@ async def _run_experiment(experiment: Experiment) -> None:
         if deploy_slot_held:
             _deploy_buffer.release()   # release the deploy slot on any exit before configure started (e.g. provision failure)
 
+    # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
+    # kali, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
     try:
-        if local_c2c_url:
-            await experiment.attacker.wait_c2c_agent(local_c2c_url, experiment.experiment_name)
+        await _teardown_stale_c2_before_launch(experiment)
     except Exception:
-        exp_log.exception("No agent beaconed for '%s'", experiment.experiment_name)
+        exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
+    try:
+        prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
+        kali_c2c_url, local_c2c_url = prepared.remote_url, prepared.local_url
+        if prepared.container_id:
+            experiment.c2c_container_id = prepared.container_id
+            await registry.update(experiment)
+    except Exception:
+        exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
         await _handle_failure(experiment)
         return
 
@@ -576,7 +578,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         exp_log.exception("Pre-attack log rotation failed for '%s' — proceeding (logs may include pre-attack noise)", experiment.experiment_name)
 
     try:
-        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, c2c_server=kali_c2c_url)
+        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=kali_c2c_url)
     except Exception:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
