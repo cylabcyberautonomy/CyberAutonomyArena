@@ -19,6 +19,7 @@ class ExperimentStatus(str, Enum):
     RETRYING = "Retrying"   # non-terminal: an attempt failed but the harness is auto-retrying it in place
     ERROR = "Error"
     FINISHED = "Finished"
+    TIMEDOUT = "TimedOut"   # terminal: hit the harness-enforced attacker wall-clock cap (not a failure — no retry)
 
 
 class ExperimentSpecs(BaseModel):

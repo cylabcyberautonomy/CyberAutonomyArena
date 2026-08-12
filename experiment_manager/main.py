@@ -597,8 +597,16 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     returncode = None
     try:
-        returncode = await process.wait()
+        returncode = await asyncio.wait_for(process.wait(), cfg.attacker_timeout_seconds)
         status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
+    except asyncio.TimeoutError:
+        exp_log.info("[%s] Attacker exceeded timeout (%ss) — stopping", name, cfg.attacker_timeout_seconds)
+        await experiment.attacker.stop(experiment, cfg)
+        try:
+            await asyncio.wait_for(process.wait(), 15)
+        except asyncio.TimeoutError:
+            pass
+        status = ExperimentStatus.TIMEDOUT
     except Exception:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
