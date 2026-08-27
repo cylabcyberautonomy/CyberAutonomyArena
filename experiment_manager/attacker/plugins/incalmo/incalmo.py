@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar, Literal, Optional
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from ....config import ExperimentManagerConfig
@@ -35,6 +35,14 @@ _LLM_GROUPS = [
 
 _ABSTRACTION_LEVELS = [
     "incalmo", "shell", "low_level_actions", "no_services",
+    "agent_scan", "agent_lateral_move", "agent_privilege_escalation",
+    "agent_exfiltrate_data", "agent_find_information", "agent_all",
+]
+
+# Abstraction levels that drive per-capability LLM sub-agent loops and therefore
+# need a distinct execution LLM. The others (incalmo, shell, low_level_actions,
+# no_services) are planning-LLM-only, so an execution LLM is not required.
+_EXECUTION_LLM_ABSTRACTIONS = [
     "agent_scan", "agent_lateral_move", "agent_privilege_escalation",
     "agent_exfiltrate_data", "agent_find_information", "agent_all",
 ]
@@ -143,8 +151,18 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
 class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     type: Literal["incalmo_llm"]
     planning_llm: str
-    execution_llm: str
+    # Only the agent_* abstractions run LLM sub-agents; for the others the
+    # execution LLM is unused, so it is optional and omitted from the form.
+    execution_llm: Optional[str] = None
     abstraction: str = "incalmo"
+
+    @model_validator(mode="after")
+    def _require_execution_llm_for_agents(self):
+        if self.abstraction in _EXECUTION_LLM_ABSTRACTIONS and not self.execution_llm:
+            raise ValueError(
+                f"abstraction '{self.abstraction}' requires an execution_llm"
+            )
+        return self
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -164,6 +182,11 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                     "label": "Execution LLM",
                     "key": "execution_llm",
                     "groups": _LLM_GROUPS,
+                    # Only shown when the chosen abstraction runs LLM sub-agents.
+                    "depends_on": {
+                        "field": "abstraction",
+                        "requires_any": _EXECUTION_LLM_ABSTRACTIONS,
+                    },
                 },
                 {
                     "field_type": "flat_checkboxes",
@@ -179,7 +202,10 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             "name": experiment_name,
             "strategy": {
                 "planning_llm": self.planning_llm,
-                "execution_llm": self.execution_llm,
+                # Abstractions that don't run LLM sub-agents never call the
+                # execution LLM; fall back to the planning model so Incalmo's
+                # (required) execution_llm field stays valid.
+                "execution_llm": self.execution_llm or self.planning_llm,
                 "abstraction": self.abstraction,
             },
             "environment": environment.spec if environment else "none",
