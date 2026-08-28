@@ -16,21 +16,30 @@ from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
 
 _LLM_GROUPS = [
-    {"group_label": "Anthropic", "options": [
+    # LiteLLM deployments routed through the CMU AI gateway (single LITELLM_API_KEY).
+    # These are the ones to use here — the direct groups below need per-vendor keys.
+    {"group_label": "LiteLLM (CMU gateway)", "options": [
+        "gpt-5-mini-litellm", "gpt-5-nano-litellm", "gpt-5.4-mini-litellm", "gpt-4.1-mini-litellm",
+        "gpt-5.4-litellm", "gpt-5.5-litellm", "gpt-5.6-sol-litellm",
+        "claude-sonnet-4-6-litellm", "claude-haiku-4-5-litellm", "claude-sonnet-5-litellm",
+        "claude-opus-4-6-litellm", "claude-opus-4-7-litellm", "claude-opus-4-8-litellm",
+        "gemini-2.5-pro-litellm", "gemini-3.1-pro-litellm", "gemini-3.5-flash-litellm",
+    ]},
+    {"group_label": "Anthropic (direct — needs ANTHROPIC_API_KEY)", "options": [
         "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6",
         "claude-4.5-sonnet", "claude-3.7-sonnet", "claude-3.5-sonnet", "claude-3.5-haiku",
     ]},
-    {"group_label": "OpenAI", "options": [
+    {"group_label": "OpenAI (direct — needs OPENAI_API_KEY)", "options": [
         "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
         "gpt-4o", "gpt-4o-mini",
         "o4-mini", "o3-mini", "o3",
         "gpt-5", "gpt-5-mini",
     ]},
-    {"group_label": "Google", "options": [
+    {"group_label": "Google (direct — needs GOOGLE_API_KEY)", "options": [
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
     ]},
-    {"group_label": "DeepSeek", "options": ["deepseek-v3", "deepseek-r1"]},
-    {"group_label": "Moonshot", "options": ["kimi-k3"]},
+    {"group_label": "DeepSeek (direct — needs DEEPSEEK_API_KEY)", "options": ["deepseek-v3", "deepseek-r1"]},
+    {"group_label": "Moonshot / Kimi (via OpenRouter — needs OPENROUTER_API_KEY)", "options": ["kimi-k3"]},
 ]
 
 _ABSTRACTION_LEVELS = [
