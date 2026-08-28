@@ -6,7 +6,16 @@ a PluginUISchema dict.  dashboard.py reads these at startup to render forms
 dynamically — no plugin-specific knowledge lives in the dashboard.
 """
 
-from typing import Literal, TypedDict, Union
+from typing import Literal, NotRequired, TypedDict, Union
+
+
+class FieldDependency(TypedDict):
+    """Conditional display: a field is only shown/collected when the field named
+    by `field` has at least one selected value in `requires_any`. Lets a plugin
+    hide an option that is irrelevant for the current selection (e.g. an
+    execution LLM that only some abstraction levels use)."""
+    field: str            # key of the controlling field (a checkbox field)
+    requires_any: list[str]
 
 
 class TextWithSuggestionsField(TypedDict):
@@ -34,6 +43,7 @@ class GroupedCheckboxesField(TypedDict):
     label: str
     key: str
     groups: list[CheckboxGroup]
+    depends_on: NotRequired[FieldDependency]  # if set, only shown/collected when the dependency is satisfied
 
 
 class KeyValuePair(TypedDict):

@@ -428,6 +428,7 @@ def render_html(experiments):
         for (const field of schema.fields) {{
           const grp = document.createElement('div');
           grp.className = 'form-group';
+          grp.dataset.groupFor = field.key;
 
           const lbl = document.createElement('label');
           lbl.textContent = field.label;
@@ -587,6 +588,37 @@ def render_html(experiments):
           row.appendChild(grp);
         }}
         containerEl.appendChild(row);
+
+        // Conditional fields: only show a field whose `depends_on` is satisfied.
+        // Re-evaluated whenever the controlling checkboxes change (including via
+        // the Select all / Clear buttons, which mutate checkboxes without firing
+        // a change event, hence the deferred re-check on click).
+        if (schema.fields.some(f => f.depends_on)) {{
+          const applyDeps = () => {{
+            const fv = readFieldValues(containerEl);
+            for (const f of schema.fields) {{
+              if (!f.depends_on) continue;
+              const grpEl = containerEl.querySelector(`[data-group-for="${{f.key}}"]`);
+              if (grpEl) grpEl.style.display = isFieldActive(f, fv) ? '' : 'none';
+            }}
+          }};
+          containerEl.addEventListener('change', applyDeps);
+          containerEl.addEventListener('click', (e) => {{
+            if (e.target.closest('.llm-select-all, .llm-clear')) setTimeout(applyDeps, 0);
+          }});
+          applyDeps();
+        }}
+      }}
+
+      // A field with a `depends_on` is active only when the controlling field has
+      // at least one selected value listed in requires_any. Inactive fields are
+      // hidden and excluded from the submitted config.
+      function isFieldActive(field, fieldValues) {{
+        if (!field.depends_on) return true;
+        const dep = field.depends_on;
+        const selected = (fieldValues[dep.field] || {{}}).value || [];
+        const req = dep.requires_any || [];
+        return Array.isArray(selected) && selected.some(v => req.includes(v));
       }}
 
       function readFieldValues(containerEl) {{
@@ -620,9 +652,12 @@ def render_html(experiments):
       }}
 
       function buildConfigs(configType, schema, fieldValues) {{
-        const cbKeys   = schema.fields.filter(f => f.field_type === 'flat_checkboxes' || f.field_type === 'grouped_checkboxes').map(f => f.key);
-        const textKeys = schema.fields.filter(f => f.field_type === 'text_with_suggestions' || f.field_type === 'json').map(f => f.key);
-        const kvKeys   = schema.fields.filter(f => f.field_type === 'key_value_pairs').map(f => f.key);
+        // Drop fields whose dependency isn't satisfied so they are neither
+        // required nor added to the generated configs (backend fills the default).
+        const activeFields = schema.fields.filter(f => isFieldActive(f, fieldValues));
+        const cbKeys   = activeFields.filter(f => f.field_type === 'flat_checkboxes' || f.field_type === 'grouped_checkboxes').map(f => f.key);
+        const textKeys = activeFields.filter(f => f.field_type === 'text_with_suggestions' || f.field_type === 'json').map(f => f.key);
+        const kvKeys   = activeFields.filter(f => f.field_type === 'key_value_pairs').map(f => f.key);
 
         // Resolve text/json values (shared across all combos)
         const fixedVals = {{}};
