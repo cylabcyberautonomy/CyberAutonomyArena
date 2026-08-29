@@ -78,6 +78,7 @@ class Experiment:
     experiment_name = _Field("experiment", "name")
     trial = _Field("experiment", "trial")
     status = _Field("experiment", "status")
+    error = _Field("experiment", "error")  # human-readable failure reason when status is Error/TimedOut; None otherwise
     retry_count = _Field("experiment", "retry_count")
     base_name = _Field("experiment", "base_name")
     teardown = _Field("experiment", "teardown")
@@ -108,7 +109,7 @@ class Experiment:
         created_at = created_at or datetime.now(timezone.utc)
         self.metadata = {
             "experiment": {
-                "name": experiment_name, "trial": trial, "status": status,
+                "name": experiment_name, "trial": trial, "status": status, "error": None,
                 "retry_count": 0, "base_name": "", "teardown": teardown,
                 "created_at": created_at, "updated_at": updated_at or created_at,
             },

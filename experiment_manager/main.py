@@ -6,6 +6,7 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -384,11 +385,14 @@ def _write_result(experiment: Experiment) -> None:
     p.write_text(experiment.result_json())
 
 
-async def _handle_failure(experiment: Experiment) -> None:
+async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) -> None:
     """One attempt failed. Tear it down, then retry IN PLACE (same name, so the polling caller keeps
     tracking it) as status RETRYING — until the retry budget is spent, at which point escalate a terminal
-    ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling."""
+    ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling.
+    `reason` is the human-readable cause, surfaced on the experiment record (and the dashboard)."""
     name = experiment.experiment_name
+    if reason:
+        experiment.error = reason
     tore_down = await _teardown(experiment)  # frees VMs + capacity; keeps the registry row
     _write_result(experiment)  # capture this attempt's timeline before it's archived
 
@@ -405,6 +409,7 @@ async def _handle_failure(experiment: Experiment) -> None:
     if tore_down and cfg.max_retries > 0 and experiment.retry_count < cfg.max_retries:
         experiment.retry_count += 1
         experiment.status = ExperimentStatus.RETRYING
+        experiment.error = None  # fresh attempt — clear the prior failure reason
         experiment.deployed_environment = experiment.c2c_container_id = experiment.pid = None
         experiment.vcpus_reserved = experiment.ram_mb_reserved = None
         for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
@@ -530,9 +535,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
 
-    except Exception:
+    except Exception as e:
         exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Deploy/configure failed — {e}")
         return
     finally:
         if deploy_slot_held:
@@ -550,9 +555,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         if prepared.container_id:
             experiment.c2c_container_id = prepared.container_id
             await registry.update(experiment)
-    except Exception:
+    except Exception as e:
         exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Attacker setup failed — {e}")
         return
 
     defender_process = None
@@ -579,7 +584,7 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     try:
         process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=kali_c2c_url)
-    except Exception:
+    except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
             try:
@@ -587,7 +592,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await defender_process.wait()
             except Exception:
                 pass
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
     experiment.pid = process.pid
@@ -607,9 +612,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         except asyncio.TimeoutError:
             pass
         status = ExperimentStatus.TIMEDOUT
-    except Exception:
+    except Exception as e:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
+        experiment.error = f"Error waiting on attacker process — {e}"
     finally:
         if defender_process:
             try:
@@ -622,7 +628,8 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
     if status == ExperimentStatus.ERROR:  # a nonzero attacker exit is a failure — retry or escalate
-        await _handle_failure(experiment)
+        reason = experiment.error or f"Attacker exited with code {returncode} (see attacker.log)"
+        await _handle_failure(experiment, reason)
         return
 
     experiment.status = status
