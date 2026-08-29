@@ -428,7 +428,10 @@ def render_html(experiments):
         for (const field of schema.fields) {{
           const grp = document.createElement('div');
           grp.className = 'form-group';
-          grp.dataset.groupFor = field.key;
+          grp.dataset.fieldKey = field.key;
+          if (field.show_when) {{
+            grp.dataset.showWhen = JSON.stringify(field.show_when);
+          }}
 
           const lbl = document.createElement('label');
           lbl.textContent = field.label;
@@ -589,50 +592,62 @@ def render_html(experiments):
         }}
         containerEl.appendChild(row);
 
-        // Conditional fields: only show a field whose `depends_on` is satisfied.
-        // Re-evaluated whenever the controlling checkboxes change (including via
-        // the Select all / Clear buttons, which mutate checkboxes without firing
-        // a change event, hence the deferred re-check on click).
-        if (schema.fields.some(f => f.depends_on)) {{
-          const applyDeps = () => {{
-            const fv = readFieldValues(containerEl);
-            for (const f of schema.fields) {{
-              if (!f.depends_on) continue;
-              const grpEl = containerEl.querySelector(`[data-group-for="${{f.key}}"]`);
-              if (grpEl) grpEl.style.display = isFieldActive(f, fv) ? '' : 'none';
-            }}
-          }};
-          containerEl.addEventListener('change', applyDeps);
-          containerEl.addEventListener('click', (e) => {{
-            if (e.target.closest('.llm-select-all, .llm-clear')) setTimeout(applyDeps, 0);
-          }});
-          applyDeps();
+        // Conditional field visibility (show_when): re-evaluate on any change or
+        // click (checkbox toggles, select-all/clear buttons), then once now.
+        // Attach the delegated listeners once per container (renderFields runs
+        // again on every type switch, but the container element persists).
+        if (!containerEl.dataset.showWhenBound) {{
+          containerEl.addEventListener('change', () => applyConditionalVisibility(containerEl));
+          containerEl.addEventListener('click', () => applyConditionalVisibility(containerEl));
+          containerEl.dataset.showWhenBound = '1';
         }}
+        applyConditionalVisibility(containerEl);
       }}
 
-      // A field with a `depends_on` is active only when the controlling field has
-      // at least one selected value listed in requires_any. Inactive fields are
-      // hidden and excluded from the submitted config.
-      function isFieldActive(field, fieldValues) {{
-        if (!field.depends_on) return true;
-        const dep = field.depends_on;
-        const selected = (fieldValues[dep.field] || {{}}).value || [];
-        const req = dep.requires_any || [];
-        return Array.isArray(selected) && selected.some(v => req.includes(v));
+      // Current form values as fieldKey -> array of selected/entered values.
+      function currentFieldValues(containerEl) {{
+        const vals = {{}};
+        containerEl.querySelectorAll('[data-field-type="flat_checkboxes"],[data-field-type="grouped_checkboxes"]').forEach(grid => {{
+          vals[grid.dataset.fieldKey] = [...grid.querySelectorAll('.llm-cb:checked')].map(cb => cb.value);
+        }});
+        containerEl.querySelectorAll('input[data-field-key]').forEach(input => {{
+          vals[input.dataset.fieldKey] = [input.value.trim()];
+        }});
+        return vals;
+      }}
+
+      // Show/hide fields with a show_when condition based on current values.
+      // Visible iff, for every controlling key, at least one selected value is
+      // in that key's allowed list (OR within a key, AND across keys).
+      function applyConditionalVisibility(containerEl) {{
+        const vals = currentFieldValues(containerEl);
+        containerEl.querySelectorAll('.form-group[data-show-when]').forEach(grp => {{
+          let cond;
+          try {{ cond = JSON.parse(grp.dataset.showWhen); }} catch (ex) {{ return; }}
+          let visible = true;
+          for (const [ctrlKey, allowed] of Object.entries(cond)) {{
+            const cur = vals[ctrlKey] || [];
+            if (!cur.some(v => allowed.includes(v))) {{ visible = false; break; }}
+          }}
+          grp.style.display = visible ? '' : 'none';
+        }});
       }}
 
       function readFieldValues(containerEl) {{
         const result = {{}};
         containerEl.querySelectorAll('input[data-field-key]').forEach(input => {{
+          if (input.closest('.form-group')?.style.display === 'none') return;
           result[input.dataset.fieldKey] = {{ type: input.dataset.fieldType, value: input.value.trim() }};
         }});
         containerEl.querySelectorAll('[data-field-type="flat_checkboxes"],[data-field-type="grouped_checkboxes"]').forEach(grid => {{
+          if (grid.closest('.form-group')?.style.display === 'none') return;
           result[grid.dataset.fieldKey] = {{
             type: grid.dataset.fieldType,
             value: [...grid.querySelectorAll('.llm-cb:checked')].map(cb => cb.value),
           }};
         }});
         containerEl.querySelectorAll('[data-field-type="key_value_pairs"]').forEach(grid => {{
+          if (grid.closest('.form-group')?.style.display === 'none') return;
           result[grid.dataset.fieldKey] = {{
             type: grid.dataset.fieldType,
             value: [...grid.querySelectorAll('.kv-pair-row')].map(row => ({{
@@ -652,12 +667,13 @@ def render_html(experiments):
       }}
 
       function buildConfigs(configType, schema, fieldValues) {{
-        // Drop fields whose dependency isn't satisfied so they are neither
-        // required nor added to the generated configs (backend fills the default).
-        const activeFields = schema.fields.filter(f => isFieldActive(f, fieldValues));
-        const cbKeys   = activeFields.filter(f => f.field_type === 'flat_checkboxes' || f.field_type === 'grouped_checkboxes').map(f => f.key);
-        const textKeys = activeFields.filter(f => f.field_type === 'text_with_suggestions' || f.field_type === 'json').map(f => f.key);
-        const kvKeys   = activeFields.filter(f => f.field_type === 'key_value_pairs').map(f => f.key);
+        // Only fields present in fieldValues are considered; readFieldValues
+        // omits fields hidden by show_when, so they are neither required nor
+        // emitted (the plugin supplies their default).
+        const present  = f => Object.prototype.hasOwnProperty.call(fieldValues, f.key);
+        const cbKeys   = schema.fields.filter(f => present(f) && (f.field_type === 'flat_checkboxes' || f.field_type === 'grouped_checkboxes')).map(f => f.key);
+        const textKeys = schema.fields.filter(f => present(f) && (f.field_type === 'text_with_suggestions' || f.field_type === 'json')).map(f => f.key);
+        const kvKeys   = schema.fields.filter(f => present(f) && f.field_type === 'key_value_pairs').map(f => f.key);
 
         // Resolve text/json values (shared across all combos)
         const fixedVals = {{}};
