@@ -26,6 +26,7 @@ class PreparedAttacker:
 class AttackerPlugin(BaseModel):
     _registry: ClassVar[dict[str, type["AttackerPlugin"]]] = {}
     setup_play: ClassVar[Optional[str]] = None  # kali runtime play the harness runs instead of the registry default; None = registry default
+    requires_docker: ClassVar[bool] = False  # True if setup needs a local Docker daemon (e.g. a C2 container); gates an early preflight
 
     def __init_subclass__(cls, config_type: str = None, **kwargs):
         super().__init_subclass__(**kwargs)

@@ -75,6 +75,7 @@ class _IncalmoAttacker(AttackerPlugin):
     """Shared C2C lifecycle for all Incalmo-based attackers."""
 
     setup_play: ClassVar[str] = "start_incalmo"
+    requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig

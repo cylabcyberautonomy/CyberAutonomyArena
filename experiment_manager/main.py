@@ -469,6 +469,32 @@ async def _cancel_and_remove(name: str) -> None:
     await registry.remove(name)
 
 
+async def _docker_preflight() -> Optional[str]:
+    """Return a human-readable reason if the local Docker daemon is not usable by this
+    process, else None. Attackers that run a C2 container need it; checking here lets the
+    harness fail an experiment immediately instead of after a full provision+configure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "info",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return ("Docker CLI not found on PATH, but this attacker needs Docker to build/run "
+                "its C2 container. Install Docker on the harness host.")
+    if proc.returncode == 0:
+        return None
+    err = stderr.decode(errors="replace")
+    if "permission denied" in err.lower() and "docker.sock" in err.lower():
+        return ("This attacker needs Docker (for its C2 container), but the harness user cannot "
+                "access the Docker daemon: permission denied on /var/run/docker.sock. Add the "
+                "user to the 'docker' group and restart the manager: "
+                "`sudo usermod -aG docker $USER` then log out/in (or restart the backend). "
+                "To fix the already-running process without a restart: "
+                "`sudo setfacl -m u:$USER:rw /var/run/docker.sock`.")
+    last = next((l for l in reversed(err.splitlines()) if l.strip()), "").strip()
+    return f"This attacker needs Docker, but the Docker daemon is not usable: {last or 'docker info failed'}"
+
+
 async def _run_experiment(experiment: Experiment) -> None:
     name = experiment.experiment_name
     exp_log = init_logger(name, output_root(name, cfg))
@@ -476,6 +502,18 @@ async def _run_experiment(experiment: Experiment) -> None:
     config_path = output_root(name, cfg) / name / "experiment" / "experiment_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(experiment.config_json())
+
+    # Fail fast (before any provisioning) if this attacker needs Docker and it isn't usable,
+    # so a missing docker-group membership doesn't waste a full deploy+configure.
+    if experiment.attacker is not None and getattr(experiment.attacker, "requires_docker", False):
+        docker_err = await _docker_preflight()
+        if docker_err:
+            exp_log.error("[%s] Docker preflight failed: %s", name, docker_err)
+            experiment.error = docker_err
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            _write_result(experiment)
+            return
 
     kali_c2c_url = None
     local_c2c_url = None
