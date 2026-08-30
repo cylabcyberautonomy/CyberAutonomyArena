@@ -20,6 +20,7 @@ class ExperimentStatus(str, Enum):
     ERROR = "Error"
     FINISHED = "Finished"
     TIMEDOUT = "TimedOut"   # terminal: hit the harness-enforced attacker wall-clock cap (not a failure — no retry)
+    BLOCKED = "Blocked"     # terminal: the attacker LLM was refused by a provider guardrail (not a harness failure — no retry)
 
 
 class ExperimentSpecs(BaseModel):

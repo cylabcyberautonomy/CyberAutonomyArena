@@ -665,6 +665,14 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
+    # A provider guardrail refusal (e.g. OpenAI/Azure "flagged for possible cybersecurity risk") lets the
+    # attacker end normally — usually exit 0 → FINISHED — which hides *why* nothing happened and looks like a
+    # clean run. Detect it from the attacker's own logs and mark a distinct terminal state. It is not a harness
+    # failure (the model refused, not us), so — like TimedOut — it does not retry and is not the red Error state.
+    if status in (ExperimentStatus.FINISHED, ExperimentStatus.ERROR) and _attacker_guardrail_block(name, cfg):
+        exp_log.info("[%s] Attacker LLM was refused by a provider guardrail — marking Blocked", name)
+        status = ExperimentStatus.BLOCKED
+        experiment.error = "Attacker LLM refused by a provider guardrail (content/safety policy) — see attacker llm.log"
     if status == ExperimentStatus.ERROR:  # a nonzero attacker exit is a failure — retry or escalate
         reason = experiment.error or f"Attacker exited with code {returncode} (see attacker.log)"
         await _handle_failure(experiment, reason)
@@ -674,6 +682,32 @@ async def _run_experiment(experiment: Experiment) -> None:
     await registry.update(experiment)
     await _teardown(experiment)
     _write_result(experiment)  # after teardown, so experiment_result.json carries the full timestamp set
+
+
+# High-precision phrases emitted by provider content/safety guardrails when they refuse a request.
+# Kept deliberately specific to avoid flagging benign log text that merely mentions "policy" or "filter".
+_GUARDRAIL_SIGNATURES = (
+    "flagged for possible cybersecurity risk",   # OpenAI / Azure cyber-misuse gate
+    "trusted access for cyber",                  # OpenAI cyber-program referral in the refusal
+    "content_policy_violation",                  # OpenAI content policy
+    "content management policy",                 # Azure OpenAI content filter
+    "responsibleaipolicyviolation",              # Azure Responsible AI
+)
+
+
+def _attacker_guardrail_block(name: str, cfg) -> bool:
+    """True if the attacker's LLM was refused by a provider content/safety guardrail. Such a refusal
+    surfaces as an API error inside the attacker's own logs while the attacker process itself may still
+    exit 0, so it must be detected from the logs rather than the exit code."""
+    attacker_dir = output_root(name, cfg) / name / "attacker"
+    for fname in ("llm.log", "attacker.log"):
+        try:
+            text = (attacker_dir / fname).read_text(errors="ignore").lower()
+        except OSError:
+            continue
+        if any(sig in text for sig in _GUARDRAIL_SIGNATURES):
+            return True
+    return False
 
 
 app = FastAPI(title="Experiment Manager", lifespan=lifespan)
