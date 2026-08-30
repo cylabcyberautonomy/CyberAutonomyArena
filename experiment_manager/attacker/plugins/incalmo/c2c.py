@@ -73,6 +73,12 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
             "--name", name,
             "-p", "0.0.0.0::8888",
             "-v", f"{cfg.incalmo_dir}:/incalmo",
+            # Build the container's uv env in a container-specific dir, NOT the
+            # repo's shared .venv. The mount is shared with the host, whose attacker
+            # process runs under <incalmo_dir>/.venv/bin/python; if the container (root,
+            # different interpreter path) wrote .venv it would break the host venv.
+            # Separate paths let both persist, cached, in the mount.
+            "-e", "UV_PROJECT_ENVIRONMENT=/incalmo/.venv-c2c",
             _C2C_IMAGE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

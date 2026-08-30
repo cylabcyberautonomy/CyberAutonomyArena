@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import ClassVar, Literal, Optional
@@ -71,10 +72,48 @@ asyncio.run(run_incalmo_strategy(config, task_id=sys.argv[2]))
 """
 
 
+def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
+    """Fail fast (before any C2 is launched) if the Incalmo host-side prerequisites for
+    running the attacker are missing. These live in `incalmo_dir` — a separate repo from the
+    harness — and are gitignored there, so a fresh Incalmo checkout won't have them and the
+    failure would otherwise surface late and cryptically (a dangling-symlink ENOENT on the
+    interpreter, or a FileNotFoundError deep inside strategy init)."""
+    # 1. The attacker process runs under this interpreter (see run()). A fresh Incalmo checkout
+    #    has no .venv; Path.exists() also returns False for a dangling symlink, so this equally
+    #    catches a .venv left pointing at an interpreter that isn't on this host (e.g. one written
+    #    by the C2 container before venv isolation).
+    py = cfg.get_incalmo_python()
+    if not py.exists():
+        raise RuntimeError(
+            f"Incalmo attacker interpreter not found: {py}\n"
+            f"Build the Incalmo host virtualenv before running an Incalmo attacker:\n"
+            f"    cd {cfg.incalmo_dir} && uv sync"
+        )
+    # 2. Incalmo's ConfigService reads ./config/config.json (relative to incalmo_dir, the attacker's
+    #    cwd) when the strategy builds its C2 client. Its c2c_server is overridden by the C2C_SERVER
+    #    env var we pass, so the file only has to exist and parse as an AttackerConfig; seed it from
+    #    the shipped example when absent rather than making the operator create it by hand.
+    config_json = cfg.incalmo_dir / "config" / "config.json"
+    if not config_json.exists():
+        example = cfg.incalmo_dir / "config" / "config_example.json"
+        if not example.exists():
+            raise RuntimeError(
+                f"Incalmo config missing: {config_json} (and no {example} to seed it from).\n"
+                f"Create {config_json} with a valid AttackerConfig before running an Incalmo attacker."
+            )
+        shutil.copyfile(example, config_json)
+
+
 class _IncalmoAttacker(AttackerPlugin):
     """Shared C2C lifecycle for all Incalmo-based attackers."""
 
     setup_play: ClassVar[str] = "start_incalmo"
+
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
+        # Validate host-side prerequisites before launching any C2, so a missing venv/config
+        # aborts cleanly with a precise fix instead of failing partway through attacker start.
+        _preflight_incalmo_host(cfg)
+        return await super().setup(experiment, cfg, mgmt_ip)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig
