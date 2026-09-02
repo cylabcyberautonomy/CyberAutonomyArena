@@ -2,6 +2,7 @@
 """Experiment dashboard — reads the manager's live registry and serves a live HTML UI."""
 
 import argparse
+import html
 import json
 import sys
 import urllib.request
@@ -129,6 +130,17 @@ def _plugin_schemas_js() -> str:
     def_json = json.dumps(_DEFENDER_SCHEMAS, indent=2)
     return f"  <script>\n    const ATTACKER_SCHEMAS = {atk_json};\n    const DEFENDER_SCHEMAS = {def_json};\n  </script>"
 
+def _error_html(e: dict) -> str:
+    """Red, truncated failure reason under the status badge (full text on hover).
+    Shown only for failed states that carry a reason."""
+    err = e.get("error")
+    if not err or e.get("status") not in ("Error", "TimedOut"):
+        return ""
+    safe = html.escape(str(err))
+    return (f'<div title="{safe}" style="color:#dc2626;font-size:11px;margin-top:4px;'
+            f'max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{safe}</div>')
+
+
 def render_html(experiments):
     counts = status_counts(experiments)
     total = len(experiments)
@@ -154,10 +166,11 @@ def render_html(experiments):
         icon, color, bg = STATUS_STYLE.get(status, ("⬜", "#6b7280", "#f3f4f6"))
         badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {color}">{icon} {status}</span>'
         retry_html = f' <span class="retry-badge">↩ {retries}</span>' if retries else ""
+        err_html = _error_html(e)
         rows += f"""
         <tr>
           <td class="name-cell">{name}</td>
-          <td>{badge}{retry_html}</td>
+          <td>{badge}{retry_html}{err_html}</td>
           <td>{env}</td>
           <td>{attacker}</td>
           <td class="time-cell">{created}</td>
@@ -791,6 +804,21 @@ def render_html(experiments):
           .slice(0, 32);
       }}
 
+      // Turn a backend error body into a readable line. FastAPI validation errors
+      // put an array of {{loc,msg}} objects in `detail`, which would otherwise
+      // stringify to "[object Object]".
+      function formatSubmitError(data) {{
+        if (!data) return 'unknown error';
+        const d = data.detail;
+        if (typeof d === 'string') return d;
+        if (Array.isArray(d)) return d.map(x => {{
+          const loc = Array.isArray(x.loc) ? x.loc.filter(p => p !== 'body').join('.') : '';
+          return (loc ? loc + ': ' : '') + (x.msg || JSON.stringify(x));
+        }}).join('; ');
+        if (d) return JSON.stringify(d);
+        return JSON.stringify(data);
+      }}
+
       // ── Attacker list ─────────────────────────────────────────────────────
       const attackerList = [];
 
@@ -945,7 +973,7 @@ def render_html(experiments):
                     box.innerHTML += `<span class="result-ok">  OK  ${{expName}}</span>\n`;
                     ok++;
                   }} else {{
-                    box.innerHTML += `<span class="result-err">  ERR ${{expName}} → ${{data.detail || JSON.stringify(data)}}</span>\n`;
+                    box.innerHTML += `<span class="result-err">  ERR ${{expName}} → ${{formatSubmitError(data)}}</span>\n`;
                     err++;
                   }}
                 }} catch(ex) {{
@@ -1121,7 +1149,8 @@ def _rows(experiments):
         icon, color, bg = STATUS_STYLE.get(status, ("⬜", "#6b7280", "#f3f4f6"))
         badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {color}">{icon} {status}</span>'
         retry_html = f' <span class="retry-badge">↩ {retries}</span>' if retries else ""
-        rows += (f'<tr><td class="name-cell">{name}</td><td>{badge}{retry_html}</td>'
+        err_html = _error_html(e)
+        rows += (f'<tr><td class="name-cell">{name}</td><td>{badge}{retry_html}{err_html}</td>'
                  f'<td>{env}</td><td>{attacker}</td>'
                  f'<td class="time-cell">{created}</td><td class="time-cell">{updated}</td></tr>')
     return rows

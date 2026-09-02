@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,25 @@ from ..config import ExperimentManagerConfig
 from .models import DeployedEnvironment
 from ..experiment import Experiment
 from ..experiment_log import init_logger, log, output_root
+
+
+# Matches a Python exception summary line, e.g. "RuntimeError: mgmt FIP host key never matched ...".
+_EXC_RE = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception): ")
+
+
+def _mhbench_error(action: str, returncode: int, mhbench_log: Path) -> RuntimeError:
+    """Build a failure whose message carries MHBench's real cause, not just an exit code.
+    Pulls the most specific line from the log tail (a Python 'SomeError: ...' line if present,
+    else the last non-empty line) so the reason survives up to the dashboard."""
+    detail = ""
+    try:
+        lines = [ln.rstrip() for ln in mhbench_log.read_text(errors="replace").splitlines() if ln.strip()]
+        err_lines = [ln for ln in lines if _EXC_RE.match(ln.strip())]
+        detail = (err_lines[-1] if err_lines else lines[-1]).strip()
+    except Exception:
+        pass
+    detail = f": {detail}" if detail else ""
+    return RuntimeError(f"MHBench {action} failed (exit {returncode}){detail} (see {mhbench_log})")
 
 
 def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
@@ -51,7 +71,7 @@ def _provision_sync(
     with open(mhbench_log, "a") as lf:
         result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)
     if result.returncode != 0:
-        raise RuntimeError(f"MHBench provision failed (exit {result.returncode}), see {mhbench_log}")
+        raise _mhbench_error("provision", result.returncode, mhbench_log)
 
     mgmt_ip: Optional[str] = None
     if provision_result_path.exists():
@@ -101,7 +121,7 @@ def _configure_sync(
         result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT,
                                 env={**os.environ, "MHBENCH_ANSIBLE_LOG_DIR": str(ansible_log_dir)})
     if result.returncode != 0:
-        raise RuntimeError(f"MHBench configure failed (exit {result.returncode}), see {mhbench_log}")
+        raise _mhbench_error("configure", result.returncode, mhbench_log)
 
     log(experiment_name, "Configuration complete.")
 
@@ -163,7 +183,7 @@ def _attacker_play_sync(
         result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT,
                                 env={**os.environ, "MHBENCH_ANSIBLE_LOG_DIR": str(ansible_log_dir)})
     if result.returncode != 0:
-        raise RuntimeError(f"Attacker setup play '{play}' failed (exit {result.returncode}), see {mhbench_log}")
+        raise _mhbench_error(f"attacker setup play '{play}'", result.returncode, mhbench_log)
 
 
 async def run_attacker_setup_play(

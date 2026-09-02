@@ -6,6 +6,7 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -384,11 +385,14 @@ def _write_result(experiment: Experiment) -> None:
     p.write_text(experiment.result_json())
 
 
-async def _handle_failure(experiment: Experiment) -> None:
+async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) -> None:
     """One attempt failed. Tear it down, then retry IN PLACE (same name, so the polling caller keeps
     tracking it) as status RETRYING — until the retry budget is spent, at which point escalate a terminal
-    ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling."""
+    ERROR. RETRYING tells phdpt the harness is handling it and the caller should just keep polling.
+    `reason` is the human-readable cause, surfaced on the experiment record (and the dashboard)."""
     name = experiment.experiment_name
+    if reason:
+        experiment.error = reason
     tore_down = await _teardown(experiment)  # frees VMs + capacity; keeps the registry row
     _write_result(experiment)  # capture this attempt's timeline before it's archived
 
@@ -405,6 +409,7 @@ async def _handle_failure(experiment: Experiment) -> None:
     if tore_down and cfg.max_retries > 0 and experiment.retry_count < cfg.max_retries:
         experiment.retry_count += 1
         experiment.status = ExperimentStatus.RETRYING
+        experiment.error = None  # fresh attempt — clear the prior failure reason
         experiment.deployed_environment = experiment.c2c_container_id = experiment.pid = None
         experiment.vcpus_reserved = experiment.ram_mb_reserved = None
         for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
@@ -464,6 +469,32 @@ async def _cancel_and_remove(name: str) -> None:
     await registry.remove(name)
 
 
+async def _docker_preflight() -> Optional[str]:
+    """Return a human-readable reason if the local Docker daemon is not usable by this
+    process, else None. Attackers that run a C2 container need it; checking here lets the
+    harness fail an experiment immediately instead of after a full provision+configure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "info",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return ("Docker CLI not found on PATH, but this attacker needs Docker to build/run "
+                "its C2 container. Install Docker on the harness host.")
+    if proc.returncode == 0:
+        return None
+    err = stderr.decode(errors="replace")
+    if "permission denied" in err.lower() and "docker.sock" in err.lower():
+        return ("This attacker needs Docker (for its C2 container), but the harness user cannot "
+                "access the Docker daemon: permission denied on /var/run/docker.sock. Add the "
+                "user to the 'docker' group and restart the manager: "
+                "`sudo usermod -aG docker $USER` then log out/in (or restart the backend). "
+                "To fix the already-running process without a restart: "
+                "`sudo setfacl -m u:$USER:rw /var/run/docker.sock`.")
+    last = next((l for l in reversed(err.splitlines()) if l.strip()), "").strip()
+    return f"This attacker needs Docker, but the Docker daemon is not usable: {last or 'docker info failed'}"
+
+
 async def _run_experiment(experiment: Experiment) -> None:
     name = experiment.experiment_name
     exp_log = init_logger(name, output_root(name, cfg))
@@ -471,6 +502,18 @@ async def _run_experiment(experiment: Experiment) -> None:
     config_path = output_root(name, cfg) / name / "experiment" / "experiment_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(experiment.config_json())
+
+    # Fail fast (before any provisioning) if this attacker needs Docker and it isn't usable,
+    # so a missing docker-group membership doesn't waste a full deploy+configure.
+    if experiment.attacker is not None and getattr(experiment.attacker, "requires_docker", False):
+        docker_err = await _docker_preflight()
+        if docker_err:
+            exp_log.error("[%s] Docker preflight failed: %s", name, docker_err)
+            experiment.error = docker_err
+            experiment.status = ExperimentStatus.ERROR
+            await registry.update(experiment)
+            _write_result(experiment)
+            return
 
     kali_c2c_url = None
     local_c2c_url = None
@@ -530,9 +573,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
 
-    except Exception:
+    except Exception as e:
         exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Deploy/configure failed — {e}")
         return
     finally:
         if deploy_slot_held:
@@ -550,9 +593,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         if prepared.container_id:
             experiment.c2c_container_id = prepared.container_id
             await registry.update(experiment)
-    except Exception:
+    except Exception as e:
         exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Attacker setup failed — {e}")
         return
 
     defender_process = None
@@ -579,7 +622,7 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     try:
         process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=kali_c2c_url)
-    except Exception:
+    except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
             try:
@@ -587,7 +630,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await defender_process.wait()
             except Exception:
                 pass
-        await _handle_failure(experiment)
+        await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
     experiment.pid = process.pid
@@ -607,9 +650,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         except asyncio.TimeoutError:
             pass
         status = ExperimentStatus.TIMEDOUT
-    except Exception:
+    except Exception as e:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
+        experiment.error = f"Error waiting on attacker process — {e}"
     finally:
         if defender_process:
             try:
@@ -622,7 +666,8 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
     if status == ExperimentStatus.ERROR:  # a nonzero attacker exit is a failure — retry or escalate
-        await _handle_failure(experiment)
+        reason = experiment.error or f"Attacker exited with code {returncode} (see attacker.log)"
+        await _handle_failure(experiment, reason)
         return
 
     experiment.status = status
