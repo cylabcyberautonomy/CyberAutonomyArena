@@ -9,13 +9,14 @@ dynamically — no plugin-specific knowledge lives in the dashboard.
 from typing import Literal, NotRequired, TypedDict, Union
 
 
-class FieldDependency(TypedDict):
-    """Conditional display: a field is only shown/collected when the field named
-    by `field` has at least one selected value in `requires_any`. Lets a plugin
-    hide an option that is irrelevant for the current selection (e.g. an
-    execution LLM that only some abstraction levels use)."""
-    field: str            # key of the controlling field (a checkbox field)
-    requires_any: list[str]
+# Maps a *sibling* field's key to the list of values for which THIS field is
+# shown.  The dashboard evaluates every condition against the form's current
+# values: the field is visible only when, for each controlling key, at least one
+# currently-selected value appears in the allowed list (OR within a key, AND
+# across keys).  A hidden field is excluded from validation and from the emitted
+# config entirely, so the plugin must give it a default.  Example:
+#   "show_when": {"abstraction": ["agent_scan", "agent_all"]}
+ShowWhen = dict[str, list[str]]
 
 
 class TextWithSuggestionsField(TypedDict):
@@ -24,6 +25,7 @@ class TextWithSuggestionsField(TypedDict):
     key: str            # exact JSON key in the submitted config dict
     suggestions: list[str]
     default: str
+    show_when: NotRequired[ShowWhen]
 
 
 class FlatCheckboxesField(TypedDict):
@@ -31,6 +33,7 @@ class FlatCheckboxesField(TypedDict):
     label: str
     key: str
     options: list[str]
+    show_when: NotRequired[ShowWhen]
 
 
 class CheckboxGroup(TypedDict):
@@ -43,7 +46,7 @@ class GroupedCheckboxesField(TypedDict):
     label: str
     key: str
     groups: list[CheckboxGroup]
-    depends_on: NotRequired[FieldDependency]  # if set, only shown/collected when the dependency is satisfied
+    show_when: NotRequired[ShowWhen]
 
 
 class KeyValuePair(TypedDict):
@@ -56,6 +59,7 @@ class KeyValuePairsField(TypedDict):
     label: str
     key: str
     entries: list[KeyValuePair]
+    show_when: NotRequired[ShowWhen]
 
 
 class JsonField(TypedDict):
@@ -64,6 +68,7 @@ class JsonField(TypedDict):
     key: str
     placeholder: str
     default: str
+    show_when: NotRequired[ShowWhen]
 
 
 FieldSchema = Union[
