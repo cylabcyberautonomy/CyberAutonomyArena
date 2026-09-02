@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experiment dashboard — reads experiment_registry.yaml and serves a live HTML UI."""
+"""Experiment dashboard — reads the manager's live registry and serves a live HTML UI."""
 
 import argparse
 import json
@@ -67,7 +67,6 @@ def fmt_time(raw):
     except Exception:
         return str(raw)
 
-REGISTRY_PATH = Path(__file__).parent / "experiment_registry.yaml"
 
 STATUS_STYLE = {
     "Queued":    ("⬜", "#6b7280", "#f3f4f6"),
@@ -78,10 +77,15 @@ STATUS_STYLE = {
 }
 
 def load_experiments():
-    if not REGISTRY_PATH.exists():
+    # The manager keeps the registry in memory (the old experiment_registry.yaml
+    # is never written), so read live state from its REST API. Return [] when the
+    # backend is unreachable, so the dashboard still renders.
+    try:
+        req = urllib.request.Request(EXPERIMENT_SERVER, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
         return []
-    with open(REGISTRY_PATH) as f:
-        data = yaml.safe_load(f) or {}
 
     def _parse_sort_ts(exp):
         # Prefer explicit submission time, then creation time.
@@ -96,7 +100,7 @@ def load_experiments():
         except Exception:
             return datetime.min.replace(tzinfo=timezone.utc)
 
-    experiments = data.get("experiments", [])
+    experiments = data if isinstance(data, list) else data.get("experiments", [])
     return sorted(experiments, key=_parse_sort_ts, reverse=True)
 
 def load_environments():
@@ -1200,9 +1204,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Experiment dashboard server")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--registry", type=Path, default=REGISTRY_PATH)
     args = parser.parse_args()
-    REGISTRY_PATH = args.registry
 
     HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", args.port), Handler)
