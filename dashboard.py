@@ -76,6 +76,8 @@ STATUS_STYLE = {
     "Running":   ("🟡", "#d97706", "#fef3c7"),
     "Error":     ("🔴", "#dc2626", "#fee2e2"),
     "Finished":  ("✅", "#059669", "#d1fae5"),
+    "TimedOut":  ("⏱️", "#b45309", "#fef3c7"),
+    "Blocked":   ("🚫", "#7c3aed", "#ede9fe"),
 }
 
 def load_experiments():
@@ -130,10 +132,14 @@ def _error_html(e: dict) -> str:
     """Red, truncated failure reason under the status badge (full text on hover).
     Shown only for failed states that carry a reason."""
     err = e.get("error")
-    if not err or e.get("status") not in ("Error", "TimedOut"):
+    status = e.get("status")
+    if not err or status not in ("Error", "TimedOut", "Blocked"):
         return ""
+    # Match the reason text to the status: red only for the actual Error state; the soft terminal
+    # states (TimedOut / Blocked) use their own badge colour so they don't read as a hard failure.
+    color = {"Error": "#dc2626", "TimedOut": "#b45309", "Blocked": "#7c3aed"}[status]
     safe = html.escape(str(err))
-    return (f'<div title="{safe}" style="color:#dc2626;font-size:11px;margin-top:4px;'
+    return (f'<div title="{safe}" style="color:{color};font-size:11px;margin-top:4px;'
             f'max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{safe}</div>')
 
 
