@@ -131,14 +131,17 @@ def _plugin_schemas_js() -> str:
     return f"  <script>\n    const ATTACKER_SCHEMAS = {atk_json};\n    const DEFENDER_SCHEMAS = {def_json};\n  </script>"
 
 def _error_html(e: dict) -> str:
-    """Red, truncated failure reason under the status badge (full text on hover).
-    Shown only for failed states that carry a reason."""
+    """Truncated failure reason under the status badge - click to expand the full text
+    (native <details>/<summary>, hover still shows it too via title). Shown only for
+    failed states that carry a reason."""
     err = e.get("error")
     if not err or e.get("status") not in ("Error", "TimedOut"):
         return ""
     safe = html.escape(str(err))
-    return (f'<div title="{safe}" style="color:#dc2626;font-size:11px;margin-top:4px;'
-            f'max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{safe}</div>')
+    return (f'<details class="err-details" style="color:#dc2626">'
+            f'<summary title="{safe}">{safe}</summary>'
+            f'<div class="err-full">{safe}</div>'
+            f'</details>')
 
 
 def render_html(experiments):
@@ -218,6 +221,17 @@ def render_html(experiments):
               font-size: 0.78rem; font-weight: 600; white-space: nowrap; }}
     .retry-badge {{ display: inline-block; margin-left: 4px; padding: 0.1rem 0.45rem;
                     border-radius: 999px; background: #334155; color: #94a3b8; font-size: 0.72rem; }}
+    /* Error reason under a status badge: collapsed to one truncated line by default,
+       click to expand the full text (native <details>, no extra JS needed). */
+    .err-details {{ margin-top: 4px; font-size: 0.72rem; max-width: 380px; }}
+    .err-details summary {{ cursor: pointer; list-style: none; overflow: hidden;
+                             text-overflow: ellipsis; white-space: nowrap; }}
+    .err-details summary::-webkit-details-marker {{ display: none; }}
+    .err-details summary::before {{ content: '▸ '; }}
+    .err-details[open] summary::before {{ content: '▾ '; }}
+    .err-full {{ margin-top: 4px; padding: 0.5rem 0.6rem; background: rgba(0,0,0,0.25);
+                 border-radius: 6px; color: #e2e8f0; font-family: monospace; font-size: 0.72rem;
+                 white-space: pre-wrap; word-break: break-word; max-width: 480px; }}
     .refresh-bar {{ display: flex; align-items: center; gap: 0.5rem; }}
     .dot {{ width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
             animation: pulse 2s infinite; display: inline-block; }}
