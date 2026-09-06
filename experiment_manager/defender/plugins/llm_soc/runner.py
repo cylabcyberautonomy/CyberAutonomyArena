@@ -39,7 +39,7 @@ from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
 from environment.network import Network
-from utility.logging.logging import setup_logger, setup_action_logger
+from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
 # Both strategies subscribe to SuspiciousHost, which only the Falco-backed
@@ -69,8 +69,8 @@ experiment_name = config["experiment_name"]
 log_dir = Path(config["log_dir"])
 log_dir.mkdir(parents=True, exist_ok=True)
 
-setup_logger(str(log_dir / "perry.log"))
-action_logger = setup_action_logger(str(log_dir / "actions.log"))
+PerryLogger.setup_logger(str(log_dir))
+action_logger = setup_action_logger(str(log_dir))
 
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
