@@ -23,8 +23,8 @@ import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
-from environment.network import Network
-from utility.logging.logging import setup_logger, setup_action_logger
+from environment.network import Network, Subnet, Host
+from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
 from defender.telemetry.SimpleTelemetryAnalysis import SimpleTelemetryAnalysis
@@ -54,8 +54,8 @@ experiment_name = config["experiment_name"]
 log_dir = Path(config["log_dir"])
 log_dir.mkdir(parents=True, exist_ok=True)
 
-setup_logger(str(log_dir / "perry.log"))
-action_logger = setup_action_logger(str(log_dir / "actions.log"))
+PerryLogger.setup_logger(str(log_dir))
+action_logger = setup_action_logger(str(log_dir))
 
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
@@ -72,11 +72,30 @@ ansible_runner = AnsibleRunner(
     log_path=str(log_dir / "ansible.log"),
 )
 
+def _build_network(network_data: dict, experiment_name: str) -> Network:
+    """Network/Subnet/Host are plain classes here, not pydantic models (no
+    .model_validate) - build them by hand from MHBench's topology JSON. `sec_group`
+    isn't in that JSON (it's assigned at deploy time); MHBench names it
+    "<experiment_name>-<subnet_name>_sg" (see NetworkTopology.sg_name /
+    NetworkDeployer._n in MHBench's src/abstractions/network.py and
+    src/deployment/network_deployer.py) - reproduce that here so decoy deployment
+    (DeployDecoy) attaches new hosts to the subnet's real OpenStack security group."""
+    subnets = [
+        Subnet(
+            name=subnet_data["name"],
+            hosts=[Host(name=h["name"], ip=h["ip_address"]) for h in subnet_data["hosts"]],
+            sec_group=f"{experiment_name}-{subnet_data['name']}_sg",
+        )
+        for subnet_data in network_data["subnets"]
+    ]
+    return Network(name=network_data["name"], subnets=subnets)
+
+
 topology_spec = config.get("topology_spec")
 network = None
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
-    network = Network.model_validate(topology_data["networks"][0])
+    network = _build_network(topology_data["networks"][0], experiment_name)
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:
