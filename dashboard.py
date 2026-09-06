@@ -4,9 +4,11 @@
 import argparse
 import html
 import json
+import os
 import sys
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -30,6 +32,148 @@ MHBENCH_ENVIRONMENTS_DIR = (
     if "mhbench_dir" in _cfg
     else Path("/tmp/missing-mhbench")
 )
+
+# ── API usage tab: OpenRouter / LiteLLM credentials ───────────────────────────
+# This dashboard is its own long-running process, separate from Incalmo - it has
+# no access to Incalmo's own env vars unless we read them ourselves. Incalmo's
+# .env lives under incalmo_dir (already in config.yaml, since the Incalmo
+# attacker plugin drives that same checkout). A bare OS env var of the same name
+# wins if set directly on the dashboard process, so a deployment can override
+# without touching Incalmo's .env.
+def _load_incalmo_env() -> dict:
+    env: dict = {}
+    incalmo_dir = _cfg.get("incalmo_dir")
+    if not incalmo_dir:
+        return env
+    env_path = Path(incalmo_dir) / ".env"
+    if not env_path.exists():
+        return env
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            env[key] = value
+    return env
+
+_incalmo_env = _load_incalmo_env()
+
+def _credential(name: str) -> str | None:
+    return os.environ.get(name) or _incalmo_env.get(name) or None
+
+
+def _get_json(url: str, headers: dict, params: dict | None = None) -> tuple[int, dict]:
+    """GET url, return (status_code, parsed_json). Never raises - a connection
+    failure comes back as (0, {"detail": "..."})  , matching the shape of an
+    HTTP error response so callers can treat both uniformly."""
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+        except Exception:
+            body = {"detail": e.reason}
+        return e.code, body
+    except Exception as e:
+        return 0, {"detail": str(e)}
+
+
+def _get_openrouter_usage() -> dict:
+    # /api/v1/key (singular) is OpenRouter's self-serve endpoint: the calling
+    # key reports its OWN per-key limit/usage, no separate Provisioning key
+    # needed. This is the per-key spend cap OpenRouter's key-edit page calls
+    # "Credit limit" - distinct from (and more useful than) /api/v1/credits,
+    # which is account-wide lifetime purchased-credits/usage, not this key's cap.
+    api_key = _credential("OPENROUTER_API_KEY")
+    if not api_key:
+        return {"limit": None, "limit_remaining": None, "usage": None, "error": "OPENROUTER_API_KEY not found in Incalmo's .env"}
+
+    status, body = _get_json(
+        "https://openrouter.ai/api/v1/key",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    if status != 200:
+        return {"limit": None, "limit_remaining": None, "usage": None, "error": f"OpenRouter returned {status}: {body}"}
+
+    data = body.get("data") or {}
+    # None (limit) means "no limit set" (unlimited key) - distinct from 0.
+    return {"limit": data.get("limit"), "limit_remaining": data.get("limit_remaining"), "usage": data.get("usage"), "error": None}
+
+
+def _get_litellm_usage() -> dict:
+    base_url = _credential("LITELLM_BASE_URL")
+    api_key = _credential("LITELLM_API_KEY")
+    if not base_url or not api_key:
+        return {"spend": None, "max_budget": None, "error": "LITELLM_BASE_URL/LITELLM_API_KEY not found in Incalmo's .env"}
+
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+
+    # Self-serve: LITELLM_API_KEY queries /key/info about itself. Requires that
+    # key's allowed_routes include "/key/info" alongside its normal
+    # llm_api_routes entry - a narrow, read-only grant added via (once, with a
+    # master key): POST {root}/key/update {"key": "<key>", "allowed_routes":
+    # ["llm_api_routes", "/key/info"]}.
+    status, body = _get_json(f"{root}/key/info", headers={"Authorization": f"Bearer {api_key}"})
+    if status != 200:
+        return {"spend": None, "max_budget": None, "error": f"/key/info returned {status}: {body}"}
+
+    info = body.get("info") or {}
+    spend = body.get("spend", info.get("spend"))
+    max_budget = body.get("max_budget", info.get("max_budget"))
+    return {"spend": spend, "max_budget": max_budget, "error": None}
+
+
+def _fmt_usd(value) -> str:
+    return "—" if value is None else f"${value:.4f}"
+
+
+def _usage_bar_html(spend, limit) -> str:
+    """A progress bar for spend against a per-key limit, or a note that no
+    limit is set. Shared by both cards - same shape of cap on both sides now
+    that OpenRouter's /api/v1/key exposes a real per-key limit, like LiteLLM's
+    max_budget."""
+    if spend is None or not limit:
+        return '<div class="usage-note">No limit set on this key.</div>' if spend is not None else ""
+    pct = min(100.0, (spend / limit) * 100)
+    warn = " warn" if pct > 90 else ""
+    return f'<div class="usage-bar-track"><div class="usage-bar-fill{warn}" style="width:{pct:.1f}%"></div></div>'
+
+
+def _usage_html() -> str:
+    openrouter = _get_openrouter_usage()
+    litellm = _get_litellm_usage()
+
+    or_error_html = f'<div class="usage-error">{html.escape(openrouter["error"])}</div>' if openrouter["error"] else ""
+    or_limit_suffix = f' / {_fmt_usd(openrouter["limit"])}' if openrouter["limit"] else ""
+    or_bar_html = _usage_bar_html(openrouter["usage"], openrouter["limit"])
+
+    llm_error_html = f'<div class="usage-error">{html.escape(litellm["error"])}</div>' if litellm["error"] else ""
+    llm_budget_suffix = f' / {_fmt_usd(litellm["max_budget"])}' if litellm["max_budget"] else ""
+    llm_bar_html = _usage_bar_html(litellm["spend"], litellm["max_budget"])
+
+    return f"""
+    <div class="usage-card">
+      <h2>OpenRouter</h2>
+      <div class="usage-row"><span>Usage</span><strong>{_fmt_usd(openrouter["usage"])}{or_limit_suffix}</strong></div>
+      {or_bar_html}
+      {or_error_html}
+    </div>
+    <div class="usage-card">
+      <h2>LiteLLM (CMU gateway)</h2>
+      <div class="usage-row"><span>Spend</span><strong>{_fmt_usd(litellm["spend"])}{llm_budget_suffix}</strong></div>
+      {llm_bar_html}
+      {llm_error_html}
+    </div>"""
+
 
 # ── Plugin schema discovery ───────────────────────────────────────────────────
 _HARNESS_DIR = Path(__file__).parent
@@ -347,6 +491,20 @@ def render_html(experiments):
     .result-ok {{ color: #34d399; }}
     .result-err {{ color: #f87171; }}
     .result-info {{ color: #94a3b8; }}
+
+    /* API Usage tab */
+    .usage-wrap {{ padding: 2rem; max-width: 640px; }}
+    .usage-card {{ background: #1e293b; border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }}
+    .usage-card h2 {{ font-size: 0.95rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.75rem;
+                      border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }}
+    .usage-row {{ display: flex; justify-content: space-between; padding: 0.3rem 0; font-size: 0.88rem; color: #cbd5e1; }}
+    .usage-row strong {{ color: #f8fafc; }}
+    .usage-bar-track {{ background: #0f172a; border-radius: 999px; height: 8px; margin-top: 0.5rem; overflow: hidden; }}
+    .usage-bar-fill {{ height: 100%; background: #3b82f6; border-radius: 999px; transition: width 0.3s; }}
+    .usage-bar-fill.warn {{ background: #dc2626; }}
+    .usage-error {{ color: #f87171; font-size: 0.82rem; margin-top: 0.4rem; }}
+    .usage-updated {{ color: #64748b; font-size: 0.78rem; margin-bottom: 1rem; }}
+    .usage-note {{ color: #64748b; font-size: 0.78rem; font-style: italic; margin-top: 0.4rem; }}
   </style>
 {_plugin_schemas_js()}
   <script>
@@ -360,6 +518,19 @@ def render_html(experiments):
         }});
     }}
     setInterval(autoRefresh, 5000);
+
+    // ── API Usage tab auto-refresh ──────────────────────────────────────────
+    function autoRefreshUsage() {{
+      fetch('/api_usage')
+        .then(r => r.json())
+        .then(data => {{
+          document.getElementById('usage-root').innerHTML = data.html;
+          document.getElementById('usage-ts').textContent = new Date().toLocaleTimeString();
+        }});
+    }}
+    autoRefreshUsage();
+    setInterval(autoRefreshUsage, 30000);
+
     document.addEventListener('DOMContentLoaded', () => {{
       document.getElementById('ts').textContent = new Date().toLocaleTimeString();
 
@@ -1016,6 +1187,7 @@ def render_html(experiments):
   <div class="tabs">
     <div class="tab active" data-panel="panel-dashboard">Experiments</div>
     <div class="tab" data-panel="panel-submit">Submit</div>
+    <div class="tab" data-panel="panel-usage">API Usage</div>
   </div>
 
   <!-- Dashboard tab -->
@@ -1112,6 +1284,14 @@ def render_html(experiments):
         <button type="submit" class="submit-btn" id="submit-btn">Submit experiments</button>
       </form>
       <div id="results-box" class="results-box"></div>
+    </div>
+  </div>
+
+  <!-- API Usage tab -->
+  <div id="panel-usage" class="tab-panel">
+    <div class="usage-wrap">
+      <div class="usage-updated">Last checked <span id="usage-ts">—</span> · refreshes every 30s</div>
+      <div id="usage-root">Loading…</div>
     </div>
   </div>
 </body>
@@ -1225,6 +1405,9 @@ class Handler(BaseHTTPRequestHandler):
             counts = status_counts(experiments)
             total = len(experiments)
             payload = json.dumps({"html": _inner_html(total, _summary_cards(counts), _rows(experiments))})
+            self._respond(200, "application/json", payload)
+        elif self.path == "/api_usage":
+            payload = json.dumps({"html": _usage_html()})
             self._respond(200, "application/json", payload)
         else:
             self._respond(404, "text/plain", "Not found")
