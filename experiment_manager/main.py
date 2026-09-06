@@ -609,8 +609,14 @@ async def _run_experiment(experiment: Experiment) -> None:
             )
             experiment.defender_started_at = datetime.now(timezone.utc)
             await registry.update(experiment)
-        except Exception:
+        except Exception as e:
+            # A configured defender that fails to start must fail the experiment outright
+            # rather than silently degrade into an undefended attacker-only run - that
+            # would produce a "defender vs attacker" result with no defender ever having
+            # run, and nothing in the recorded outcome to say so.
             exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+            await _handle_failure(experiment, f"Failed to start defender — {e}")
+            return
 
     # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
     # by construction (awaited before run_attacker). Best-effort: a rotation failure must not waste a
