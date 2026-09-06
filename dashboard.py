@@ -1132,6 +1132,14 @@ def render_html(experiments):
 
         const repeats = parseInt(document.getElementById('repeats').value) || 1;
         const namePrefix = document.getElementById('name-prefix').value.trim();
+        if (/\\s/.test(namePrefix)) {{
+          box.innerHTML = '<span class="result-err">Name prefix can\'t contain a space ' +
+            '(MHBench builds SSH ControlPath strings from the experiment name unescaped - a ' +
+            'space silently breaks every ansible/SSH step for that experiment). Use underscores ' +
+            'or dashes instead, e.g. "test_defender" or "test-defender".</span>';
+          btn.disabled = false; return;
+        }}
+
         const total = attackerList.length * defenderList.length * envs.length * repeats;
         box.innerHTML += `<span class="result-info">Submitting ${{total}} experiment(s) ` +
           `(${{attackerList.length}} attacker(s) × ${{defenderList.length}} defender(s) × ` +
