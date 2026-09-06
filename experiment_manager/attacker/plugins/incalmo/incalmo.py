@@ -207,6 +207,19 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     execution_llm: str = ""
     abstraction: str = "incalmo"
 
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
+        prepared = await super().setup(experiment, cfg, mgmt_ip)
+        # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's
+        # Metasploit path (it's gated on context.llm_interface being set) -
+        # IncalmoStrategyAttacker never does, so it doesn't pay this install
+        # cost. msfrpcd has to run on the Kali host itself, not anywhere on the
+        # harness side - see MHBench's install_metasploit.yml and Incalmo's
+        # msf_rpc_client.py for why (msfrpcd binds 127.0.0.1, and this host has
+        # no floating IP for the harness to reach it directly).
+        from ....environment.deployer import run_attacker_setup_play
+        await run_attacker_setup_play(experiment, mgmt_ip, "install_metasploit", None, cfg)
+        return prepared
+
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
         return {
