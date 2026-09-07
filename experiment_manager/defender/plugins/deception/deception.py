@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -67,6 +65,23 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             "topology_spec": environment.topology_spec if environment else None,
         }
 
+    async def setup(
+        self,
+        experiment_name: str,
+        environment: Optional[DeployedEnvironment],
+        cfg: ExperimentManagerConfig,
+        mgmt_ip: Optional[str] = None,
+    ) -> None:
+        """Ensure the shared Elasticsearch instance is up (see setup.py) - this
+        defender doesn't need Falco (SimpleTelemetryAnalysis doesn't consume it),
+        so mgmt_ip (the experiment's bastion IP) isn't needed here."""
+        await self._run_deception_setup_script(
+            Path(__file__).parent,
+            {"deception_dir": str(cfg.deception_dir), "management_ip": cfg.host_ip},
+            experiment_name,
+            cfg,
+        )
+
     async def run(
         self,
         config_path: Path,
@@ -74,20 +89,6 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "a")
-        python = str(cfg.get_deception_python())
-        pythonpath_parts = [str(cfg.deception_dir)]
-        existing_pythonpath = os.environ.get("PYTHONPATH", "")
-        if existing_pythonpath:
-            pythonpath_parts.append(existing_pythonpath)
-        pythonpath = os.pathsep.join(pythonpath_parts)
-        return await asyncio.create_subprocess_exec(
-            python,
-            str(Path(__file__).parent / "runner.py"),
-            str(config_path),
-            cwd=str(cfg.deception_dir),
-            env={**os.environ, "PYTHONPATH": pythonpath},
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
+        return await self._run_deception_script(
+            Path(__file__).parent / "runner.py", config_path, cfg, log_path
         )
