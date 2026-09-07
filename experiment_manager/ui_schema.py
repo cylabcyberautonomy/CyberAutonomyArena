@@ -33,6 +33,13 @@ class FlatCheckboxesField(TypedDict):
     label: str
     key: str
     options: list[str]
+    # Short, legible display name per option (e.g. "ReactiveLayered" -> "react_lyr"),
+    # used when the dashboard builds an experiment name out of the selected config.
+    # Experiment names become an SSH ControlPath component on the remote hosts
+    # (mhbench-ssh/<experiment_name>/<hash>) and AF_UNIX socket paths are capped at
+    # 108 bytes, so long class names there silently break every SSH connection.
+    # Optional: options with no entry here fall back to the option value itself.
+    short_names: NotRequired[dict[str, str]]
     show_when: NotRequired[ShowWhen]
 
 
@@ -59,6 +66,9 @@ class KeyValuePairsField(TypedDict):
     label: str
     key: str
     entries: list[KeyValuePair]
+    # Short nickname per entry key (e.g. "honeypot" -> "hnypot"), used the same way as
+    # short_names above when the dashboard builds an experiment name - see configSlug.
+    key_short_names: NotRequired[dict[str, str]]
     show_when: NotRequired[ShowWhen]
 
 

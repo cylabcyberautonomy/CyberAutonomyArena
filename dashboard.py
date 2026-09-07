@@ -6,11 +6,12 @@ import html
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import yaml
@@ -19,6 +20,12 @@ EST = timezone(timedelta(hours=-5))
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 EXPERIMENT_SERVER = "http://localhost:8000/experiments"
+
+# Matches ExperimentManagerConfig.output_dir's own default (_HERE / "output") - the
+# dashboard has no access to that Pydantic config, so it's re-derived the same way:
+# relative to this file's own location, since dashboard.py and config.py live in the
+# same directory.
+OUTPUT_ROOT = Path(__file__).parent / "output"
 
 def _load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -219,6 +226,8 @@ STATUS_STYLE = {
     "Running":   ("🟡", "#d97706", "#fef3c7"),
     "Error":     ("🔴", "#dc2626", "#fee2e2"),
     "Finished":  ("✅", "#059669", "#d1fae5"),
+    "TimedOut":  ("⏱️", "#b45309", "#fef3c7"),
+    "Blocked":   ("🚫", "#7c3aed", "#ede9fe"),
 }
 
 def load_experiments():
@@ -262,6 +271,34 @@ def load_environments():
         groups["misc"] = misc
     return groups
 
+# Short, legible nickname per environment spec ("group/stem" - see _env_panels()),
+# used when the dashboard builds an experiment name out of the selected env. Same
+# reasoning as the plugin `short_names` maps in ui_schema.py: experiment names become
+# an SSH ControlPath component (mhbench-ssh/<experiment_name>/<hash>) and AF_UNIX
+# socket paths cap out at 108 bytes, so a long env stem silently breaks every SSH
+# connection. Specs with no entry here fall back to the plain stem (see submit JS) -
+# add a nickname here rather than relying on that fallback for anything long.
+ENV_NICKNAMES = {
+    "non-generated/chain": "chain",
+    "non-generated/chain_2hosts": "chain2h",
+    "non-generated/chain_pe": "chain_pe",
+    "non-generated/chain_pe_mixed": "chain_pemix",
+    "non-generated/dumbbell": "dumbbell",
+    "non-generated/dumbbell_pe": "dumbbell_pe",
+    "non-generated/enterprise_a": "ent_a",
+    "non-generated/enterprise_b": "ent_b",
+    "non-generated/equifax_large": "eq_large",
+    "non-generated/equifax_medium": "eq_medium",
+    "non-generated/equifax_small": "eq_small",
+    "non-generated/ics": "ics",
+    "non-generated/star": "star",
+    "non-generated/star_pe": "star_pe",
+    "non-generated/sudobaron_test": "sudobaron",
+    "instrumented/equifax_small_instrumented": "eq_small_i",
+    "generated/generated_mini": "gen_mini",
+    **{f"generated/generated_network_{i}": f"gennet{i}" for i in range(30)},
+}
+
 def status_counts(experiments):
     counts = {s: 0 for s in STATUS_STYLE}
     for e in experiments:
@@ -272,7 +309,27 @@ def status_counts(experiments):
 def _plugin_schemas_js() -> str:
     atk_json = json.dumps(_ATTACKER_SCHEMAS, indent=2)
     def_json = json.dumps(_DEFENDER_SCHEMAS, indent=2)
-    return f"  <script>\n    const ATTACKER_SCHEMAS = {atk_json};\n    const DEFENDER_SCHEMAS = {def_json};\n  </script>"
+    env_json = json.dumps(ENV_NICKNAMES, indent=2)
+    return (f"  <script>\n    const ATTACKER_SCHEMAS = {atk_json};\n    const DEFENDER_SCHEMAS = {def_json};\n"
+            f"    const ENV_NICKNAMES = {env_json};\n  </script>")
+
+def _error_html(e: dict) -> str:
+    """Truncated failure reason under the status badge - click to expand the full text
+    (native <details>/<summary>, hover still shows it too via title). Shown only for
+    failed states that carry a reason."""
+    err = e.get("error")
+    status = e.get("status")
+    if not err or status not in ("Error", "TimedOut", "Blocked"):
+        return ""
+    # Match the reason text to the status: red only for the actual Error state; the soft terminal
+    # states (TimedOut / Blocked) use their own badge colour so they don't read as a hard failure.
+    color = {"Error": "#dc2626", "TimedOut": "#b45309", "Blocked": "#7c3aed"}[status]
+    safe = html.escape(str(err))
+    return (f'<details class="err-details" style="color:{color}">'
+            f'<summary title="{safe}">{safe}</summary>'
+            f'<div class="err-full">{safe}</div>'
+            f'</details>')
+
 
 def _error_html(e: dict) -> str:
     """Truncated failure reason under the status badge - click to expand the full text
@@ -381,6 +438,50 @@ def render_html(experiments):
             animation: pulse 2s infinite; display: inline-block; }}
     @keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:0.3}} }}
     .total {{ color: #94a3b8; font-size: 0.8rem; padding: 0 2rem 0.5rem;}}
+
+    /* Log viewer: VSCode-style split view, opened by clicking an experiment row */
+    .exp-row {{ cursor: pointer; }}
+    .exp-row:hover {{ background: rgba(255,255,255,0.04); }}
+    .log-viewer-overlay {{
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 1000; align-items: center; justify-content: center;
+    }}
+    .log-viewer-overlay.open {{ display: flex; }}
+    .log-viewer-modal {{
+      width: 92vw; height: 88vh; background: #0f172a; border: 1px solid #334155;
+      border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }}
+    .log-viewer-header {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1rem; background: #1e293b; border-bottom: 1px solid #334155;
+    }}
+    .log-viewer-header .title {{ font-family: monospace; font-size: 0.85rem; color: #f8fafc; }}
+    .log-viewer-header .title .sub {{ color: #64748b; margin-left: 0.5rem; }}
+    .log-viewer-actions {{ display: flex; align-items: center; gap: 0.6rem; }}
+    .log-viewer-refresh-label {{ font-size: 0.72rem; color: #94a3b8; display: flex; align-items: center; gap: 0.3rem; }}
+    .log-viewer-close {{
+      background: none; border: 1px solid #334155; color: #94a3b8; border-radius: 6px;
+      cursor: pointer; font-size: 0.9rem; padding: 0.2rem 0.55rem; line-height: 1;
+    }}
+    .log-viewer-close:hover {{ color: #e2e8f0; border-color: #64748b; }}
+    .log-viewer-body {{ flex: 1; display: flex; min-height: 0; }}
+    .log-viewer-files {{
+      width: 260px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid #334155;
+      background: #131c2e; padding: 0.5rem 0;
+    }}
+    .log-viewer-file {{
+      padding: 0.35rem 1rem; font-family: monospace; font-size: 0.78rem; color: #94a3b8;
+      cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }}
+    .log-viewer-file:hover {{ background: rgba(255,255,255,0.04); color: #cbd5e1; }}
+    .log-viewer-file.selected {{ background: #1e3a5f; color: #e2e8f0; border-left: 2px solid #3b82f6; }}
+    .log-viewer-empty {{ padding: 1rem; font-size: 0.78rem; color: #64748b; }}
+    .log-viewer-content {{
+      flex: 1; margin: 0; padding: 1rem; overflow: auto; background: #0a0f1a;
+      color: #cbd5e1; font-family: monospace; font-size: 0.78rem; white-space: pre-wrap;
+      word-break: break-word;
+    }}
 
     /* Submit tab */
     .submit-wrap {{ padding: 2rem; }}
@@ -542,6 +643,150 @@ def render_html(experiments):
           tab.classList.add('active');
           document.getElementById(tab.dataset.panel).classList.add('active');
         }});
+      }});
+
+      // ── Log viewer: click an experiment row to browse its output-dir files ──
+      // #dashboard-root's own innerHTML gets replaced wholesale on every 5s
+      // autoRefresh() poll, so this listens on the (never-replaced) root itself
+      // and delegates to whichever .exp-row was actually clicked, rather than
+      // attaching one listener per row that autoRefresh would just tear down.
+      let logViewerExpName = null;
+      let logViewerFilePath = null;
+      // (size, mtime) of the file as last rendered - what /experiment_file_wait compares
+      // against server-side to decide whether anything actually changed.
+      let logViewerSize = null;
+      let logViewerMtime = null;
+      let logViewerWaitController = null;   // AbortController for the in-flight long-poll
+      let logViewerWaitRetryTimer = null;   // backoff timer after a failed long-poll
+
+      const overlay = document.getElementById('log-viewer-overlay');
+      const filesPane = document.getElementById('log-viewer-files');
+      const contentPane = document.getElementById('log-viewer-content');
+
+      // "At the bottom" (within a few px, to tolerate rounding) means tail-follow this
+      // update; anywhere else means the reader scrolled up on purpose, so leave them be.
+      function isAtBottom() {{
+        return contentPane.scrollHeight - contentPane.scrollTop - contentPane.clientHeight < 30;
+      }}
+
+      function stopLogViewerWait() {{
+        if (logViewerWaitController) {{ logViewerWaitController.abort(); logViewerWaitController = null; }}
+        if (logViewerWaitRetryTimer) {{ clearTimeout(logViewerWaitRetryTimer); logViewerWaitRetryTimer = null; }}
+      }}
+
+      function closeLogViewer() {{
+        overlay.classList.remove('open');
+        logViewerExpName = null;
+        logViewerFilePath = null;
+        logViewerSize = null;
+        logViewerMtime = null;
+        stopLogViewerWait();
+        document.getElementById('log-viewer-autorefresh').checked = false;
+      }}
+      document.getElementById('log-viewer-close').addEventListener('click', closeLogViewer);
+      overlay.addEventListener('click', e => {{ if (e.target === overlay) closeLogViewer(); }});
+      document.addEventListener('keydown', e => {{
+        if (e.key === 'Escape' && overlay.classList.contains('open')) closeLogViewer();
+      }});
+
+      // Long-polls /experiment_file_wait, which blocks server-side until the file's (size,
+      // mtime) differ from what we last saw (or times out) - this is what makes the viewer
+      // refresh "on a change in the log" rather than on a blind interval. Each call chains
+      // the next on completion, for as long as this same file stays open and "Live" is on.
+      function pollForChanges(path) {{
+        stopLogViewerWait();
+        if (!document.getElementById('log-viewer-autorefresh').checked || logViewerFilePath !== path) return;
+        const controller = new AbortController();
+        logViewerWaitController = controller;
+        const params = new URLSearchParams({{
+          name: logViewerExpName, path,
+          since_size: logViewerSize, since_mtime: logViewerMtime,
+        }});
+        fetch(`/experiment_file_wait?${{params}}`, {{signal: controller.signal}})
+          .then(r => r.json())
+          .then(data => {{
+            logViewerSize = data.size;
+            logViewerMtime = data.mtime;
+            if (data.changed) {{
+              const wasAtBottom = isAtBottom();
+              contentPane.textContent = data.ok ? data.content : `[${{data.error}}]`;
+              if (wasAtBottom) contentPane.scrollTop = contentPane.scrollHeight;
+            }}
+            pollForChanges(path);
+          }})
+          .catch(err => {{
+            if (err.name === 'AbortError') return;  // superseded by a newer call - not a failure
+            // Transient (e.g. a dashboard restart) - back off briefly rather than hammering it.
+            logViewerWaitRetryTimer = setTimeout(() => pollForChanges(path), 3000);
+          }});
+      }}
+
+      function loadLogFile(path) {{
+        logViewerFilePath = path;
+        logViewerSize = null;
+        logViewerMtime = null;
+        stopLogViewerWait();
+        filesPane.querySelectorAll('.log-viewer-file').forEach(el => {{
+          el.classList.toggle('selected', el.dataset.path === path);
+        }});
+        document.getElementById('log-viewer-file-name').textContent = ' — ' + path;
+        contentPane.textContent = 'Loading…';
+        fetch(`/experiment_file?name=${{encodeURIComponent(logViewerExpName)}}&path=${{encodeURIComponent(path)}}`)
+          .then(r => r.json())
+          .then(data => {{
+            // A file that vanished mid-view (e.g. rotated) is reported, not silently blanked.
+            contentPane.textContent = data.content !== undefined ? data.content : `[${{data.error}}]`;
+            logViewerSize = data.size;
+            logViewerMtime = data.mtime;
+            // Logs are read newest-line-last - opening a file (as opposed to a later
+            // change-triggered update) always jumps to the bottom, like `tail -f`.
+            contentPane.scrollTop = contentPane.scrollHeight;
+            pollForChanges(path);
+          }})
+          .catch(err => {{ contentPane.textContent = `[Error loading file: ${{err}}]`; }});
+      }}
+
+      function openLogViewer(name) {{
+        logViewerExpName = name;
+        document.getElementById('log-viewer-name').textContent = name;
+        document.getElementById('log-viewer-file-name').textContent = '';
+        contentPane.textContent = 'Select a file on the left to view its contents.';
+        filesPane.innerHTML = 'Loading…';
+        overlay.classList.add('open');
+        fetch(`/experiment_files?name=${{encodeURIComponent(name)}}`)
+          .then(r => r.json())
+          .then(data => {{
+            if (!data.files || data.files.length === 0) {{
+              filesPane.innerHTML = '<div class="log-viewer-empty">No output files yet.</div>';
+              return;
+            }}
+            filesPane.innerHTML = '';
+            data.files.forEach(path => {{
+              const el = document.createElement('div');
+              el.className = 'log-viewer-file';
+              el.dataset.path = path;
+              el.title = path;
+              el.textContent = path;
+              el.addEventListener('click', () => loadLogFile(path));
+              filesPane.appendChild(el);
+            }});
+          }});
+      }}
+
+      document.getElementById('dashboard-root').addEventListener('click', e => {{
+        // Clicking the error-details <summary> should just toggle it open/closed,
+        // not also pop the log viewer on top of it.
+        if (e.target.closest('.err-details')) return;
+        const row = e.target.closest('.exp-row');
+        if (row) openLogViewer(row.dataset.name);
+      }});
+
+      document.getElementById('log-viewer-autorefresh').addEventListener('change', e => {{
+        if (e.target.checked) {{
+          if (logViewerFilePath) pollForChanges(logViewerFilePath);
+        }} else {{
+          stopLogViewerWait();
+        }}
       }});
 
       // ── Environment picker ────────────────────────────────────────────────
@@ -979,14 +1224,54 @@ def render_html(experiments):
           .join(' / ');
       }}
 
-      function configSlug(cfg) {{
-        return Object.entries(cfg)
+      // These slugs feed the generated experiment name, which in turn becomes an SSH
+      // ControlPath component on the remote hosts (mhbench-ssh/<experiment_name>/<hash>)
+      // - AF_UNIX socket paths are capped at 108 bytes, so a long name silently breaks
+      // every SSH connection. Rather than blindly truncating (illegible, and doesn't
+      // stop the underlying field values - e.g. LLM model slugs - from being long),
+      // each plugin declares a short, legible nickname per option via the field's
+      // `short_names` map (see ui_schema.py). Free-form fields (model names, script
+      // paths - field types with no fixed set of "classes" to nickname) are left out
+      // of the slug entirely rather than truncated. The final slice is just a safety
+      // net for anything that slips through uncatalogued.
+      function configSlug(cfg, schema) {{
+        const fieldByKey = {{}};
+        for (const f of (schema ? schema.fields : [])) fieldByKey[f.key] = f;
+        const parts = Object.entries(cfg)
           .filter(([k]) => k !== 'type')
-          .map(([, v]) => (typeof v === 'string' ? v : JSON.stringify(v)))
-          .join('_')
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, '')
-          .slice(0, 32);
+          .map(([k, v]) => {{
+            const field = fieldByKey[k];
+            const fieldType = field ? field.field_type : null;
+            if (fieldType === 'text_with_suggestions' || fieldType === 'grouped_checkboxes' || fieldType === 'json') {{
+              return null;  // free-form / unbounded - not a named "class", leave out of the slug
+            }}
+            if (fieldType === 'flat_checkboxes' && field.short_names && field.short_names[v]) {{
+              return field.short_names[v];
+            }}
+            if (fieldType === 'key_value_pairs' && v && typeof v === 'object') {{
+              const shortKeys = field.key_short_names || {{}};
+              return Object.entries(v).map(([ek, ev]) => (shortKeys[ek] || ek) + ev).join('');
+            }}
+            return typeof v === 'string' ? v : JSON.stringify(v);
+          }})
+          .filter(Boolean);
+        const base = parts.length ? parts.join('_') : (schema ? schema.config_type : 'cfg');
+        return base.toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 24);
+      }}
+
+      // Turn a backend error body into a readable line. FastAPI validation errors
+      // put an array of {{loc,msg}} objects in `detail`, which would otherwise
+      // stringify to "[object Object]".
+      function formatSubmitError(data) {{
+        if (!data) return 'unknown error';
+        const d = data.detail;
+        if (typeof d === 'string') return d;
+        if (Array.isArray(d)) return d.map(x => {{
+          const loc = Array.isArray(x.loc) ? x.loc.filter(p => p !== 'body').join('.') : '';
+          return (loc ? loc + ': ' : '') + (x.msg || JSON.stringify(x));
+        }}).join('; ');
+        if (d) return JSON.stringify(d);
+        return JSON.stringify(data);
       }}
 
       // Turn a backend error body into a readable line. FastAPI validation errors
@@ -1048,7 +1333,7 @@ def render_html(experiments):
         const configs = buildConfigs(configType, schema, fieldValues);
         if (!configs) return;
         for (const cfg of configs) {{
-          attackerList.push({{ config: cfg, label: configLabel(cfg, schema), slug: configSlug(cfg) }});
+          attackerList.push({{ config: cfg, label: configLabel(cfg, schema), slug: configSlug(cfg, schema) }});
         }}
         renderAtkChips();
       }});
@@ -1102,7 +1387,7 @@ def render_html(experiments):
         const configs = buildConfigs(configType, schema, fieldValues);
         if (!configs) return;
         for (const cfg of configs) {{
-          defenderList.push({{ config: cfg, label: configLabel(cfg, schema), slug: configSlug(cfg) }});
+          defenderList.push({{ config: cfg, label: configLabel(cfg, schema), slug: configSlug(cfg, schema) }});
         }}
         renderDefChips();
       }});
@@ -1133,10 +1418,37 @@ def render_html(experiments):
         const repeats = parseInt(document.getElementById('repeats').value) || 1;
         const namePrefix = document.getElementById('name-prefix').value.trim();
         if (/\\s/.test(namePrefix)) {{
-          box.innerHTML = '<span class="result-err">Name prefix can\'t contain a space ' +
+          box.innerHTML = '<span class="result-err">Name prefix cannot contain a space ' +
             '(MHBench builds SSH ControlPath strings from the experiment name unescaped - a ' +
             'space silently breaks every ansible/SSH step for that experiment). Use underscores ' +
             'or dashes instead, e.g. "test_defender" or "test-defender".</span>';
+          btn.disabled = false; return;
+        }}
+
+        // MHBench builds SSH ControlPath as /tmp/mhbench-ssh/<experiment_name>/<40-char host
+        // hash>, and AF_UNIX socket paths cap out at 108 bytes: 17 ("/tmp/mhbench-ssh/") + 1
+        // ("/") + 40 (hash) = 58 fixed, leaving 50 for the name itself. Attacker/defender/env
+        // slugs are already kept short via each plugin's `short_names` map (see configSlug) -
+        // this catches the remaining variable: a name prefix (or combination) too long for
+        // that budget, so it fails fast here instead of silently breaking SSH mid-run.
+        const MAX_EXP_NAME_LEN = 50;
+        let longestName = '';
+        for (let i = 0; i < repeats; i++) {{
+          for (const atkItem of attackerList) {{
+            for (const defItem of defenderList) {{
+              for (const envSpec of envs) {{
+                const envStem = ENV_NICKNAMES[envSpec] || envSpec.split('/').pop();
+                const parts = [namePrefix, atkItem.slug, defItem.slug, envStem, String(i)].filter(Boolean);
+                const expName = parts.join('_');
+                if (expName.length > longestName.length) longestName = expName;
+              }}
+            }}
+          }}
+        }}
+        if (longestName.length > MAX_EXP_NAME_LEN) {{
+          box.innerHTML = `<span class="result-err">Generated experiment name "${{longestName}}" is ` +
+            `${{longestName.length}} chars, over the ${{MAX_EXP_NAME_LEN}}-char safe limit (MHBench's SSH ` +
+            `ControlPath construction breaks silently past this). Use a shorter name prefix.</span>`;
           btn.disabled = false; return;
         }}
 
@@ -1150,7 +1462,7 @@ def render_html(experiments):
           for (const atkItem of attackerList) {{
             for (const defItem of defenderList) {{
               for (const envSpec of envs) {{
-                const envStem = envSpec.split('/').pop();
+                const envStem = ENV_NICKNAMES[envSpec] || envSpec.split('/').pop();
                 const parts = [namePrefix, atkItem.slug, defItem.slug, envStem, String(i)].filter(Boolean);
                 const expName = parts.join('_');
                 const payload = {{ experiment_name: expName, environment: envSpec,
@@ -1302,6 +1614,25 @@ def render_html(experiments):
       <div id="usage-root">Loading…</div>
     </div>
   </div>
+
+  <!-- Log viewer: opened by clicking an experiment row -->
+  <div id="log-viewer-overlay" class="log-viewer-overlay">
+    <div class="log-viewer-modal">
+      <div class="log-viewer-header">
+        <span class="title"><span id="log-viewer-name"></span><span class="sub" id="log-viewer-file-name"></span></span>
+        <div class="log-viewer-actions">
+          <label class="log-viewer-refresh-label">
+            <input type="checkbox" id="log-viewer-autorefresh"> Live (updates when the log changes)
+          </label>
+          <button type="button" class="log-viewer-close" id="log-viewer-close">✕ Close</button>
+        </div>
+      </div>
+      <div class="log-viewer-body">
+        <div class="log-viewer-files" id="log-viewer-files"></div>
+        <pre class="log-viewer-content" id="log-viewer-content">Select a file on the left to view its contents.</pre>
+      </div>
+    </div>
+  </div>
 </body>
 </html>"""
 
@@ -1352,10 +1683,98 @@ def _rows(experiments):
         badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {color}">{icon} {status}</span>'
         retry_html = f' <span class="retry-badge">↩ {retries}</span>' if retries else ""
         err_html = _error_html(e)
-        rows += (f'<tr><td class="name-cell">{name}</td><td>{badge}{retry_html}{err_html}</td>'
+        safe_name = html.escape(name, quote=True)
+        rows += (f'<tr class="exp-row" data-name="{safe_name}" title="Click to browse this experiment\'s log files">'
+                 f'<td class="name-cell">{name}</td><td>{badge}{retry_html}{err_html}</td>'
                  f'<td>{env}</td><td>{attacker}</td>'
                  f'<td class="time-cell">{created}</td><td class="time-cell">{updated}</td></tr>')
     return rows
+
+# ── Experiment log viewer: browse an experiment's output-dir files from the UI ──
+_LOG_VIEWER_MAX_BYTES = 500_000  # tail-truncate anything bigger, rather than ship huge payloads
+
+def _experiment_output_dir(name: str) -> Path:
+    return OUTPUT_ROOT / name
+
+def list_experiment_files(name: str) -> list[str]:
+    """Relative file paths under this experiment's output dir, sorted. Empty list (not an error) if
+    the experiment has no output yet or the name doesn't resolve to a real directory under OUTPUT_ROOT."""
+    base = _experiment_output_dir(name)
+    try:
+        base = base.resolve()
+        base.relative_to(OUTPUT_ROOT.resolve())
+    except (ValueError, OSError):
+        return []
+    if not base.is_dir():
+        return []
+    return sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
+
+def read_experiment_file(name: str, rel_path: str) -> tuple[bool, str]:
+    """Returns (ok, content-or-error-message). Guards path traversal - the resolved target must stay
+    under this specific experiment's own output dir, whatever `rel_path` claims."""
+    base = _experiment_output_dir(name)
+    try:
+        base = base.resolve()
+        target = (base / rel_path).resolve()
+        target.relative_to(base)
+    except (ValueError, OSError):
+        return False, "Invalid path"
+    if not target.is_file():
+        return False, "File not found"
+    try:
+        size = target.stat().st_size
+        with open(target, "rb") as f:
+            if size > _LOG_VIEWER_MAX_BYTES:
+                f.seek(size - _LOG_VIEWER_MAX_BYTES)
+                content = f.read().decode("utf-8", errors="replace")
+                content = (
+                    f"... [truncated - showing the last {_LOG_VIEWER_MAX_BYTES:,} "
+                    f"of {size:,} bytes] ...\n" + content
+                )
+            else:
+                content = f.read().decode("utf-8", errors="replace")
+        return True, content
+    except OSError as e:
+        return False, f"Error reading file: {e}"
+
+def _stat_experiment_file(name: str, rel_path: str):
+    """(size, mtime) for the same path read_experiment_file() would read, or None if it doesn't
+    resolve to a real file under this experiment's output dir. Used to detect whether a log
+    actually changed without re-reading (and re-shipping) its full content on every poll."""
+    base = _experiment_output_dir(name)
+    try:
+        base = base.resolve()
+        target = (base / rel_path).resolve()
+        target.relative_to(base)
+    except (ValueError, OSError):
+        return None
+    try:
+        st = target.stat()
+        return st.st_size, st.st_mtime
+    except OSError:
+        return None
+
+_LOG_WAIT_TIMEOUT_S = 25.0   # long-poll ceiling; client reconnects immediately after
+_LOG_WAIT_POLL_S = 0.5       # how often we stat() the file while waiting for it to change
+
+def wait_for_experiment_file_change(name: str, rel_path: str, since_size, since_mtime) -> dict:
+    """Blocks (up to _LOG_WAIT_TIMEOUT_S) until (size, mtime) differs from what the client last
+    saw, then returns fresh content - this is what lets the log viewer refresh "when the log
+    changes" rather than on a blind timer. since_size/since_mtime arrive as query-string strings
+    (or None on a client's first call for a file), so comparisons below are string vs str(int/float)."""
+    deadline = time.monotonic() + _LOG_WAIT_TIMEOUT_S
+    while True:
+        st = _stat_experiment_file(name, rel_path)
+        if st is None:
+            # File vanished (e.g. rotated) - report unconditionally rather than looping forever.
+            ok, content = read_experiment_file(name, rel_path)
+            return {"changed": True, "ok": ok, "content": content, "size": None, "mtime": None}
+        size, mtime = st
+        changed = since_size is None or since_mtime is None or str(size) != since_size or str(mtime) != since_mtime
+        if changed or time.monotonic() >= deadline:
+            ok, content = read_experiment_file(name, rel_path)
+            return {"changed": changed, "ok": ok, "content": content, "size": size, "mtime": mtime}
+        time.sleep(_LOG_WAIT_POLL_S)
 
 def _inner_html(total, summary_cards, rows):
     return f"""
@@ -1417,6 +1836,32 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api_usage":
             payload = json.dumps({"html": _usage_html()})
             self._respond(200, "application/json", payload)
+        elif self.path.startswith("/experiment_files?"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            files = list_experiment_files(name)
+            self._respond(200, "application/json", json.dumps({"files": files}))
+        elif self.path.startswith("/experiment_file_wait?"):
+            # Long-polls until the file changes (or times out) so the client can "refresh on
+            # change" instead of re-fetching on a blind timer. Safe to block this thread -
+            # the server is threading (see __main__) so other requests aren't stalled by it.
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            rel_path = (qs.get("path") or [""])[0]
+            since_size = (qs.get("since_size") or [None])[0]
+            since_mtime = (qs.get("since_mtime") or [None])[0]
+            result = wait_for_experiment_file_change(name, rel_path, since_size, since_mtime)
+            self._respond(200, "application/json", json.dumps(result))
+        elif self.path.startswith("/experiment_file?"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            rel_path = (qs.get("path") or [""])[0]
+            ok, content = read_experiment_file(name, rel_path)
+            if ok:
+                size, mtime = _stat_experiment_file(name, rel_path) or (None, None)
+                self._respond(200, "application/json", json.dumps({"content": content, "size": size, "mtime": mtime}))
+            else:
+                self._respond(404, "application/json", json.dumps({"error": content}))
         else:
             self._respond(404, "text/plain", "Not found")
 
@@ -1440,8 +1885,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
 
-    HTTPServer.allow_reuse_address = True
-    server = HTTPServer(("0.0.0.0", args.port), Handler)
+    ThreadingHTTPServer.allow_reuse_address = True
+    # Threading matters here specifically because of /experiment_file_wait: it long-polls
+    # (blocks for up to _LOG_WAIT_TIMEOUT_S seconds inside the request) so the main table's
+    # own 5s auto-refresh - and every other viewer's log tail - would stall behind it on a
+    # single-threaded HTTPServer.
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"Dashboard running at http://localhost:{args.port}")
     try:
         server.serve_forever()

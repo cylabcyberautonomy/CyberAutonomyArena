@@ -41,14 +41,40 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
                         "ReactiveStandalone", "StaticStandalone",
                         "NaiveDecoyCredential", "NaiveDecoyHost",
                     ],
+                    "short_names": {
+                        "DoNothing": "donothing",
+                        "StaticLayered": "static_lyr",
+                        "ReactiveLayered": "react_lyr",
+                        "ReactiveStandalone": "react_solo",
+                        "StaticStandalone": "static_solo",
+                        "NaiveDecoyCredential": "decoy_cred",
+                        "NaiveDecoyHost": "decoy_host",
+                    },
                 },
                 {
                     "field_type": "key_value_pairs",
                     "label": "Arsenal",
                     "key": "arsenal",
+                    # Keys must match what each Strategy.initialize() actually reads from
+                    # arsenal.storage (see defender/strategy/*.py in the deception repo) -
+                    # they're capability/Action class names, not free-form labels. Every
+                    # strategy but DoNothing needs at least one of these three:
+                    # DeployDecoy + HoneyCredentials (Static*/Reactive*/NaiveDecoyCredential/
+                    # NaiveDecoyHost), plus RestoreServer for ReactiveLayered/
+                    # ReactiveStandalone specifically. A wrong/missing key here is a
+                    # KeyError crash in Strategy.initialize(), not a silent no-op -
+                    # confirmed live (StaticLayered crashed on a stale "honeypot" default
+                    # that doesn't match anything any Strategy class actually looks up).
                     "entries": [
-                        {"key": "honeypot", "value": "2"},
+                        {"key": "DeployDecoy", "value": "2"},
+                        {"key": "HoneyCredentials", "value": "2"},
+                        {"key": "RestoreServer", "value": "2"},
                     ],
+                    "key_short_names": {
+                        "DeployDecoy": "decoy",
+                        "HoneyCredentials": "honeycred",
+                        "RestoreServer": "restore",
+                    },
                 },
             ],
         }

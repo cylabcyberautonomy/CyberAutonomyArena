@@ -40,7 +40,9 @@ _LLM_GROUPS = [
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
     ]},
     {"group_label": "DeepSeek (direct — needs DEEPSEEK_API_KEY)", "options": ["deepseek-v3", "deepseek-r1"]},
-    {"group_label": "Moonshot / Kimi (via OpenRouter — needs OPENROUTER_API_KEY)", "options": ["kimi-k3"]},
+    {"group_label": "OpenRouter — needs OPENROUTER_API_KEY", "options": [
+        "kimi-k3", "glm-5.2", "kimi-k2-base", "qwen3-235b-non-thinking", "glm-4.5",
+    ]},
 ]
 
 # The abstraction levels whose actions are LLMAgentAction subclasses (under
@@ -156,6 +158,13 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
                     "label": "Strategy",
                     "key": "strategy",
                     "options": ["GraphSearch", "Darkside", "EquifaxStrategy", "MulvalOptimal", "OptimalReplayStrategy"],
+                    "short_names": {
+                        "GraphSearch": "graphsrch",
+                        "Darkside": "darkside",
+                        "EquifaxStrategy": "eq_strategy",
+                        "MulvalOptimal": "mulval_opt",
+                        "OptimalReplayStrategy": "opt_replay",
+                    },
                 },
                 {
                     "field_type": "text_with_suggestions",
@@ -246,6 +255,18 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                     "label": "Abstraction",
                     "key": "abstraction",
                     "options": _ABSTRACTION_LEVELS,
+                    "short_names": {
+                        "incalmo": "incalmo",
+                        "shell": "shell",
+                        "low_level_actions": "lowlevel",
+                        "no_services": "no_svcs",
+                        "agent_scan": "agent_scan",
+                        "agent_lateral_move": "agent_latmv",
+                        "agent_privilege_escalation": "agent_privesc",
+                        "agent_exfiltrate_data": "agent_exfil",
+                        "agent_find_information": "agent_find",
+                        "agent_all": "agent_all",
+                    },
                 },
             ],
         }
