@@ -30,6 +30,9 @@ _LLM_MODEL_SUGGESTIONS = [
     "litellm/gemini/gemini-2.5-pro",
     "openrouter/anthropic/claude-sonnet-5",
     "openrouter/openai/gpt-5",
+    "openrouter/moonshotai/kimi-k2",
+    "openrouter/qwen/qwen3-235b-a22b-2507",
+    "openrouter/z-ai/glm-4.5",
     "claude-3.7-sonnet",
     "claude-3.7-thinking",
     "claude-3.5-sonnet",
@@ -77,6 +80,10 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                     "label": "Strategy",
                     "key": "strategy",
                     "options": ["FalcoLLM", "FalcoLLMC2Block"],
+                    "short_names": {
+                        "FalcoLLM": "falco_llm",
+                        "FalcoLLMC2Block": "falco_c2blk",
+                    },
                 },
                 {
                     "field_type": "text_with_suggestions",
