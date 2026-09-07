@@ -45,12 +45,25 @@ async def run_defender(
     environment: Optional[DeployedEnvironment],
     experiment_name: str,
     cfg: ExperimentManagerConfig,
+    mgmt_ip: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    await defender.setup(experiment_name, environment, cfg, mgmt_ip)
     built = defender.build_config(experiment_name, environment)
     built["deception_dir"] = str(cfg.deception_dir)
+    # "management_ip" here is the harness's own fixed host (Elasticsearch's address -
+    # see host_ip in config.yaml). Deliberately NOT the same thing as `mgmt_ip`/
+    # `bastion_ip` below, which is this experiment's own ephemeral bastion floating
+    # IP - Perry's AnsibleRunner needs THAT one to SSH-ProxyCommand into the
+    # experiment's internal 192.168.x.x hosts at all (ssh -W %h:%p ... root@<bastion>).
+    # These two got conflated under one "management_ip" name for a while, which
+    # silently broke any AnsibleRunner.run_playbook() call (Falco install, decoy
+    # deployment, ...) the moment it was actually exercised - passing the harness
+    # host where the bastion IP belongs, since the harness host can't proxy into a
+    # random experiment's private OpenStack subnet.
     built["management_ip"] = cfg.host_ip
+    built["bastion_ip"] = mgmt_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")

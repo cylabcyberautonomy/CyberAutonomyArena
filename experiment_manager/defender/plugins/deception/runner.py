@@ -65,11 +65,16 @@ management_ip = config["management_ip"]
 es_url = f"https://{management_ip}:{perry_cfg.elastic_config.port}"
 es_conn = Elasticsearch(es_url, api_key=perry_cfg.elastic_config.api_key, verify_certs=False)
 
+# bastion_ip is THIS experiment's own bastion floating IP (from MHBench
+# provisioning) - not the same as management_ip above (the harness's own fixed
+# address). AnsibleRunner needs the bastion specifically: its inventory's
+# ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
+# experiment's internal 192.168.x.x hosts at all.
 ansible_runner = AnsibleRunner(
     ssh_key_path=perry_cfg.openstack_config.ssh_key_path,
-    management_ip=management_ip,
+    management_ip=config["bastion_ip"],
     ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
-    log_path=str(log_dir / "ansible.log"),
+    log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
 )
 
 def _build_network(network_data: dict, experiment_name: str) -> Network:

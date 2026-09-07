@@ -606,6 +606,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 experiment.deployed_environment,
                 experiment.experiment_name,
                 cfg,
+                mgmt_ip,
             )
             experiment.defender_started_at = datetime.now(timezone.utc)
             await registry.update(experiment)
