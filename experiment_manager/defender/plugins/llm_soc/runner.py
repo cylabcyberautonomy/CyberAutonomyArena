@@ -34,6 +34,15 @@ _deception_dir = config.get("deception_dir", "")
 if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
+# The three defender runners are standalone scripts, not package modules, so the
+# plugins/ directory (which holds the shared topology builder) has to go on
+# sys.path explicitly - the same way deception_dir does above.
+_plugins_dir = str(Path(__file__).resolve().parent.parent)
+if _plugins_dir not in sys.path:
+    sys.path.insert(0, _plugins_dir)
+
+from topology import build_network, host_users, telemetry_host_ips
+
 import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
@@ -77,8 +86,13 @@ perry_cfg = Config(**perry_config_data)
 
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
-es_url = f"https://{management_ip}:{perry_cfg.elastic_config.port}"
-es_conn = Elasticsearch(es_url, api_key=perry_cfg.elastic_config.api_key, verify_certs=False)
+# http, not https, and no api_key: this is the harness's own Elasticsearch
+# container (see the deception plugin's setup.py), which runs plain HTTP with
+# xpack.security.enabled=false. Connecting with https raised
+# "TlsError: WRONG_VERSION_NUMBER" on the very first indices.exists() call in
+# TelemetryAnalysis.__init__, killing this runner before it ever armed.
+es_url = f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+es_conn = Elasticsearch(es_url)
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -92,30 +106,12 @@ ansible_runner = AnsibleRunner(
     log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
 )
 
-def _build_network(network_data: dict, experiment_name: str) -> Network:
-    """Network/Subnet/Host are plain classes here, not pydantic models (no
-    .model_validate) - build them by hand from MHBench's topology JSON. `sec_group`
-    isn't in that JSON (it's assigned at deploy time); MHBench names it
-    "<experiment_name>-<subnet_name>_sg" (see NetworkTopology.sg_name /
-    NetworkDeployer._n in MHBench's src/abstractions/network.py and
-    src/deployment/network_deployer.py) - reproduce that here so decoy deployment
-    (DeployDecoy) attaches new hosts to the subnet's real OpenStack security group."""
-    subnets = [
-        Subnet(
-            name=subnet_data["name"],
-            hosts=[Host(name=h["name"], ip=h["ip_address"]) for h in subnet_data["hosts"]],
-            sec_group=f"{experiment_name}-{subnet_data['name']}_sg",
-        )
-        for subnet_data in network_data["subnets"]
-    ]
-    return Network(name=network_data["name"], subnets=subnets)
-
 
 topology_spec = config.get("topology_spec")
 network = None
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
-    network = _build_network(topology_data["networks"][0], experiment_name)
+    network = build_network(topology_data["networks"][0], experiment_name)
 
 if network is not None:
     # es_url above already uses this experiment's actual management_ip rather
@@ -185,6 +181,13 @@ print(
     flush=True,
 )
 defender.start()
+
+# Signal the harness that this strategy is fully armed (initialize() has
+# deployed its decoys and planted its credentials/fake data). main.py blocks on
+# this file before starting the attacker - see DefenderPlugin.wait_until_ready.
+# Written after start() returns, so it means "armed", not merely "process
+# alive"; the harness's own log_dir is used so no extra config key is needed.
+(log_dir / "defender_ready").write_text(str(time.time()))
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:

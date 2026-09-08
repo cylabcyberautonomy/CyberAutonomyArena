@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
+from pydantic import field_validator
+
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ....environment import DeployedEnvironment
@@ -24,11 +26,36 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     down. Distinct from the "Deception" plugin's strategies, which bait/slow a human
     or scripted attacker rather than target an LLM's own reasoning.
 
-    No tunable parameters are exposed here — the threshold/window and the decoy
-    payload text live in Perry's strategy class itself.
+    Two families of strategy live here, both delivering the same payload text:
+
+    - AIAttackerDetection (dynamic_prompt_injection.py) is *reactive*: it waits for
+      a burst of Falco events, then deploys decoys mid-attack. It is the only
+      strategy in the repo that also stands up a honey SSH service on the decoy.
+    - StaticLayered{HostName,UserName,FileName,FileContent} are *static*: everything
+      is deployed in initialize(), before the attacker starts, and each variant
+      delivers the injection through exactly one channel (the decoy's hostname, the
+      honey username, the planted file's name, or its contents), with
+      StaticLayeredAll firing all four at once as that ablation's combined
+      cell. They subscribe to no telemetry at all - initialize() is the whole
+      strategy.
+
+    The threshold/window and the payload text live in Perry's strategy classes.
     """
 
     type: Literal["prompt_injection"]
+    # Defaults to the dynamic strategy so existing configs that omit `strategy`
+    # keep their previous behaviour.
+    strategy: str = "AIAttackerDetection"
+    # Only the static strategies read this (num decoys / honey credentials to
+    # plant); AIAttackerDetection hardcodes its own counts.
+    arsenal: dict[str, int] = {}
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _normalize_strategy(cls, value):
+        if isinstance(value, list):
+            return value[0] if value else "AIAttackerDetection"
+        return value
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -36,7 +63,38 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
             "config_type": "prompt_injection",
             "label": "Prompt Injection",
             "cartesian_product": False,
-            "fields": [],
+            "fields": [
+                {
+                    "field_type": "flat_checkboxes",
+                    "label": "Strategy",
+                    "key": "strategy",
+                    "options": [
+                        "AIAttackerDetection",
+                        "StaticLayeredHostName",
+                        "StaticLayeredUserName",
+                        "StaticLayeredFileName",
+                        "StaticLayeredFileContent",
+                        "StaticLayeredAll",
+                    ],
+                    "short_names": {
+                        "AIAttackerDetection": "aiattacker",
+                        "StaticLayeredHostName": "static_host",
+                        "StaticLayeredUserName": "static_user",
+                        "StaticLayeredFileName": "static_fname",
+                        "StaticLayeredFileContent": "static_fcontent",
+                        "StaticLayeredAll": "static_all",
+                    },
+                },
+                {
+                    "field_type": "key_value_pairs",
+                    "label": "Arsenal",
+                    "key": "arsenal",
+                    # Keys must match what the static strategies read from
+                    # arsenal.storage - see defender/strategy/{HostName,UserName,
+                    # FileName,FileContent}.py, which read exactly these two.
+                    "options": ["DeployDecoy", "HoneyCredentials"],
+                },
+            ],
         }
 
     def build_config(
@@ -46,8 +104,46 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     ) -> dict:
         return {
             "experiment_name": experiment_name,
+            "strategy": self.strategy,
+            "arsenal": self.arsenal,
             "topology_spec": environment.topology_spec if environment else None,
         }
+
+    async def setup(
+        self,
+        experiment_name: str,
+        environment: Optional[DeployedEnvironment],
+        cfg: ExperimentManagerConfig,
+        mgmt_ip: Optional[str] = None,
+    ) -> None:
+        """Ensure the shared Elasticsearch instance is up before the runner starts.
+
+        This plugin's runner connects to Elasticsearch immediately (its
+        TelemetryAnalysis calls indices.exists() in __init__) and installs Falco
+        pointed at the same address, so ES has to already be listening. It had no
+        setup() at all and so silently depended on some *other* experiment - in
+        practice a Deception run - having started the container first; on a fresh
+        host the runner just died on connection refused. Reuses the Deception
+        plugin's setup.py rather than duplicating it: the script only bootstraps
+        the shared ES container (idempotent, safe under concurrent experiments)
+        and is not deception-specific.
+        """
+        await self._run_deception_setup_script(
+            Path(__file__).parent.parent / "deception",
+            {"deception_dir": str(cfg.deception_dir), "management_ip": cfg.host_ip},
+            experiment_name,
+            cfg,
+        )
+
+    async def teardown(
+        self,
+        experiment_name: str,
+        environment: Optional[DeployedEnvironment],
+        cfg: ExperimentManagerConfig,
+    ) -> None:
+        # AIAttackerDetection deploys decoy hosts directly (see class docstring) -
+        # see DefenderPlugin._teardown_decoys.
+        await self._teardown_decoys(experiment_name, cfg)
 
     async def run(
         self,

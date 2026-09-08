@@ -107,6 +107,43 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "topology_spec": environment.topology_spec if environment else None,
         }
 
+    async def setup(
+        self,
+        experiment_name: str,
+        environment: Optional[DeployedEnvironment],
+        cfg: ExperimentManagerConfig,
+        mgmt_ip: Optional[str] = None,
+    ) -> None:
+        """Ensure the shared Elasticsearch instance is up before the runner starts.
+
+        This plugin's runner connects to Elasticsearch immediately (its
+        TelemetryAnalysis calls indices.exists() in __init__) and installs Falco
+        pointed at the same address, so ES has to already be listening. It had no
+        setup() at all and so silently depended on some *other* experiment - in
+        practice a Deception run - having started the container first; on a fresh
+        host the runner just died on connection refused. Reuses the Deception
+        plugin's setup.py rather than duplicating it: the script only bootstraps
+        the shared ES container (idempotent, safe under concurrent experiments)
+        and is not deception-specific.
+        """
+        await self._run_deception_setup_script(
+            Path(__file__).parent.parent / "deception",
+            {"deception_dir": str(cfg.deception_dir), "management_ip": cfg.host_ip},
+            experiment_name,
+            cfg,
+        )
+
+    async def teardown(
+        self,
+        experiment_name: str,
+        environment: Optional[DeployedEnvironment],
+        cfg: ExperimentManagerConfig,
+    ) -> None:
+        # Best-effort no-op today (FalcoLLM/FalcoLLMC2Block don't deploy decoys),
+        # but this plugin shares Defense-MHBench-compatible's Network/Subnet/Host
+        # machinery with deception/prompt_injection - see DefenderPlugin._teardown_decoys.
+        await self._teardown_decoys(experiment_name, cfg)
+
     async def run(
         self,
         config_path: Path,

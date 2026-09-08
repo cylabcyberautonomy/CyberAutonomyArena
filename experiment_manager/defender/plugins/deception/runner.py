@@ -19,15 +19,26 @@ _deception_dir = config.get("deception_dir", "")
 if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
+# The three defender runners are standalone scripts, not package modules, so the
+# plugins/ directory (which holds the shared topology builder) has to go on
+# sys.path explicitly - the same way deception_dir does above.
+_plugins_dir = str(Path(__file__).resolve().parent.parent)
+if _plugins_dir not in sys.path:
+    sys.path.insert(0, _plugins_dir)
+
+from topology import build_network, host_users, telemetry_host_ips
+
 import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
+from ansible.defender import ReconfigureSysFlow
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
 from defender.telemetry.SimpleTelemetryAnalysis import SimpleTelemetryAnalysis
+from defender.telemetry.ReactiveCredentials import ReactiveCredentials
 from defender.telemetry.telemetry_service import TelemetryService
 from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import (
@@ -60,10 +71,15 @@ action_logger = setup_action_logger(str(log_dir))
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
 
+# Elasticsearch is shared, persistent infrastructure (see host_ip in
+# experiment_harness/config.yaml / management_ip below - this is the harness host
+# itself, not an ephemeral experiment VM) that DeceptionDefenderPlugin.setup()
+# (see setup.py) already ensured is up before this script ever started - runs
+# security-disabled/plain HTTP (see setup.py for why).
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
-es_url = f"https://{management_ip}:{perry_cfg.elastic_config.port}"
-es_conn = Elasticsearch(es_url, api_key=perry_cfg.elastic_config.api_key, verify_certs=False)
+es_url = f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+es_conn = Elasticsearch(es_url)
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -77,30 +93,20 @@ ansible_runner = AnsibleRunner(
     log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
 )
 
-def _build_network(network_data: dict, experiment_name: str) -> Network:
-    """Network/Subnet/Host are plain classes here, not pydantic models (no
-    .model_validate) - build them by hand from MHBench's topology JSON. `sec_group`
-    isn't in that JSON (it's assigned at deploy time); MHBench names it
-    "<experiment_name>-<subnet_name>_sg" (see NetworkTopology.sg_name /
-    NetworkDeployer._n in MHBench's src/abstractions/network.py and
-    src/deployment/network_deployer.py) - reproduce that here so decoy deployment
-    (DeployDecoy) attaches new hosts to the subnet's real OpenStack security group."""
-    subnets = [
-        Subnet(
-            name=subnet_data["name"],
-            hosts=[Host(name=h["name"], ip=h["ip_address"]) for h in subnet_data["hosts"]],
-            sec_group=f"{experiment_name}-{subnet_data['name']}_sg",
-        )
-        for subnet_data in network_data["subnets"]
-    ]
-    return Network(name=network_data["name"], subnets=subnets)
 
 
 topology_spec = config.get("topology_spec")
 network = None
+telemetry_hosts: list[str] = []
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
-    network = _build_network(topology_data["networks"][0], experiment_name)
+    network = build_network(topology_data["networks"][0], experiment_name)
+    # Hosts that actually run sysflow: MHBench's online registry attaches the
+    # start_sysflow/start_defender_services playbooks to exactly the
+    # "*_instrumented" vm_types (see MHBench/src/registry/online_registry.yaml).
+    # The Kali attacker (kali_running) has no telemetry stack at all, so it is
+    # excluded - reconfiguring it would just fail the playbook.
+    telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:
@@ -112,7 +118,26 @@ if strategy_cls is None:
     sys.exit(1)
 
 arsenal = CountArsenal(config.get("arsenal", {}))
-telemetry_analysis = SimpleTelemetryAnalysis(es_conn, network)
+
+# The analysis has to emit the event types the chosen strategy actually
+# subscribes to, or the strategy's handlers are dead code. ReactiveLayered and
+# ReactiveStandalone subscribe to DecoyCredentialUsed / DecoyHostInteraction /
+# SSHEvent, and ReactiveCredentials is the only analysis that emits
+# DecoyCredentialUsed - it spots a decoy username in an ssh command line, which
+# is exactly the honey-credential trail AddHoneyCredentials plants. Pairing them
+# with SimpleTelemetryAnalysis (which emits DecoyHostInteraction only, from two
+# narrow netcat/curl network rules) left the honey-credential half of the
+# arsenal undetectable no matter what the attacker did with it. The Falco
+# analyses are deliberately NOT candidates here: they emit SuspiciousHost /
+# FalcoEvent, which only the llm_soc-style strategies (FalcoLLM,
+# falco_llm_c2_block, dynamic_prompt_injection) subscribe to.
+_ANALYSIS_MAP = {
+    "ReactiveLayered": ReactiveCredentials,
+    "ReactiveStandalone": ReactiveCredentials,
+}
+analysis_cls = _ANALYSIS_MAP.get(config["strategy"], SimpleTelemetryAnalysis)
+print(f"[{experiment_name}] Telemetry analysis: {analysis_cls.__name__}", flush=True)
+telemetry_analysis = analysis_cls(es_conn, network)
 telemetry_service = TelemetryService(telemetry_analysis)
 orchestrator = OpenstackOrchestrator(
     openstack_conn=openstack_conn,
@@ -150,8 +175,31 @@ def _shutdown(signum, frame):
 signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
 
+# Real hosts boot with sysflow already running, exporting to the Elasticsearch
+# baked into their image (MHBench's aux_files/pipeline.local.json - a different,
+# auth-protected instance), NOT to the one this defender queries. That left the
+# defender able to see only its own decoys, while every rule it evaluates keys
+# off the SOURCE host's events: ReactiveCredentials spots a decoy username in an
+# ssh command line on the host that ran it, and SimpleTelemetryAnalysis's netcat
+# rule reads the connecting host's process/network events. Point them here
+# before the strategy arms, so the detection half has anything at all to read.
+if telemetry_hosts:
+    print(
+        f"[{experiment_name}] Pointing sysflow on {len(telemetry_hosts)} host(s) "
+        f"at {es_url}: {', '.join(telemetry_hosts)}",
+        flush=True,
+    )
+    ansible_runner.run_playbook(ReconfigureSysFlow(telemetry_hosts, perry_cfg))
+
 print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", flush=True)
 defender.start()
+
+# Signal the harness that this strategy is fully armed (initialize() has
+# deployed its decoys and planted its credentials/fake data). main.py blocks on
+# this file before starting the attacker - see DefenderPlugin.wait_until_ready.
+# Written after start() returns, so it means "armed", not merely "process
+# alive"; the harness's own log_dir is used so no extra config key is needed.
+(log_dir / "defender_ready").write_text(str(time.time()))
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:
