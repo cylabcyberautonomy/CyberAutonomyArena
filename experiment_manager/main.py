@@ -325,6 +325,19 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Attacker-log collection failed for '%s'", experiment.experiment_name)
 
+    # Defender teardown (e.g. deleting decoy VMs - see DefenderPlugin.teardown) runs
+    # before MHBench's own teardown: those decoys aren't in the topology JSON, so
+    # MHBench can't see them, and if left alive they keep this experiment's security
+    # groups "in use" - MHBench's teardown aborts outright on the first such
+    # conflict, leaking every network/subnet/security-group for the experiment right
+    # along with the decoy. Best-effort, like the log collection above: a defender
+    # teardown failure must not block reclaiming the environment's VMs.
+    if experiment.defender:
+        try:
+            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Defender teardown failed for '%s'", experiment.experiment_name)
+
     # Teardown is UNCAPPED (no _openstack_lock): a failed/finished env must reclaim its VMs immediately
     # instead of queueing behind provisions — deletion is far lighter than creation (no image pull/expand),
     # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
@@ -460,6 +473,11 @@ async def _cancel_and_remove(name: str) -> None:
             await experiment.attacker.stop_c2c(experiment.c2c_container_id)
         except Exception:
             logger.exception("Failed to stop C2 container for '%s'", name)
+    if experiment.defender:
+        try:  # see the matching call in the normal-finish path above for why this must run first
+            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+        except Exception:
+            logger.exception("Defender teardown failed for '%s'", name)
     try:
         await teardown_environment(experiment, cfg)  # deletes all VMs/networks by project name
     except Exception:
@@ -601,6 +619,9 @@ async def _run_experiment(experiment: Experiment) -> None:
     defender_process = None
     if experiment.defender:
         try:
+            # Drop any marker left by a previous run of this experiment name
+            # (overwrite=true reuses the output dir) before the gate below.
+            experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
             defender_process = await run_defender(
                 experiment.defender,
                 experiment.deployed_environment,
@@ -617,6 +638,28 @@ async def _run_experiment(experiment: Experiment) -> None:
             # run, and nothing in the recorded outcome to say so.
             exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
             await _handle_failure(experiment, f"Failed to start defender — {e}")
+            return
+
+        # Wait for the defender to actually arm before letting the attacker in.
+        # run_defender() only spawns the process; the strategy's initialize()
+        # (deploying decoys, planting fake data and honey credentials) runs
+        # inside it and takes minutes. Without this the attacker could complete
+        # its entire chain against an environment that had no deception in it
+        # yet - which produced a "defense held / did not hold" result that
+        # measured nothing. Failing here is deliberate: a defense that never
+        # armed must not be reported as a defended run.
+        try:
+            await experiment.defender.wait_until_ready(
+                experiment.experiment_name, cfg, defender_process, log
+            )
+        except Exception as e:
+            exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
+            try:
+                defender_process.terminate()
+                await defender_process.wait()
+            except Exception:
+                pass
+            await _handle_failure(experiment, f"Defender failed to arm — {e}")
             return
 
     # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
