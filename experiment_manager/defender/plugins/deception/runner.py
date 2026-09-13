@@ -100,7 +100,7 @@ network = None
 telemetry_hosts: list[str] = []
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name)
+    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
     # Hosts that actually run sysflow: MHBench's online registry attaches the
     # start_sysflow/start_defender_services playbooks to exactly the
     # "*_instrumented" vm_types (see MHBench/src/registry/online_registry.yaml).

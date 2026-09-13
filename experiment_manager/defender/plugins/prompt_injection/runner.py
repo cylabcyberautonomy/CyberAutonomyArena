@@ -129,7 +129,7 @@ topology_spec = config.get("topology_spec")
 network = None
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name)
+    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
 
 if network is not None and strategy_name in _NEEDS_FALCO:
     # es_url above already uses this experiment's actual management_ip rather

@@ -46,9 +46,28 @@ def host_users(vm_type: str) -> list[str]:
     return ["ubuntu"]
 
 
-def build_network(network_data: dict, experiment_name: str):
-    """Build Perry's Network from MHBench's topology JSON for one experiment."""
+def build_network(network_data: dict, experiment_name: str, subnet_connections=None):
+    """Build Perry's Network from MHBench's topology JSON for one experiment.
+
+    subnet_connections (the topology's top-level list) lets the entry segment be
+    identified - the subnet directly connected to the attacker's own - so
+    deception can place a honey credential on the attacker's path in any topology,
+    not just ones with a "webserver" subnet.
+    """
     from environment.network import Network, Subnet, Host
+
+    # The attacker's first hop: subnets adjacent to the attacker subnet. Raw
+    # (un-prefixed) names, since subnet_connections uses them.
+    attacker_raw = next(
+        (sd["name"] for sd in network_data["subnets"]
+         if any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"])),
+        None,
+    )
+    entry_raw = set()
+    for conn in (subnet_connections or []):
+        endpoints = {conn.get("from_subnet"), conn.get("to_subnet")}
+        if attacker_raw in endpoints:
+            entry_raw |= endpoints - {attacker_raw, None}
 
     subnets = [
         Subnet(
@@ -75,6 +94,9 @@ def build_network(network_data: dict, experiment_name: str):
             attacker=any(
                 h.get("vm_type", "").startswith("kali") for h in subnet_data["hosts"]
             ),
+            # The attacker's entry segment (adjacent to its own subnet). Lets
+            # deception place a honey credential on the path in any topology.
+            entry=subnet_data["name"] in entry_raw,
         )
         for subnet_data in network_data["subnets"]
     ]
