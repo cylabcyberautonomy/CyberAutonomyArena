@@ -728,9 +728,17 @@ async def _run_experiment(experiment: Experiment) -> None:
         await _handle_failure(experiment, reason)
         return
 
+    # Flip to a terminal status only AFTER _teardown, which collects all host
+    # telemetry (collect_environment) before it deletes any VM. This makes "Finished"
+    # a reliable signal that every host's logs are collected and the environment is
+    # reclaimed — not merely that the attacker process exited. Previously the status
+    # was set before _teardown, so an observer (or a monitor keying on "Finished")
+    # could see it while collection was still in flight. Telemetry was never lost
+    # either way (teardown always collected first); this only fixes the early flip.
+    # The experiment stays RUNNING through collection+teardown and flips once here.
+    await _teardown(experiment)
     experiment.status = status
     await registry.update(experiment)
-    await _teardown(experiment)
     _write_result(experiment)  # after teardown, so experiment_result.json carries the full timestamp set
 
 
