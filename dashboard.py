@@ -47,12 +47,14 @@ MHBENCH_ENVIRONMENTS_DIR = (
 # attacker plugin drives that same checkout). A bare OS env var of the same name
 # wins if set directly on the dashboard process, so a deployment can override
 # without touching Incalmo's .env.
-def _load_incalmo_env() -> dict:
+def _load_repo_env(dir_key: str) -> dict:
+    """Parse the .env at the root of the checkout config.yaml points to under
+    dir_key. A missing config entry or a missing file yields {} - never a raise."""
     env: dict = {}
-    incalmo_dir = _cfg.get("incalmo_dir")
-    if not incalmo_dir:
+    repo_dir = _cfg.get(dir_key)
+    if not repo_dir:
         return env
-    env_path = Path(incalmo_dir) / ".env"
+    env_path = Path(repo_dir) / ".env"
     if not env_path.exists():
         return env
     for line in env_path.read_text().splitlines():
@@ -66,10 +68,26 @@ def _load_incalmo_env() -> dict:
             env[key] = value
     return env
 
-_incalmo_env = _load_incalmo_env()
+_incalmo_env = _load_repo_env("incalmo_dir")
+
+# The defender's credentials live in the deception repo's own .env, NOT Incalmo's:
+# Incalmo's .env carries an empty ANTHROPIC_API_KEY='' placeholder, and the defender
+# loads its own .env with override=True specifically to beat it (see the deception
+# repo's defender/agents/langchain_registry.py). Reading Incalmo's .env here would
+# report that placeholder as the defense repo's key.
+_deception_env = _load_repo_env("deception_dir")
 
 def _credential(name: str) -> str | None:
     return os.environ.get(name) or _incalmo_env.get(name) or None
+
+
+def _defense_credential(name: str) -> str | None:
+    """Credential as the DEFENDER resolves it. .env first, then the process env -
+    the reverse of _credential's precedence, mirroring the defender's own
+    load_dotenv(override=True) so this reports the key actually in use. An empty
+    value on either side falls through, so an inherited ANTHROPIC_API_KEY='' can't
+    shadow the real one."""
+    return _deception_env.get(name) or os.environ.get(name) or None
 
 
 def _get_json(url: str, headers: dict, params: dict | None = None) -> tuple[int, dict]:
@@ -139,6 +157,218 @@ def _get_litellm_usage() -> dict:
     return {"spend": spend, "max_budget": max_budget, "error": None}
 
 
+_ANTHROPIC_API_BASE = "https://api.anthropic.com"
+_ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _mask_key(api_key: str) -> str:
+    """Enough to tell two keys apart in the UI, not enough to use."""
+    return f"\u2026{api_key[-4:]}" if len(api_key) >= 8 else "\u2026"
+
+
+def _anthropic_key_status(api_key: str) -> tuple[bool, str | None]:
+    """Is the defense repo's key still live? GET /v1/models is authenticated but
+    free - it spends no tokens - so the tab can probe it on every 30s refresh.
+    Returns (ok, error)."""
+    status, body = _get_json(
+        f"{_ANTHROPIC_API_BASE}/v1/models",
+        headers={"x-api-key": api_key, "anthropic-version": _ANTHROPIC_VERSION},
+        params={"limit": 1},
+    )
+    if status == 200:
+        return True, None
+    detail = (body.get("error") or {}).get("message") or body.get("detail") or body
+    return False, f"key check returned {status}: {detail}"
+
+
+def _anthropic_local_spend() -> dict:
+    """Spend on the defender's direct anthropic/ route, summed from the defender's
+    own token_usage.json rows under OUTPUT_ROOT.
+
+    Unlike the two cards above, this is NOT what the provider says the key spent.
+    Anthropic has no self-serve per-key usage endpoint: OpenRouter's /api/v1/key and
+    LiteLLM's /key/info both let a key ask about itself, but Anthropic's usage and
+    cost reports live on the Admin API, which rejects a plain sk-ant-api key with
+    401 "The Admin API requires an Admin API key or an organization-scoped API key".
+    So the figure is reconstructed from what the defender logged - each row's `cost`
+    is token counts x Anthropic list price, computed by LangChainRegistry
+    .estimate_cost in the deception repo (which reprices cached input at Anthropic's
+    cache rates). It tracks the bill, it is not the bill.
+
+    Only rows the DEFENDER wrote count (parent dir "defender", at any depth under
+    output/): the attacker's token_usage.json rows are Incalmo's spend on Incalmo's
+    own credentials. Rows are matched on the "anthropic/" model prefix, which is
+    exactly the routing prefix LangChainRegistry sends to the first-party API with
+    ANTHROPIC_API_KEY - openrouter/ and litellm/ rows reach Anthropic models on
+    somebody else's bill and must not be counted here."""
+    empty = {"cost": None, "calls": 0, "unpriced": 0, "models": [], "latest": None}
+    if not OUTPUT_ROOT.is_dir():
+        return empty
+
+    cost = 0.0
+    calls = 0
+    unpriced = 0
+    models: set[str] = set()
+    latest: str | None = None
+    for path in OUTPUT_ROOT.rglob("token_usage.json"):
+        if path.parent.name != "defender":
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue    # a row half-written by a live run - skip the row, not the file
+            model = row.get("model") or ""
+            if not model.startswith("anthropic/"):
+                continue
+            calls += 1
+            models.add(model[len("anthropic/"):])
+            row_cost = row.get("cost")
+            if row_cost is None:
+                unpriced += 1   # model absent from estimate_cost's price table
+            else:
+                cost += row_cost
+            timestamp = row.get("timestamp")
+            if timestamp and (latest is None or timestamp > latest):
+                latest = timestamp
+
+    if not calls:
+        return empty
+    return {"cost": cost, "calls": calls, "unpriced": unpriced,
+            "models": sorted(models), "latest": latest}
+
+
+def _get_anthropic_org_cost(admin_key: str) -> dict:
+    """Month-to-date ORGANIZATION spend from the Admin Cost API - the only route to
+    a real billed figure, and optional because it needs a separate credential:
+    ANTHROPIC_ADMIN_KEY must hold an Admin key (sk-ant-admin...) or an org-scoped
+    key. Absent that, the card falls back to the computed number above.
+
+    Org-wide, not per-key: /v1/organizations/cost_report takes no api_key_ids filter
+    (that lives on usage_report, which reports tokens rather than dollars), so this
+    is an upper bound covering every other key in the org.
+
+    UNVERIFIED against a live Admin key - none exists on this host. Two things to
+    confirm when one does: that amounts sit at data[].results[].amount, and that
+    they really are cents (the docs say "decimal strings in lowest units (cents)"),
+    i.e. that dividing by 100 below is right."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    status, body = _get_json(
+        f"{_ANTHROPIC_API_BASE}/v1/organizations/cost_report",
+        headers={"x-api-key": admin_key, "anthropic-version": _ANTHROPIC_VERSION},
+        params={
+            "starting_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ending_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    )
+    if status != 200:
+        detail = (body.get("error") or {}).get("message") or body.get("detail") or body
+        return {"cost": None, "error": f"cost_report returned {status}: {detail}"}
+
+    cents = 0.0
+    for bucket in body.get("data") or []:
+        for result in bucket.get("results") or []:
+            try:
+                cents += float(result.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+    return {"cost": cents / 100, "error": None}
+
+
+def _anthropic_budget() -> float | None:
+    """Optional spend cap, so this card can show the same spend-against-limit bar as
+    the other two. Anthropic publishes no per-key limit of its own, so the number has
+    to come from us: set ANTHROPIC_BUDGET_USD in the deception repo's .env (or the
+    dashboard's environment) to whatever the key was funded with."""
+    raw = _defense_credential("ANTHROPIC_BUDGET_USD")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _get_anthropic_usage() -> dict:
+    api_key = _defense_credential("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"key": None, "live": False, "local": None, "org": None,
+                "budget": None, "error": "ANTHROPIC_API_KEY not found in the deception repo's .env"}
+
+    live, error = _anthropic_key_status(api_key)
+    admin_key = _defense_credential("ANTHROPIC_ADMIN_KEY")
+    return {
+        "key": _mask_key(api_key),
+        "live": live,
+        "local": _anthropic_local_spend(),
+        "org": _get_anthropic_org_cost(admin_key) if admin_key else None,
+        "budget": _anthropic_budget(),
+        "error": error,
+    }
+
+
+def _anthropic_html(anthropic: dict) -> str:
+    """The Anthropic card. Shaped like the other two - spend, optional bar, errors -
+    but with the key's own liveness on top, since a revoked or exhausted key is the
+    failure this card exists to catch: the defender swallows its LLM errors on a
+    thread pool, so a dead key shows up as a silent defender, not as a crash."""
+    if anthropic["key"] is None:
+        return f"""
+    <div class="usage-card">
+      <h2>Anthropic (defense repo)</h2>
+      <div class="usage-error">{html.escape(anthropic["error"])}</div>
+    </div>"""
+
+    local = anthropic["local"]
+    budget = anthropic["budget"]
+    key_state = "live" if anthropic["live"] else "not accepted"
+    budget_suffix = f" / {_fmt_usd(budget)}" if budget else ""
+
+    calls_row = ""
+    if local["calls"]:
+        models = ", ".join(local["models"])
+        unpriced = f" · {local['unpriced']} unpriced" if local["unpriced"] else ""
+        calls_row = (f'<div class="usage-row"><span>Calls</span>'
+                     f'<strong>{local["calls"]} · {html.escape(models)}{unpriced}</strong></div>')
+
+    org = anthropic["org"]
+    org_row = ""
+    if org and org["cost"] is not None:
+        org_row = ('<div class="usage-row"><span>Org spend (month to date)</span>'
+                   f'<strong>{_fmt_usd(org["cost"])}</strong></div>')
+
+    bar_html = _usage_bar_html(local["cost"], budget) if budget else ""
+    error_html = (f'<div class="usage-error">{html.escape(anthropic["error"])}</div>'
+                  if anthropic["error"] else "")
+    if org and org["error"]:
+        error_html += f'<div class="usage-error">{html.escape(org["error"])}</div>'
+
+    note = ("Anthropic exposes no self-serve per-key usage endpoint, so this is summed "
+            "from the defender's own token_usage.json rows (tokens \u00d7 list price) - it "
+            "tracks the bill rather than being it. Set ANTHROPIC_ADMIN_KEY for billed "
+            "org totals, ANTHROPIC_BUDGET_USD for a limit bar.")
+
+    return f"""
+    <div class="usage-card">
+      <h2>Anthropic (defense repo)</h2>
+      <div class="usage-row"><span>Key</span><strong>{html.escape(anthropic["key"])} · {key_state}</strong></div>
+      <div class="usage-row"><span>Spend (computed)</span><strong>{_fmt_usd(local["cost"])}{budget_suffix}</strong></div>
+      {bar_html}
+      {calls_row}
+      {org_row}
+      <div class="usage-note">{note}</div>
+      {error_html}
+    </div>"""
+
+
 def _fmt_usd(value) -> str:
     return "—" if value is None else f"${value:.4f}"
 
@@ -158,6 +388,7 @@ def _usage_bar_html(spend, limit) -> str:
 def _usage_html() -> str:
     openrouter = _get_openrouter_usage()
     litellm = _get_litellm_usage()
+    anthropic = _get_anthropic_usage()
 
     or_error_html = f'<div class="usage-error">{html.escape(openrouter["error"])}</div>' if openrouter["error"] else ""
     or_limit_suffix = f' / {_fmt_usd(openrouter["limit"])}' if openrouter["limit"] else ""
@@ -179,7 +410,7 @@ def _usage_html() -> str:
       <div class="usage-row"><span>Spend</span><strong>{_fmt_usd(litellm["spend"])}{llm_budget_suffix}</strong></div>
       {llm_bar_html}
       {llm_error_html}
-    </div>"""
+    </div>{_anthropic_html(anthropic)}"""
 
 
 # ── Plugin schema discovery ───────────────────────────────────────────────────
