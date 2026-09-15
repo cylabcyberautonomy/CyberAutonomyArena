@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 """Subprocess entry point for the Prompt Injection defense plugin.
 
-Runs Perry's AIAttackerDetection strategy
-(defender/strategy/dynamic_prompt_injection.py): watches for a burst of
-Falco-flagged suspicious activity on a host and responds by deploying decoy
-hosts and honey-credentials whose names/file contents are themselves a
-prompt-injection payload aimed at an LLM-driven attacker, trying to convince
-the attacker's own model that the exercise is complete.
+Deploys decoy hosts and honey-credentials whose names/file contents are
+themselves a prompt-injection payload aimed at an LLM-driven attacker, trying to
+convince the attacker's own model that the exercise is complete.
 
-Telemetry source: Falco alerts, via FalcoBasicAnalysis (5+ alerts on a host in
-the analysis window before it's flagged SuspiciousHost). Since this defender
-needs Falco, it installs it on every host itself as part of its own setup
-(see the InstallFalco call below) rather than depending on the environment's
-provisioning having already done it - most MHBench-provisioned environments
-never start Falco even when it's baked into the image (only *_instrumented
-vm_types do), so relying on that would leave the "falco" index empty.
+Default strategy is StaticLayeredAll (defender/strategy/All.py): all four
+injection channels - decoy hostname, honey username, planted file name, planted
+file content - fired at once, everything deployed in initialize() before the
+attacker starts, subscribing to no telemetry.
+
+Its decoys are built from the same DeployDecoy call ReactiveLayered uses -
+apacheVulnerability=False and, importantly, no honeySSHService, so it never
+touches the deploy_honey_service.yml path that made AIAttackerDetection fatal.
+Deployment is reliable as it stands: across 21 archived StaticLayeredAll runs
+every decoy reached ACTIVE, every decoy got its fake data on the first pass, and
+every honey credential was planted, with no defender traceback in any of them.
+
+One known difference from ReactiveLayered, left alone deliberately: credential
+PLACEMENT. ReactiveLayered uses Strategy._honeycred_deploy_hosts (entry segment
+only); this strategy splits credentials evenly across all subnets, which in the
+archived runs put 27 of 42 (64%) on hosts off the attacker's entry path. That
+affects how often the payload is READ, not whether it deploys.
+
+AIAttackerDetection (defender/strategy/dynamic_prompt_injection.py) remains
+selectable: it is the *reactive* variant, waiting for a burst of Falco-flagged
+activity before deploying. Only that strategy consumes telemetry, so only that
+strategy triggers the Falco install below (see _NEEDS_FALCO); the static
+variants get NoTelemetry and never touch Elasticsearch.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
   experiment_name, topology_spec, deception_dir, management_ip, log_dir
@@ -40,7 +53,12 @@ _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
 
-from topology import build_network, host_users, telemetry_host_ips
+from topology import (
+    build_network,
+    defendable_host_ips,
+    host_users,
+    telemetry_host_ips,
+)
 
 import openstack
 from elasticsearch import Elasticsearch
@@ -55,6 +73,7 @@ from defender.arsenal.CountArsenal import CountArsenal
 # emits DecoyHostInteraction, for the Deception plugin's reactive strategies).
 # Matches Perry's own scenarios/experiments/hotnets/ai_attacker_detection.py pairing.
 from defender.telemetry import FalcoBasicAnalysis
+from defender.telemetry.NoTelemetry import NoTelemetry
 from defender.telemetry.telemetry_service import TelemetryService
 from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import (
@@ -84,7 +103,7 @@ _NEEDS_FALCO = {"AIAttackerDetection"}
 from ansible.defender.falco.install_falco import InstallFalco
 
 experiment_name = config["experiment_name"]
-strategy_name = config.get("strategy", "AIAttackerDetection")
+strategy_name = config.get("strategy", "StaticLayeredAll")
 strategy_cls = STRATEGY_MAP.get(strategy_name)
 if strategy_cls is None:
     print(
@@ -101,6 +120,14 @@ action_logger = setup_action_logger(str(log_dir))
 
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
+# This run's Elasticsearch indices are scoped to this experiment
+# (falco-<name> / sysflow-<name>). The ES on the harness host is shared and
+# persistent across every concurrent run, and a falco/sysflow document has no
+# experiment field - only a hostname and an IP, both of which repeat across
+# topologies. Unscoped, a defender reads other runs' telemetry and acts on it:
+# on 2026-09-15 the 2-host s45_soc_sbt_t0 reported 34 suspicious hosts
+# (database0-23 among them) and restored its own host0 off the back of that.
+perry_cfg.experiment_name = experiment_name
 
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
@@ -141,11 +168,35 @@ if network is not None and strategy_name in _NEEDS_FALCO:
     # even if Falco is already present (e.g. baked into a *_instrumented image).
     # Left uncaught deliberately: if Falco can't be installed, this defender
     # can never trigger, so failing fast here beats a silently-idle defender.
-    ansible_runner.run_playbook(InstallFalco(network.get_all_host_ips(), perry_cfg))
+    # Not get_all_host_ips(): that includes the attacker's own box, which the
+    # defender does not own and could never instrument. See
+    # topology.defendable_host_ips.
+    ansible_runner.run_playbook(
+        InstallFalco(defendable_host_ips(topology_data["networks"][0]), perry_cfg)
+    )
     print(f"[{experiment_name}] Falco install complete.", flush=True)
 
 arsenal = CountArsenal(config.get("arsenal", {}))
-telemetry_analysis = FalcoBasicAnalysis(es_conn, network)
+# A static strategy subscribes to nothing, so polling Falco for it is not merely
+# wasted work - it is a liability. FalcoBasicAnalysis parses every document it
+# pulls with FalcoAlert(**doc), unguarded, inside the runner's `while _running`
+# loop, and FalcoAlert requires a `tags` field that Falco's own internal
+# notifications (source: "internal", e.g. "Falco internal: timeouts
+# notification") do not carry. One such document raises ValidationError and takes
+# the whole defender process down: that is what killed s45_pi_eqm_t0 16 minutes
+# into a 19-minute run, for alerts no subscriber would have read anyway.
+if strategy_name in _NEEDS_FALCO:
+    telemetry_analysis = FalcoBasicAnalysis(
+        es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+    )
+else:
+    telemetry_analysis = NoTelemetry(
+        es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+    )
+print(
+    f"[{experiment_name}] Telemetry analysis: {type(telemetry_analysis).__name__}",
+    flush=True,
+)
 telemetry_service = TelemetryService(telemetry_analysis)
 orchestrator = OpenstackOrchestrator(
     openstack_conn=openstack_conn,

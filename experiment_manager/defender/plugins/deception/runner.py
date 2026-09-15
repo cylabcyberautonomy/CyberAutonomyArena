@@ -70,6 +70,14 @@ action_logger = setup_action_logger(str(log_dir))
 
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
+# This run's Elasticsearch indices are scoped to this experiment
+# (falco-<name> / sysflow-<name>). The ES on the harness host is shared and
+# persistent across every concurrent run, and a falco/sysflow document has no
+# experiment field - only a hostname and an IP, both of which repeat across
+# topologies. Unscoped, a defender reads other runs' telemetry and acts on it:
+# on 2026-09-15 the 2-host s45_soc_sbt_t0 reported 34 suspicious hosts
+# (database0-23 among them) and restored its own host0 off the back of that.
+perry_cfg.experiment_name = experiment_name
 
 # Elasticsearch is shared, persistent infrastructure (see host_ip in
 # experiment_harness/config.yaml / management_ip below - this is the harness host
@@ -137,7 +145,9 @@ _ANALYSIS_MAP = {
 }
 analysis_cls = _ANALYSIS_MAP.get(config["strategy"], SimpleTelemetryAnalysis)
 print(f"[{experiment_name}] Telemetry analysis: {analysis_cls.__name__}", flush=True)
-telemetry_analysis = analysis_cls(es_conn, network)
+telemetry_analysis = analysis_cls(
+    es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+)
 telemetry_service = TelemetryService(telemetry_analysis)
 orchestrator = OpenstackOrchestrator(
     openstack_conn=openstack_conn,

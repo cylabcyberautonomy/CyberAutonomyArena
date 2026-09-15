@@ -21,6 +21,7 @@ class ExperimentManagerConfig(BaseModel):
     max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
     max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_retries: int = 3
+    max_active_experiments: int = 25  # hard cap on concurrently ACTIVE experiments (DEPLOYING..RUNNING..teardown); excess stays QUEUED. Bounds cluster network load (routers/FIPs/L3) which the vCPU CapacityTracker does not model - at ~27 concurrent, mgmt-FIP SSH began timing out during provisioning.
     max_deployed: int = 10  # back-pressure: cap experiments in the deploy stage (DEPLOYING+DEPLOYED). A deploy slot is held from provision-start until configure-start, so when configure backs up, provisioning halts instead of piling up idle hosts.
     attacker_timeout_seconds: Optional[float] = None  # harness-enforced attacker wall-clock cap; None = no cap. On timeout the harness stops the attacker and marks status TimedOut (terminal, no retry).
     ansible_verbosity: int = int(os.environ.get("ANSIBLE_VERBOSITY", "0"))  # 0-4 (-vvvv); default from $ANSIBLE_VERBOSITY (main.sh), config.yaml overrides
