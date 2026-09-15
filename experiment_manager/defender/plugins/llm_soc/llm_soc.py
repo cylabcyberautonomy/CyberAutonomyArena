@@ -23,12 +23,22 @@ from ..base import DefenderPlugin
 # same working CMU LiteLLM gateway / OpenRouter credentials Incalmo already
 # uses (LITELLM_API_KEY+LITELLM_BASE_URL / OPENROUTER_API_KEY in Deception's
 # own .env) - prefer those unless a direct-provider key gets added later.
+# The Sonnet-4.5-vs-5 defender comparison MUST keep both arms on ONE route, or
+# provider/backend differences confound the model comparison. OpenRouter is the
+# only route that serves BOTH: the CMU LiteLLM gateway
+# (ai-gateway.andrew.cmu.edu) exposes claude-sonnet-4, -4-6 and -5 but NO 4.5
+# (verified against its /models list, 2026-09-14). So the two canonical arms are
+# the OpenRouter slugs below (both confirmed present in OpenRouter's /models).
+# Keep them first, and do not pin the 5 arm to litellm/... while the 4.5 arm is
+# on openrouter/... .
 _LLM_MODEL_SUGGESTIONS = [
+    # Canonical same-route comparison pair (OpenRouter):
+    "openrouter/anthropic/claude-sonnet-5",
+    "openrouter/anthropic/claude-sonnet-4.5",
     "litellm/us.anthropic.claude-sonnet-5",
     "litellm/us.anthropic.claude-haiku-4-5-20251001",
     "litellm/gpt-5",
     "litellm/gemini/gemini-2.5-pro",
-    "openrouter/anthropic/claude-sonnet-5",
     "openrouter/openai/gpt-5",
     "openrouter/moonshotai/kimi-k2",
     "openrouter/qwen/qwen3-235b-a22b-2507",
@@ -59,7 +69,10 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
 
     type: Literal["llm_soc"]
     strategy: str  # "FalcoLLM" or "FalcoLLMC2Block"
-    llm_model: str = "litellm/us.anthropic.claude-sonnet-5"
+    # Default to Sonnet-5 on OpenRouter so it shares a route with the 4.5
+    # comparison arm (openrouter/anthropic/claude-sonnet-4.5). See
+    # _LLM_MODEL_SUGGESTIONS for why litellm can't host the 4.5 arm.
+    llm_model: str = "openrouter/anthropic/claude-sonnet-5"
 
     @field_validator("strategy", mode="before")
     @classmethod
@@ -90,7 +103,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                     "label": "LLM model (litellm/<model> or openrouter/<model-slug> recommended)",
                     "key": "llm_model",
                     "suggestions": _LLM_MODEL_SUGGESTIONS,
-                    "default": "litellm/us.anthropic.claude-sonnet-5",
+                    "default": "openrouter/anthropic/claude-sonnet-5",
                 },
             ],
         }

@@ -110,6 +110,36 @@ def build_network(network_data: dict, experiment_name: str, subnet_connections=N
     )
 
 
+def defendable_host_ips(network_data: dict) -> list[str]:
+    """IPs of every host the defender legitimately owns - i.e. everything except
+    the red team's own machines.
+
+    Deliberately NOT telemetry_host_ips(): that filters on the "*_instrumented"
+    vm_types, which is right for *reconfiguring* an agent MHBench already baked
+    in, but wrong for *installing* one. On a non-instrumented topology every
+    real host is "*_running" and would be filtered out, leaving the defender
+    installing Falco on nothing at all.
+
+    The exclusion matters beyond tidiness: the attacker box is not part of the
+    defended network, so a defender could never have an agent on it. Installing
+    one hands the defense information it has no right to, and in practice
+    drowns out everything else - measured on one run, kali produced 75 Falco
+    alerts to webserver1's 13, and being the noisiest host it was the first and
+    only one to approach the suspicion threshold. It is also the single most
+    expensive host to install on (the only one with no baked Falco, so the only
+    one that needs the full apt path, which is where the lock races happen).
+
+    Same rule build_network() uses for its attacker-subnet flag, rather than a
+    second, subtly different definition of "the attacker".
+    """
+    return [
+        h["ip_address"]
+        for subnet_data in network_data["subnets"]
+        for h in subnet_data["hosts"]
+        if not h.get("vm_type", "").startswith("kali")
+    ]
+
+
 def telemetry_host_ips(network_data: dict) -> list[str]:
     """IPs of hosts that actually run sysflow.
 
