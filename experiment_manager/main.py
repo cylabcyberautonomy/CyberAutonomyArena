@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -59,6 +60,46 @@ class _PriorityLock:
 
 _PRIORITY_TEARDOWN = 0
 _PRIORITY_DEPLOY = 1
+async def _wait_attacker_with_rl_credit(process, name, cfg, exp_log):
+    """Wait for the attacker process, excluding time it spent BLOCKED on provider
+    rate-limit backoff from the wall-clock cap. The attacker writes its cumulative
+    backoff seconds to attacker/rate_limit_wait_seconds (see Incalmo's
+    langchain_interface._record_rate_limit_wait); effective elapsed = real elapsed
+    minus that credit, so a run throttled by a 20-rpm cap is not pushed into
+    TimedOut for time it was only waiting. Returns the process return code, or
+    None if it genuinely exceeded the credited cap.
+
+    cfg.attacker_timeout_seconds is assumed non-None here (the caller handles the
+    uncapped case)."""
+    cap = cfg.attacker_timeout_seconds
+    wait_file = (
+        output_root(name, cfg) / name / "attacker" / "rate_limit_wait_seconds"
+    )
+    start = time.monotonic()
+    poll = 30.0
+    waiter = asyncio.ensure_future(process.wait())
+    while True:
+        done, _ = await asyncio.wait({waiter}, timeout=poll)
+        if waiter in done:
+            return waiter.result()
+        credit = 0.0
+        try:
+            credit = float(wait_file.read_text().strip())
+        except Exception:
+            credit = 0.0
+        effective = (time.monotonic() - start) - credit
+        if effective >= cap:
+            # Genuinely out of (rate-limit-credited) time. Leave `waiter`
+            # running; the caller stops the process and it resolves then.
+            if credit > 0:
+                exp_log.info(
+                    "[%s] Attacker timed out: %.0fs effective of %ss cap "
+                    "(%.0fs excluded as rate-limit backoff)",
+                    name, effective, cap, credit,
+                )
+            return None
+
+
 _ACTIVE_STATUSES = {  # non-terminal / in-flight: their C2 must survive other experiments' launches — only ERROR/FINISHED C2s are stale
     ExperimentStatus.QUEUED, ExperimentStatus.DEPLOYING, ExperimentStatus.DEPLOYED,
     ExperimentStatus.CONFIGURING, ExperimentStatus.CONFIGURED, ExperimentStatus.RUNNING,
@@ -71,13 +112,14 @@ registry: Registry
 _openstack_lock: _PriorityLock
 _configure_lock: _PriorityLock
 _deploy_buffer: asyncio.Semaphore
+_inflight_gate: asyncio.Semaphore  # caps concurrently-active (non-queued, non-terminal) experiments
 _capacity: CapacityTracker
 _tasks: dict[str, asyncio.Task] = {}  # experiment_name -> its _run_experiment task; lets a single run be cancelled/evicted (rerun) without a whole-harness restart
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_lock, _configure_lock, _deploy_buffer, _capacity
+    global cfg, registry, _openstack_lock, _configure_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
     load_dotenv(cfg.incalmo_dir / ".env")  # LLM keys into os.environ so the Incalmo subprocess (env={**os.environ,…}) always inherits them, however the harness was launched (bare uvicorn or main.sh). override=False → an already-exported key still wins.
@@ -86,6 +128,7 @@ async def lifespan(app: FastAPI):
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
+    _inflight_gate = asyncio.Semaphore(cfg.max_active_experiments)        # hard cap on concurrently-active experiments; overflow waits in QUEUED
     await _clean_slate()
     _capacity = CapacityTracker()
     await _capacity.initialize()
@@ -432,7 +475,7 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         await registry.update(experiment)
         get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
                               name, experiment.retry_count, cfg.max_retries)
-        _tasks[name] = asyncio.create_task(_run_experiment(experiment))
+        _tasks[name] = asyncio.create_task(_run_experiment_gated(experiment))
     else:
         experiment.status = ExperimentStatus.ERROR  # escalate to the caller (phdpt)
         await registry.update(experiment)
@@ -511,6 +554,19 @@ async def _docker_preflight() -> Optional[str]:
                 "`sudo setfacl -m u:$USER:rw /var/run/docker.sock`.")
     last = next((l for l in reversed(err.splitlines()) if l.strip()), "").strip()
     return f"This attacker needs Docker, but the Docker daemon is not usable: {last or 'docker info failed'}"
+
+
+async def _run_experiment_gated(experiment: Experiment) -> None:
+    """Run an experiment under the active-concurrency cap. The experiment stays
+    QUEUED (its status is not advanced here) until a slot frees, so no more than
+    cfg.max_active_experiments experiments are ever past QUEUED (DEPLOYING through
+    RUNNING and teardown) at once. Released on every exit path, including retries
+    and exceptions, so a slot is never leaked."""
+    await _inflight_gate.acquire()
+    try:
+        await _run_experiment(experiment)
+    finally:
+        _inflight_gate.release()
 
 
 async def _run_experiment(experiment: Experiment) -> None:
@@ -690,16 +746,23 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     returncode = None
     try:
-        returncode = await asyncio.wait_for(process.wait(), cfg.attacker_timeout_seconds)
-        status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
-    except asyncio.TimeoutError:
-        exp_log.info("[%s] Attacker exceeded timeout (%ss) — stopping", name, cfg.attacker_timeout_seconds)
-        await experiment.attacker.stop(experiment, cfg)
-        try:
-            await asyncio.wait_for(process.wait(), 15)
-        except asyncio.TimeoutError:
-            pass
-        status = ExperimentStatus.TIMEDOUT
+        if cfg.attacker_timeout_seconds is None:
+            returncode = await process.wait()
+            status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
+        else:
+            # Credit rate-limit backoff against the cap so a heavily-throttled but
+            # otherwise-healthy run is not marked TimedOut for time it only waited.
+            returncode = await _wait_attacker_with_rl_credit(process, name, cfg, exp_log)
+            if returncode is None:
+                exp_log.info("[%s] Attacker exceeded timeout (%ss, excluding rate-limit backoff) — stopping", name, cfg.attacker_timeout_seconds)
+                await experiment.attacker.stop(experiment, cfg)
+                try:
+                    await asyncio.wait_for(process.wait(), 15)
+                except asyncio.TimeoutError:
+                    pass
+                status = ExperimentStatus.TIMEDOUT
+            else:
+                status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
     except Exception as e:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
@@ -728,9 +791,17 @@ async def _run_experiment(experiment: Experiment) -> None:
         await _handle_failure(experiment, reason)
         return
 
+    # Flip to a terminal status only AFTER _teardown, which collects all host
+    # telemetry (collect_environment) before it deletes any VM. This makes "Finished"
+    # a reliable signal that every host's logs are collected and the environment is
+    # reclaimed — not merely that the attacker process exited. Previously the status
+    # was set before _teardown, so an observer (or a monitor keying on "Finished")
+    # could see it while collection was still in flight. Telemetry was never lost
+    # either way (teardown always collected first); this only fixes the early flip.
+    # The experiment stays RUNNING through collection+teardown and flips once here.
+    await _teardown(experiment)
     experiment.status = status
     await registry.update(experiment)
-    await _teardown(experiment)
     _write_result(experiment)  # after teardown, so experiment_result.json carries the full timestamp set
 
 
@@ -824,7 +895,7 @@ async def add_experiment(data: ExperimentSpecs):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    _tasks[experiment.experiment_name] = asyncio.create_task(_run_experiment(experiment))
+    _tasks[experiment.experiment_name] = asyncio.create_task(_run_experiment_gated(experiment))
     return {"experiment_name": experiment.experiment_name, "status": experiment.status}
 
 
