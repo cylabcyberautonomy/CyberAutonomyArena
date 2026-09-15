@@ -41,12 +41,18 @@ _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
 
-from topology import build_network, host_users, telemetry_host_ips
+from topology import (
+    build_network,
+    defendable_host_ips,
+    host_users,
+    telemetry_host_ips,
+)
 
 import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
+from ansible.defender import ReconfigureSysFlow
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
@@ -83,6 +89,14 @@ action_logger = setup_action_logger(str(log_dir))
 
 perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
 perry_cfg = Config(**perry_config_data)
+# This run's Elasticsearch indices are scoped to this experiment
+# (falco-<name> / sysflow-<name>). The ES on the harness host is shared and
+# persistent across every concurrent run, and a falco/sysflow document has no
+# experiment field - only a hostname and an IP, both of which repeat across
+# topologies. Unscoped, a defender reads other runs' telemetry and acts on it:
+# on 2026-09-15 the 2-host s45_soc_sbt_t0 reported 34 suspicious hosts
+# (database0-23 among them) and restored its own host0 off the back of that.
+perry_cfg.experiment_name = experiment_name
 
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
@@ -109,9 +123,14 @@ ansible_runner = AnsibleRunner(
 
 topology_spec = config.get("topology_spec")
 network = None
+telemetry_hosts: list[str] = []
 if topology_spec:
     topology_data = json.loads(Path(topology_spec).read_text())
     network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
+    # Hosts that actually run sysflow - the "*_instrumented" vm_types MHBench's
+    # online registry attaches start_sysflow/start_defender_services to. The
+    # Kali attacker has no telemetry stack, so it is excluded.
+    telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
 
 if network is not None:
     # es_url above already uses this experiment's actual management_ip rather
@@ -123,8 +142,39 @@ if network is not None:
     # even if Falco is already present (e.g. baked into a *_instrumented image).
     # Left uncaught deliberately: if Falco can't be installed, this defender
     # can never trigger, so failing fast here beats a silently-idle defender.
-    ansible_runner.run_playbook(InstallFalco(network.get_all_host_ips(), perry_cfg))
+    # Not get_all_host_ips(): that includes the attacker's own box, which the
+    # defender does not own and could never instrument. See
+    # topology.defendable_host_ips.
+    ansible_runner.run_playbook(
+        InstallFalco(defendable_host_ips(topology_data["networks"][0]), perry_cfg)
+    )
     print(f"[{experiment_name}] Falco install complete.", flush=True)
+
+    # Both halves of this defender read Elasticsearch, and each half needs its
+    # own telemetry stream pointed here:
+    #
+    #   detection - Falco, handled by InstallFalco above (its falcosidekick
+    #   config task now notifies a restart handler, without which a baked host's
+    #   already-running sidekick kept shipping to MHBench's own ES);
+    #
+    #   investigation - SysFlow. On a SuspiciousHost, FalcoLLM hands the host's
+    #   IP to SysFlowAgent, which does five Elasticsearch queries against the
+    #   "sysflow" index to decide whether that host is compromised. Real
+    #   *_instrumented hosts boot with sysflow already running against the
+    #   Elasticsearch baked into their image (MHBench's aux_files/
+    #   pipeline.local.json -> http://10.81.1.25:9200), so that index held
+    #   nothing for any host in this experiment and the agent would have been
+    #   reasoning over an empty result set no matter how good the detection got.
+    #   The deception plugin's runner already does exactly this before arming;
+    #   this one never did.
+    if telemetry_hosts:
+        print(
+            f"[{experiment_name}] Pointing sysflow on {len(telemetry_hosts)} host(s) "
+            f"at {es_url}: {', '.join(telemetry_hosts)}",
+            flush=True,
+        )
+        ansible_runner.run_playbook(ReconfigureSysFlow(telemetry_hosts, perry_cfg))
+        print(f"[{experiment_name}] SysFlow reconfigure complete.", flush=True)
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:
@@ -136,7 +186,9 @@ if strategy_cls is None:
     sys.exit(1)
 
 arsenal = CountArsenal(config.get("arsenal", {}))
-telemetry_analysis = TELEMETRY_MAP[config["strategy"]](es_conn, network)
+telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
+    es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+)
 telemetry_service = TelemetryService(telemetry_analysis)
 orchestrator = OpenstackOrchestrator(
     openstack_conn=openstack_conn,
