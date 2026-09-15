@@ -134,6 +134,15 @@ class _IncalmoAttacker(AttackerPlugin):
         await stop_c2c_server(container_id)
 
 
+# Hardcoded strategies that drive Metasploit directly (via MsfRpcCommand) need
+# msfrpcd + pymetasploit3 on the Kali host, exactly like the LLM attacker. Most
+# state-machine strategies never touch msf (LateralMoveToHost's msf path is
+# llm_interface-gated, which they don't set), so this install is opt-in per
+# strategy to avoid paying metasploit-framework's large download for runs that
+# never use it.
+_MSF_STRATEGIES = {"MsfBindTestStrategy"}
+
+
 class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
     type: Literal["incalmo_strategy"]
     strategy: str  # e.g. "GraphSearch", "Darkside", "EquifaxStrategy"
@@ -145,6 +154,14 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
         if isinstance(value, list):
             return value[0] if value else "GraphSearch"
         return value
+
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
+        prepared = await super().setup(experiment, cfg, mgmt_ip)
+        # Only install msf for strategies that actually dispatch Metasploit ops.
+        if self.strategy in _MSF_STRATEGIES:
+            from ....environment.deployer import run_attacker_setup_play
+            await run_attacker_setup_play(experiment, mgmt_ip, "install_metasploit", None, cfg)
+        return prepared
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
