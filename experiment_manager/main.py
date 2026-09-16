@@ -153,6 +153,8 @@ async def lifespan(app: FastAPI):
     global cfg, registry, _openstack_lock, _configure_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
+    logger.warning("experiment_manager starting: cloud_backend=%s (config=%s)",
+                   cfg.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
     load_dotenv(cfg.incalmo_dir / ".env")  # LLM keys into os.environ so the Incalmo subprocess (env={**os.environ,…}) always inherits them, however the harness was launched (bare uvicorn or main.sh). override=False → an already-exported key still wins.
     os.environ["OS_CLOUD"] = cfg.os_cloud
     registry = Registry(cfg.registry_path)
@@ -160,7 +162,11 @@ async def lifespan(app: FastAPI):
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     _inflight_gate = asyncio.Semaphore(cfg.max_active_experiments)        # hard cap on concurrently-active experiments; overflow waits in QUEUED
-    await _clean_slate()
+    if cfg.cloud_backend == "gcp":
+        # HARD GATE: a GCP manager must never run the all-projects OpenStack clean-slate.
+        logger.warning("cloud_backend=gcp — SKIPPING OpenStack clean-slate; this manager will not touch the shared OpenStack cloud")
+    else:
+        await _clean_slate()
     # The registry is the tracker's source of truth: the VM count is derived on every check
     # from which experiments currently hold VMs (capacity._holds_vms), not from paired
     # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
@@ -307,6 +313,13 @@ async def _openstack_clean_slate() -> None:
 
 async def _clean_slate() -> None:
     """On startup, kill all running processes, stop C2 containers, tear down environments."""
+    # GCP-backed isolated manager: never run the OpenStack clean-slate. It would (a) delete the
+    # shared OpenStack cloud's resources (all-projects wipe) and (b) pkill the OTHER manager's
+    # in-flight MHBench/ansible subprocesses on this shared host. GCP experiments are torn down
+    # per-experiment via MHBench (config.gcp.yaml); leftover GCP resources are handled there.
+    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+        logger.info("cloud_backend=gcp — skipping OpenStack clean-slate (isolated GCP manager)")
+        return
     # Reap MHBench provision/configure/collect subprocesses (+ their ansible children) left over from a
     # prior harness that died without cleaning up: orphaned to init, they keep hammering torn-down bastions
     # for the full check_if_host_up timeout (~18 min) and write stale host-logs into reused same-name output
@@ -794,7 +807,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         exp_log.exception("Pre-attack log rotation failed for '%s' — proceeding (logs may include pre-attack noise)", experiment.experiment_name)
 
     try:
-        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=kali_c2c_url)
+        # On GCP the attacker LLM runs on beluga and must reach the C2 at its EXTERNAL IP (local_c2c_url);
+        # kali_c2c_url is the in-VPC internal IP the sandcat agents beacon to, unreachable from beluga.
+        attacker_c2c = local_c2c_url if getattr(cfg, 'cloud_backend', 'openstack') == 'gcp' else kali_c2c_url
+        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:

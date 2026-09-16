@@ -45,7 +45,7 @@ async def _ensure_image_built(experiment_name: str, cfg: ExperimentManagerConfig
     log(experiment_name, f"Built '{_C2C_IMAGE}' successfully.")
 
 
-async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -> tuple[str, str, str]:
+async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None) -> tuple[str, str, str]:
     """
     Launch the Incalmo C2 Docker container and return immediately.
     Returns (container_id, kali_url, local_url) — container may not be ready yet.
@@ -54,6 +54,18 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
     Call wait_for_c2c_ready(local_url) after saving container_id to the registry.
     """
     init_logger(experiment_name, output_root(experiment_name, cfg))
+    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+        # C2 runs on the environment's management host (the GCP bastion every ansible play
+        # already proxies through and beluga's way into the VPC). Everyone reaches it at the
+        # mgmt host's external IP: harness directly, env hosts via Cloud NAT egress. See gcp_c2.
+        from . import gcp_c2
+        loop = asyncio.get_event_loop()
+        _vm, internal_url, external_url = await loop.run_in_executor(None, gcp_c2.setup_c2, experiment_name, cfg)
+        log(experiment_name, f"GCP C2: env/agents -> {internal_url}, harness -> {external_url}")
+        # remote_url (setup play / sandcat agents, in-VPC) = internal; local_url (beluga: readiness
+        # polls + attacker LLM) = external. GCP Cloud NAT can't hairpin a VM to a same-VPC external IP,
+        # so agents MUST use the internal IP.
+        return f"gcp-c2:{experiment_name}", internal_url, external_url
     await _ensure_image_built(experiment_name, cfg)
     name = _container_name(experiment_name)
 
@@ -97,6 +109,11 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig) -
 
 
 async def stop_c2c_server(container_id: str) -> None:
+    if container_id and container_id.startswith("gcp-c2:"):
+        from . import gcp_c2
+        exp = container_id[len("gcp-c2:"):]
+        await asyncio.get_event_loop().run_in_executor(None, gcp_c2.teardown_c2, exp, None)
+        return
     """Force-kill and remove the C2 container. `rm -f` (SIGKILL) skips `docker stop`'s 10s SIGTERM grace —
     these are throwaway containers, and on shutdown they're stopped one-by-one, so that grace × N was
     minutes of dead time before the host teardown could even start."""
@@ -120,7 +137,7 @@ async def wait_for_agent(local_c2c_url: str, experiment_name: str) -> None:
     """Poll until at least one sandcat agent has beaconed to the C2 server."""
     log(experiment_name, "Waiting for sandcat agent to beacon...")
     parsed = urlparse(local_c2c_url)
-    host, port = "127.0.0.1", parsed.port
+    host, port = parsed.hostname or "127.0.0.1", parsed.port  # remote C2 host on GCP; 127.0.0.1 for local OpenStack C2
     deadline = asyncio.get_event_loop().time() + AGENT_BEACON_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         try:
@@ -153,7 +170,7 @@ async def _get_mapped_port(container_name: str) -> int:
 
 async def _wait_until_ready(c2c_url: str) -> None:
     parsed = urlparse(c2c_url)
-    host, port = "127.0.0.1", parsed.port
+    host, port = parsed.hostname or "127.0.0.1", parsed.port  # remote C2 host on GCP; 127.0.0.1 for local OpenStack C2
     deadline = asyncio.get_event_loop().time() + STARTUP_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         try:

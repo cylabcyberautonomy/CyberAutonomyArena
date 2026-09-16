@@ -54,7 +54,7 @@ class AttackerPlugin(BaseModel):
     ) -> asyncio.subprocess.Process:
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
-    async def launch_c2c(
+    async def launch_c2c(  # noqa: D401
         self, experiment_name: str, cfg: ExperimentManagerConfig
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Start the C2 server. Returns (container_id, kali_url, local_url) or (None, None, None)."""
@@ -74,7 +74,7 @@ class AttackerPlugin(BaseModel):
         attacker's setup_play on the kali host, and block until the attacker channel is ready. Transactional:
         tears down its own partial C2 on failure."""
         from ...environment.deployer import run_attacker_setup_play
-        container_id, remote_url, local_url = await self.launch_c2c(experiment.experiment_name, cfg)
+        container_id, remote_url, local_url = await self.launch_c2c(experiment.experiment_name, cfg, mgmt_ip)
         try:
             if local_url:
                 await self.wait_c2c_ready(local_url, experiment.experiment_name)

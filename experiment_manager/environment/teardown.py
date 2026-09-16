@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 
 from ..config import ExperimentManagerConfig
+from .deployer import _mhb_config_args
 from ..experiment import Experiment
 from ..experiment_log import init_logger, log, output_root
 
@@ -21,7 +22,7 @@ def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None
     log(name, f"Tearing down environment via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
         result = subprocess.run(
-            [str(python), str(cli), "teardown", "--yes", str(topology_path), "--project-name", name],
+            [str(python), str(cli), *_mhb_config_args(cfg), "teardown", "--yes", str(topology_path), "--project-name", name],
             cwd=str(mhbench_dir),
             stdout=lf, stderr=lf,
         )

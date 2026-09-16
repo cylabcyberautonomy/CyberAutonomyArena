@@ -43,6 +43,11 @@ def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
     return None
 
 
+def _mhb_config_args(cfg) -> list:
+    # Route MHBench at a non-default backend config (e.g. GCP). Group option, before the subcommand.
+    return ["--config", cfg.mhbench_config] if getattr(cfg, "mhbench_config", None) else []
+
+
 def _provision_sync(
     experiment_name: str,
     environment_spec: str,
@@ -56,7 +61,7 @@ def _provision_sync(
     provision_result_path = output_root(experiment_name, cfg) / experiment_name / "experiment" / "provision_result.json"
 
     cmd = [
-        str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
+        str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
         "provision", str(topology_path),
         "--project-name", experiment_name,
         "--output-file", str(provision_result_path),
@@ -103,7 +108,7 @@ def _configure_sync(
     cli = mhbench_dir / "cli.py"
 
     cmd = [
-        str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
+        str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
         "configure", str(topology_path),
         "--project-name", experiment_name,
         "--mgmt-ip", mgmt_ip,
@@ -165,7 +170,7 @@ def _attacker_play_sync(
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
     cmd = [
-        str(python), str(cli), "--ansible-verbosity", str(cfg.ansible_verbosity),
+        str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
         "configure", str(topology_path),
         "--project-name", experiment_name,
         "--mgmt-ip", mgmt_ip,

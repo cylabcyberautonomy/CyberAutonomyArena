@@ -42,6 +42,7 @@ _LLM_GROUPS = [
     {"group_label": "DeepSeek (direct — needs DEEPSEEK_API_KEY)", "options": ["deepseek-v3", "deepseek-r1"]},
     {"group_label": "OpenRouter — needs OPENROUTER_API_KEY", "options": [
         "kimi-k3", "glm-5.2", "kimi-k2-base", "qwen3-235b-non-thinking", "glm-4.5",
+        "qwen3.8-max", "qwen3-8",
     ]},
 ]
 
@@ -120,9 +121,9 @@ class _IncalmoAttacker(AttackerPlugin):
         return await super().setup(experiment, cfg, mgmt_ip)
 
     async def launch_c2c(
-        self, experiment_name: str, cfg: ExperimentManagerConfig
+        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -221,6 +222,10 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             },
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            # Own session/process group so a wedged attacker can be SIGKILLed as a whole
+            # group (children: ssh, msfrpc, the langchain worker) without the harness having
+            # to be in that group — see _force_kill_attacker in main.py.
+            start_new_session=True,
         )
 
 
@@ -319,4 +324,8 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             },
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            # Own session/process group so a wedged attacker can be SIGKILLed as a whole
+            # group (children: ssh, msfrpc, the langchain worker) without the harness having
+            # to be in that group — see _force_kill_attacker in main.py.
+            start_new_session=True,
         )

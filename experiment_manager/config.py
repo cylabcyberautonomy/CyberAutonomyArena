@@ -18,12 +18,15 @@ class ExperimentManagerConfig(BaseModel):
     ansible_log_dir: str = "experiment/ansible"  # per-experiment subpath under output_dir/<exp>/ for per-host ansible logs
     registry_path: Path = _HERE / "experiment_registry.yaml"
     os_cloud: str = "openstack"
+    cloud_backend: str = "openstack"  # "openstack" (default) or "gcp"; gcp routes MHBench via mhbench_config and skips OpenStack clean-slate
+    mhbench_config: Optional[str] = None  # passed to MHBench cli as --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"; None = MHBench default (OpenStack)
     max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
     max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_retries: int = 3
     max_active_experiments: int = 25  # hard cap on concurrently ACTIVE experiments (DEPLOYING..RUNNING..teardown); excess stays QUEUED. Bounds cluster network load (routers/FIPs/L3) which the vCPU CapacityTracker does not model - at ~27 concurrent, mgmt-FIP SSH began timing out during provisioning.
+    max_active_vms: Optional[int] = None  # cap on total VMs across active experiments (harness-tracked by CapacityTracker; counts each topology's VMs incl. mgmt host, plus an estimate of the defender's decoy VMs - see capacity.estimate_decoy_vms). None = no cap. Bounds compute/VM pile-up more predictably than max_active_experiments (which varies 6-35 VMs/env). A single env larger than the cap still runs alone rather than deadlocking.
     max_deployed: int = 10  # back-pressure: cap experiments in the deploy stage (DEPLOYING+DEPLOYED). A deploy slot is held from provision-start until configure-start, so when configure backs up, provisioning halts instead of piling up idle hosts.
-    attacker_timeout_seconds: Optional[float] = None  # harness-enforced attacker wall-clock cap; None = no cap. On timeout the harness stops the attacker and marks status TimedOut (terminal, no retry).
+    attacker_timeout_seconds: Optional[float] = None  # harness-enforced attacker wall-clock cap on REAL elapsed time; None = no cap. On timeout the harness SIGTERMs the attacker (escalating to a SIGKILL of its process group if it ignores that) and marks status TimedOut (terminal, no retry). No rate-limit backoff credit — a heavily-throttled run is measured on real time, so raise the cap if throttling pushes healthy runs over it.
     ansible_verbosity: int = int(os.environ.get("ANSIBLE_VERBOSITY", "0"))  # 0-4 (-vvvv); default from $ANSIBLE_VERBOSITY (main.sh), config.yaml overrides
     deception_dir: Optional[Path] = None
     # How long to wait for a defender to finish arming (its strategy's initialize():
@@ -51,7 +54,14 @@ class ExperimentManagerConfig(BaseModel):
         return self.deception_python or (self.deception_dir / ".venv" / "bin" / "python")
 
     @classmethod
-    def load(cls, path: Path = _DEFAULT_CONFIG_PATH) -> "ExperimentManagerConfig":
+    def load(cls, path: Optional[Path] = None) -> "ExperimentManagerConfig":
+        # An explicit arg wins; else $EXPERIMENT_MANAGER_CONFIG (lets a second manager run a
+        # non-default backend safely); else the default config.yaml. Without this a second
+        # manager silently loads config.yaml (OpenStack) and its startup clean-slate wipes the
+        # shared cloud — see the 2026-09-16 incident.
+        if path is None:
+            env = os.environ.get("EXPERIMENT_MANAGER_CONFIG")
+            path = Path(env) if env else _DEFAULT_CONFIG_PATH
         with open(path) as f:
             data = yaml.safe_load(f)
         return cls(**data)
