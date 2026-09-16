@@ -35,6 +35,7 @@ Receives a config JSON path as argv[1]. The JSON must contain:
 import json
 import os
 import signal
+import threading
 import sys
 import time
 from pathlib import Path
@@ -241,6 +242,27 @@ def _shutdown(signum, frame):
 
 signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
+
+# The _shutdown handler above only runs when the main thread is executing Python
+# bytecode — but the run loop blocks inside a C call in defender.run(), so on
+# SIGTERM the handler is DEFERRED and never fires (proven live: the defender
+# ignored SIGTERM and had to be SIGKILLed, hanging the harness's teardown wait).
+# set_wakeup_fd writes the signal number to a pipe from the C-level signal
+# trampoline the instant a signal is delivered (no Python handler / GIL needed);
+# this daemon watchdog — which runs because the blocked main thread's I/O releases
+# the GIL — then hard-exits. Validated to reap a blocked process ~1ms after SIGTERM.
+_wd_r, _wd_w = os.pipe()
+os.set_blocking(_wd_w, False)
+signal.set_wakeup_fd(_wd_w)
+
+def _sigkill_watchdog():
+    try:
+        os.read(_wd_r, 1)  # blocks until the first signal (SIGTERM/SIGINT) arrives
+    except Exception:
+        pass
+    os._exit(0)
+
+threading.Thread(target=_sigkill_watchdog, daemon=True, name="sigkill-watchdog").start()
 
 print(f"[{experiment_name}] Defender starting (strategy={strategy_name})", flush=True)
 defender.start()
