@@ -33,6 +33,7 @@ Receives a config JSON path as argv[1]. The JSON must contain:
   experiment_name, topology_spec, deception_dir, management_ip, log_dir
 """
 import json
+import os
 import signal
 import sys
 import time
@@ -227,8 +228,15 @@ _running = True
 
 
 def _shutdown(signum, frame):
+    # Force immediate exit. Just clearing the flag isn't enough: the loop can be
+    # blocked inside defender.run() (a long poll/telemetry call), so _running is
+    # only checked once run() returns — leaving the process alive after SIGTERM.
+    # That hung the harness's (un-timed) defender_process.wait() and wedged the
+    # whole run at Running until the defender was SIGKILL'd. SIGTERM here only ever
+    # means "the harness is tearing you down", so exit right away.
     global _running
     _running = False
+    os._exit(0)
 
 
 signal.signal(signal.SIGTERM, _shutdown)
