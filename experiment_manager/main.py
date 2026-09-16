@@ -109,7 +109,7 @@ async def _wait_attacker(process, pid, timeout, exp_log, name):
     start = loop.time()
     waiter = asyncio.ensure_future(process.wait())
     while True:
-        done, _ = await asyncio.wait({waiter}, timeout=5.0)
+        done, _ = await asyncio.wait({waiter}, timeout=120.0)  # poll the pid every 2 min
         if waiter in done:
             return waiter.result(), False
         if pid:
