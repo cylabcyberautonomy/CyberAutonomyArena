@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import shutil
-import time
+import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from .attacker import run_attacker
 from .defender import run_defender
 from .environment import DeployedEnvironment
-from .environment.capacity import CapacityTracker, count_vm_specs
+from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
 from .environment.deployer import provision_environment, configure_environment
 from .environment.teardown import teardown_environment
 from .environment.collect import collect_environment
@@ -60,44 +60,75 @@ class _PriorityLock:
 
 _PRIORITY_TEARDOWN = 0
 _PRIORITY_DEPLOY = 1
-async def _wait_attacker_with_rl_credit(process, name, cfg, exp_log):
-    """Wait for the attacker process, excluding time it spent BLOCKED on provider
-    rate-limit backoff from the wall-clock cap. The attacker writes its cumulative
-    backoff seconds to attacker/rate_limit_wait_seconds (see Incalmo's
-    langchain_interface._record_rate_limit_wait); effective elapsed = real elapsed
-    minus that credit, so a run throttled by a 20-rpm cap is not pushed into
-    TimedOut for time it was only waiting. Returns the process return code, or
-    None if it genuinely exceeded the credited cap.
 
-    cfg.attacker_timeout_seconds is assumed non-None here (the caller handles the
-    uncapped case)."""
-    cap = cfg.attacker_timeout_seconds
-    wait_file = (
-        output_root(name, cfg) / name / "attacker" / "rate_limit_wait_seconds"
-    )
-    start = time.monotonic()
-    poll = 30.0
+
+def _force_kill_attacker(pid: Optional[int], exp_log) -> None:
+    """Last-resort SIGKILL for an attacker that ignored the graceful stop (SIGTERM).
+    Kills the whole process GROUP when the attacker was launched in its own session
+    (start_new_session=True → its pgid differs from the harness's), so orphaned children
+    (ssh, msfrpc, the langchain worker) die with it. Guarded so we never signal the
+    harness's own process group. Falls back to killing just the pid."""
+    if not pid:
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return  # already gone
+    except Exception:
+        pgid = None
+    if pgid is not None and pgid != os.getpgrp():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            exp_log.info("Force-killed attacker process group %d (SIGKILL)", pgid)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            exp_log.exception("killpg(%s) failed; falling back to a pid-scoped SIGKILL", pgid)
+    try:
+        os.kill(pid, signal.SIGKILL)
+        exp_log.info("Force-killed attacker pid %d (SIGKILL)", pid)
+    except ProcessLookupError:
+        pass
+
+
+async def _wait_attacker(process, pid, timeout, exp_log, name):
+    """Wait for the attacker process, robust to asyncio's process.wait() never
+    resolving when the child is reaped out-of-band.
+
+    Observed live: a finished attacker (emitted <finished>) whose OS process had
+    already exited, yet process.wait() hung forever — so the run blocked to its
+    full wall-clock cap and was then mislabeled TimedOut despite finishing. Relying
+    on process.wait() alone is the bug. Each cycle we wait briefly on process.wait()
+    AND probe the real pid with os.kill(pid, 0); if the pid is gone we stop at once
+    and report the exit code (process.returncode, or 0 for a clean disappearance
+    that wait() never surfaced) so the run is reaped in seconds and labeled
+    correctly. Returns (returncode, timed_out): on timeout returncode is None and
+    the caller stops the process. timeout=None waits until the process is gone."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
     waiter = asyncio.ensure_future(process.wait())
     while True:
-        done, _ = await asyncio.wait({waiter}, timeout=poll)
+        done, _ = await asyncio.wait({waiter}, timeout=5.0)
         if waiter in done:
-            return waiter.result()
-        credit = 0.0
-        try:
-            credit = float(wait_file.read_text().strip())
-        except Exception:
-            credit = 0.0
-        effective = (time.monotonic() - start) - credit
-        if effective >= cap:
-            # Genuinely out of (rate-limit-credited) time. Leave `waiter`
-            # running; the caller stops the process and it resolves then.
-            if credit > 0:
-                exp_log.info(
-                    "[%s] Attacker timed out: %.0fs effective of %ss cap "
-                    "(%.0fs excluded as rate-limit backoff)",
-                    name, effective, cap, credit,
-                )
-            return None
+            return waiter.result(), False
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                waiter.cancel()
+                rc = process.returncode
+                if rc is None:
+                    exp_log.info(
+                        "[%s] Attacker pid %s already exited but process.wait() never "
+                        "resolved — treating as a clean finish", name, pid,
+                    )
+                    rc = 0
+                return rc, False
+            except PermissionError:
+                pass  # exists, just not signalable by us — still running
+        if timeout is not None and (loop.time() - start) >= timeout:
+            return None, True  # leave waiter running; caller stops the process
 
 
 _ACTIVE_STATUSES = {  # non-terminal / in-flight: their C2 must survive other experiments' launches — only ERROR/FINISHED C2s are stale
@@ -130,7 +161,10 @@ async def lifespan(app: FastAPI):
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     _inflight_gate = asyncio.Semaphore(cfg.max_active_experiments)        # hard cap on concurrently-active experiments; overflow waits in QUEUED
     await _clean_slate()
-    _capacity = CapacityTracker()
+    # The registry is the tracker's source of truth: the VM count is derived on every check
+    # from which experiments currently hold VMs (capacity._holds_vms), not from paired
+    # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
+    _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load)
     await _capacity.initialize()
     yield
     await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
@@ -386,14 +420,21 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
     try:
         await teardown_environment(experiment, cfg)
+        # This is what stops the experiment holding VMs in the CapacityTracker (see
+        # capacity._holds_vms). On failure it stays unset on purpose: the VMs may well
+        # still be on the cluster, so the experiment keeps holding its count until a
+        # DELETE (which re-attempts teardown, then drops it from the registry).
         experiment.teardown_finished_at = datetime.now(timezone.utc)
         await registry.update(experiment)
-        if experiment.vcpus_reserved is not None:
-            _capacity.release(experiment.experiment_name)
-        return True
+        tore_down = True
     except Exception:
         get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
-        return False  # env not cleanly destroyed — caller must not redeploy over it
+        tore_down = False  # env not cleanly destroyed — caller must not redeploy over it
+    # Always: re-read nova (a partial teardown still freed something) and wake waiters so
+    # they re-derive the VM count from state. Whether THIS experiment still holds VMs is
+    # decided by teardown_finished_at above, not by this call.
+    _capacity.release(experiment.experiment_name)
+    return tore_down
 
 
 async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
@@ -467,7 +508,11 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         experiment.status = ExperimentStatus.RETRYING
         experiment.error = None  # fresh attempt — clear the prior failure reason
         experiment.deployed_environment = experiment.c2c_container_id = experiment.pid = None
+        # Clearing vms_reserved is what un-holds the failed attempt's VMs in the
+        # CapacityTracker: teardown_finished_at is reset to None just below, so without
+        # this the old attempt would count again alongside the retry's reservation.
         experiment.vcpus_reserved = experiment.ram_mb_reserved = None
+        experiment.disk_gb_reserved = experiment.vms_reserved = None
         for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
                   "defender_started_at", "defender_finished_at", "attacker_started_at",
                   "attacker_finished_at", "teardown_started_at", "teardown_finished_at"):
@@ -525,9 +570,11 @@ async def _cancel_and_remove(name: str) -> None:
         await teardown_environment(experiment, cfg)  # deletes all VMs/networks by project name
     except Exception:
         logger.exception("Failed to tear down environment for '%s'", name)
-    if experiment.vcpus_reserved is not None:
-        _capacity.release(name)
+    # This path never sets teardown_finished_at, so it is the registry removal that stops
+    # the experiment holding VMs in the CapacityTracker (capacity._holds_vms only sees
+    # experiments still in the registry). Hence remove FIRST, then wake the waiters.
     await registry.remove(name)
+    _capacity.release(name)
 
 
 async def _docker_preflight() -> Optional[str]:
@@ -603,9 +650,19 @@ async def _run_experiment(experiment: Experiment) -> None:
     try:
         topology_path = cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
         vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir)
-        vcpus_reserved, ram_reserved = await _capacity.reserve(vm_specs, name)
-        experiment.vcpus_reserved = vcpus_reserved
-        experiment.ram_mb_reserved = ram_reserved
+        # Count the defender's decoy VMs toward the VM-count cap (they're real VMs the
+        # defender stands up during arming, not in vm_specs). vCPU/RAM/disk aren't
+        # reserved for them (unknown flavor here; decoys are small) — see reserve().
+        decoy_vms = estimate_decoy_vms(experiment.defender, topology_path)
+
+        def _record_reservation(res) -> None:
+            # Runs INSIDE the tracker's lock at the moment of admission, so the registry
+            # already shows this experiment holding its VMs before any other reserve()
+            # can evaluate the count (capacity._holds_vms keys off vms_reserved).
+            experiment.vcpus_reserved, experiment.ram_mb_reserved = res.vcpus, res.ram_mb
+            experiment.disk_gb_reserved, experiment.vms_reserved = res.disk_gb, res.n_vms
+
+        await _capacity.reserve(vm_specs, name, extra_vms=decoy_vms, on_admit=_record_reservation)
         config_path.write_text(experiment.config_json())
         await registry.update(experiment)
 
@@ -674,49 +731,59 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     defender_process = None
     if experiment.defender:
-        try:
-            # Drop any marker left by a previous run of this experiment name
-            # (overwrite=true reuses the output dir) before the gate below.
-            experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
-            defender_process = await run_defender(
-                experiment.defender,
-                experiment.deployed_environment,
-                experiment.experiment_name,
-                cfg,
-                mgmt_ip,
-            )
-            experiment.defender_started_at = datetime.now(timezone.utc)
-            await registry.update(experiment)
-        except Exception as e:
-            # A configured defender that fails to start must fail the experiment outright
-            # rather than silently degrade into an undefended attacker-only run - that
-            # would produce a "defender vs attacker" result with no defender ever having
-            # run, and nothing in the recorded outcome to say so.
-            exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
-            await _handle_failure(experiment, f"Failed to start defender — {e}")
-            return
-
-        # Wait for the defender to actually arm before letting the attacker in.
-        # run_defender() only spawns the process; the strategy's initialize()
-        # (deploying decoys, planting fake data and honey credentials) runs
-        # inside it and takes minutes. Without this the attacker could complete
-        # its entire chain against an environment that had no deception in it
-        # yet - which produced a "defense held / did not hold" result that
-        # measured nothing. Failing here is deliberate: a defense that never
-        # armed must not be reported as a defended run.
-        try:
-            await experiment.defender.wait_until_ready(
-                experiment.experiment_name, cfg, defender_process, log
-            )
-        except Exception as e:
-            exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
+        # Serialize defender arming under the SAME gate as the harness's configure step
+        # (_configure_lock / max_concurrent_configures). Arming runs heavy ansible over
+        # the shared bastion/mgmt host — deploying decoy VMs, planting fake data and
+        # honey credentials — and letting it overlap another experiment's configure
+        # saturates the mgmt host (the SSH "banner exchange"/timeout failures we hit).
+        # Holding the lock here, not just around configure_environment, makes ALL setup
+        # ansible single-file while the attack phase still runs many-in-parallel.
+        # Teardown on failure is uncapped and never takes this lock, so calling
+        # _handle_failure inside the block cannot deadlock; the lock releases on return.
+        async with _configure_lock.acquire(_PRIORITY_DEPLOY):
             try:
-                defender_process.terminate()
-                await defender_process.wait()
-            except Exception:
-                pass
-            await _handle_failure(experiment, f"Defender failed to arm — {e}")
-            return
+                # Drop any marker left by a previous run of this experiment name
+                # (overwrite=true reuses the output dir) before the gate below.
+                experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
+                defender_process = await run_defender(
+                    experiment.defender,
+                    experiment.deployed_environment,
+                    experiment.experiment_name,
+                    cfg,
+                    mgmt_ip,
+                )
+                experiment.defender_started_at = datetime.now(timezone.utc)
+                await registry.update(experiment)
+            except Exception as e:
+                # A configured defender that fails to start must fail the experiment outright
+                # rather than silently degrade into an undefended attacker-only run - that
+                # would produce a "defender vs attacker" result with no defender ever having
+                # run, and nothing in the recorded outcome to say so.
+                exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+                await _handle_failure(experiment, f"Failed to start defender — {e}")
+                return
+
+            # Wait for the defender to actually arm before letting the attacker in.
+            # run_defender() only spawns the process; the strategy's initialize()
+            # (deploying decoys, planting fake data and honey credentials) runs
+            # inside it and takes minutes. Without this the attacker could complete
+            # its entire chain against an environment that had no deception in it
+            # yet - which produced a "defense held / did not hold" result that
+            # measured nothing. Failing here is deliberate: a defense that never
+            # armed must not be reported as a defended run.
+            try:
+                await experiment.defender.wait_until_ready(
+                    experiment.experiment_name, cfg, defender_process, log
+                )
+            except Exception as e:
+                exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
+                try:
+                    defender_process.terminate()
+                    await defender_process.wait()
+                except Exception:
+                    pass
+                await _handle_failure(experiment, f"Defender failed to arm — {e}")
+                return
 
     # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
     # by construction (awaited before run_attacker). Best-effort: a rotation failure must not waste a
@@ -746,23 +813,32 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     returncode = None
     try:
-        if cfg.attacker_timeout_seconds is None:
-            returncode = await process.wait()
+        # Robust wait: process.wait() alone can hang when the child is reaped
+        # out-of-band (a finished attacker whose OS process already exited), which
+        # used to block the run to its full cap and then mislabel it TimedOut.
+        # _wait_attacker also probes the pid so an exit is caught in seconds.
+        returncode, timed_out = await _wait_attacker(
+            process, experiment.pid, cfg.attacker_timeout_seconds, exp_log, name
+        )
+        if not timed_out:
             status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
         else:
-            # Credit rate-limit backoff against the cap so a heavily-throttled but
-            # otherwise-healthy run is not marked TimedOut for time it only waited.
-            returncode = await _wait_attacker_with_rl_credit(process, name, cfg, exp_log)
-            if returncode is None:
-                exp_log.info("[%s] Attacker exceeded timeout (%ss, excluding rate-limit backoff) — stopping", name, cfg.attacker_timeout_seconds)
-                await experiment.attacker.stop(experiment, cfg)
+            exp_log.info("[%s] Attacker exceeded %ss wall-clock cap — stopping", name, cfg.attacker_timeout_seconds)
+            await experiment.attacker.stop(experiment, cfg)  # graceful SIGTERM
+            try:
+                await asyncio.wait_for(process.wait(), 15)
+            except asyncio.TimeoutError:
+                # SIGTERM ignored (the exact failure that let o46_sh_chpe_sa_t2 hold VMs
+                # for hours) — escalate to a SIGKILL of the whole attacker process group.
+                exp_log.warning("[%s] Attacker ignored SIGTERM after 15s — escalating to SIGKILL", name)
+                _force_kill_attacker(experiment.pid, exp_log)
                 try:
                     await asyncio.wait_for(process.wait(), 15)
                 except asyncio.TimeoutError:
-                    pass
-                status = ExperimentStatus.TIMEDOUT
-            else:
-                status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
+                    # Even SIGKILL didn't reap it. Do NOT keep waiting — stop blocking,
+                    # mark TimedOut, proceed to teardown so a stuck process can't wedge the batch.
+                    exp_log.error("[%s] Attacker pid %s survived SIGKILL — abandoning wait; marking TimedOut", name, experiment.pid)
+            status = ExperimentStatus.TIMEDOUT
     except Exception as e:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
@@ -877,7 +953,20 @@ async def add_experiment(data: ExperimentSpecs):
     if registered:
         await _cancel_and_remove(name)  # overwrite=true → cancel the prior run + free the name in place (no harness restart)
     if exp_out.exists():
-        shutil.rmtree(exp_out, ignore_errors=True)  # replace the prior output tree
+        # NEVER delete a prior run's output on re-submit. A completed injection-success run
+        # (o46_sh_chpe_sa_t2) was destroyed this way once — its attacker llm.log/actions.json
+        # and collected telemetry gone with no archive. Move it aside instead, mirroring the
+        # retry archiver in _handle_failure. If the archive itself fails we abort the overwrite
+        # rather than fall back to deletion — losing the prior result is the bug we're fixing.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        archive = output_root(name, cfg) / "replaced" / f"{name}_{stamp}"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, shutil.move, str(exp_out), str(archive))
+            logger.info("Archived prior output of '%s' to %s before overwrite", name, archive)
+        except Exception:
+            logger.exception("Failed to archive prior output of '%s' — aborting overwrite to avoid data loss", name)
+            raise HTTPException(status_code=500, detail=f"Could not archive existing output for '{name}'; overwrite aborted to avoid destroying prior results")
     experiment = Experiment(
         experiment_name=data.experiment_name,
         status=ExperimentStatus.QUEUED,
