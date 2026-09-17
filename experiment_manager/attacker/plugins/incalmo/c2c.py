@@ -11,7 +11,7 @@ from ....experiment_log import attacker_log as log, init_attacker_logger as init
 logger = logging.getLogger(__name__)
 
 STARTUP_TIMEOUT = 60
-AGENT_BEACON_TIMEOUT = 300
+AGENT_BEACON_TIMEOUT = 600  # GCP agents' first beacon can lag; give a wide margin
 POLL_INTERVAL = 2
 
 _C2C_IMAGE = "incalmo/c2c:latest"
@@ -139,21 +139,33 @@ async def wait_for_agent(local_c2c_url: str, experiment_name: str) -> None:
     parsed = urlparse(local_c2c_url)
     host, port = parsed.hostname or "127.0.0.1", parsed.port  # remote C2 host on GCP; 127.0.0.1 for local OpenStack C2
     deadline = asyncio.get_event_loop().time() + AGENT_BEACON_TIMEOUT
+    polls = 0
     while asyncio.get_event_loop().time() < deadline:
+        polls += 1
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=2)
-            writer.write(b"GET /agents HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=8)
+            writer.write(b"GET /agents HTTP/1.0\r\nHost: %b\r\n\r\n" % host.encode())
             await writer.drain()
-            response = await asyncio.wait_for(reader.read(4096), timeout=2)
+            # read to EOF (HTTP/1.0 closes after body) so we never parse a truncated response
+            chunks = []
+            while True:
+                c = await asyncio.wait_for(reader.read(65536), timeout=8)
+                if not c:
+                    break
+                chunks.append(c)
+            response = b"".join(chunks)
             writer.close()
             await writer.wait_closed()
             _, _, body = response.partition(b"\r\n\r\n")
             agents = json.loads(body) if body.strip() else []
             if agents:
-                log(experiment_name, f"Agent beaconed — {len(agents)} agent(s) registered.")
+                log(experiment_name, f"Agent beaconed — {len(agents)} agent(s) registered (after {polls} polls).")
                 return
-        except Exception:
-            pass
+            if polls % 6 == 0:
+                log(experiment_name, f"...still waiting for agent beacon at {host}:{port} (poll {polls}, 0 agents)")
+        except Exception as e:
+            if polls % 6 == 0:
+                log(experiment_name, f"...agent poll {polls} to {host}:{port} failed: {type(e).__name__}: {e}")
         await asyncio.sleep(POLL_INTERVAL)
     raise TimeoutError(f"No sandcat agent beaconed within {AGENT_BEACON_TIMEOUT}s")
 

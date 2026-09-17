@@ -79,9 +79,17 @@ def setup_c2(experiment_name: str, cfg) -> tuple[str, str]:
     name = _gcp_name(f"{experiment_name}-c2"); tag = name
     net = f"projects/{project}/global/networks/{_gcp_name(prefix + '-vpc')}"
     subnet = f"projects/{project}/regions/{region}/subnetworks/{_gcp_name(prefix + '-management-subnet')}"
-    img = f"projects/{project}/global/images/ubuntu-base"
-
+    # Prefer the baked C2 image (docker + incalmo/c2c + /incalmo + .venv-c2c already on disk) for a
+    # fast start; fall back to ubuntu-base + full provisioning if it hasn't been baked yet.
+    from google.api_core.exceptions import NotFound as _NF
     inst = c.InstancesClient(**k); fw = c.FirewallsClient(**k)
+    images = c.ImagesClient(**k)
+    baked = gc.get("c2_image", "mhbench-c2")
+    try:
+        images.get(project=project, image=baked); img = f"projects/{project}/global/images/{baked}"; use_baked = True
+    except _NF:
+        img = f"projects/{project}/global/images/ubuntu-base"; use_baked = False
+    logger.info("[gcp-c2] C2 image: %s (%s)", img.split('/')[-1], "baked-fast" if use_baked else "full-setup")
     user_data = ("#cloud-config\ndisable_root: false\nruncmd:\n"
                  "  - install -d -m700 /root/.ssh\n"
                  f"  - echo '{pub}' >> /root/.ssh/authorized_keys\n"
@@ -114,12 +122,38 @@ def setup_c2(experiment_name: str, cfg) -> tuple[str, str]:
             logger.warning("[gcp-c2] firewall %s: %s", fwname, e)
 
     ext = inst.get(project=project, zone=zone, instance=name).network_interfaces[0].access_configs[0].nat_i_p
-    logger.info("[gcp-c2] attacker host up (internal=%s external=%s) — provisioning container", _C2_INTERNAL_IP, ext)
-    _provision_container(ext, key_path, cfg)
+    logger.info("[gcp-c2] attacker host up (internal=%s external=%s) — starting container", _C2_INTERNAL_IP, ext)
+    if use_baked:
+        _start_container(ext, key_path)
+    else:
+        _provision_container(ext, key_path, cfg)
     internal_url = f"http://{_C2_INTERNAL_IP}:{_C2_PORT}"  # env hosts beacon here (same VPC; NAT can't hairpin to the external IP)
     external_url = f"http://{ext}:{_C2_PORT}"              # beluga (attacker LLM + readiness polls) reaches here
     logger.info("[gcp-c2] C2 ready: internal=%s external=%s", internal_url, external_url)
     return name, internal_url, external_url
+
+
+def _start_container(ext_ip: str, key_path: str) -> None:
+    """Fast path: the baked image already has docker + the incalmo/c2c image + /incalmo + .venv-c2c,
+    so just boot and run the container, then wait for it to serve."""
+    ssh = _ssh_opts(key_path); target = f"root@{ext_ip}"
+    for _ in range(30):
+        if subprocess.run(ssh + [target, "true"], capture_output=True).returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise RuntimeError(f"[gcp-c2] SSH to baked C2 host {ext_ip} never came up")
+    subprocess.run(ssh + [target,
+        f"docker rm -f c2 >/dev/null 2>&1; docker run -d --name c2 -p 0.0.0.0:{_C2_PORT}:{_C2_PORT} "
+        f"-v /incalmo:/incalmo -e UV_PROJECT_ENVIRONMENT=/incalmo/.venv-c2c {_C2C_IMAGE}"],
+        check=True, timeout=120)
+    url = f"http://{ext_ip}:{_C2_PORT}/agents"
+    for _ in range(36):
+        try:
+            urllib.request.urlopen(url, timeout=5).read(); logger.info("[gcp-c2] baked C2 serving"); return
+        except Exception:
+            time.sleep(5)
+    raise RuntimeError(f"[gcp-c2] baked C2 never served on {url}")
 
 
 def _provision_container(ext_ip: str, key_path: str, cfg) -> None:
