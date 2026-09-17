@@ -78,6 +78,7 @@ from defender.telemetry import FalcoBasicAnalysis
 from defender.telemetry.NoTelemetry import NoTelemetry
 from defender.telemetry.telemetry_service import TelemetryService
 from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
+from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
 from defender.strategy import (
     AIAttackerDetection,
     StaticLayeredHostName,
@@ -131,7 +132,8 @@ perry_cfg = Config(**perry_config_data)
 # (database0-23 among them) and restored its own host0 off the back of that.
 perry_cfg.experiment_name = experiment_name
 
-openstack_conn = openstack.connect()
+cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
+openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
 # http, not https, and no api_key: this is the harness's own Elasticsearch
 # container (see the deception plugin's setup.py), which runs plain HTTP with
@@ -147,7 +149,7 @@ es_conn = Elasticsearch(es_url)
 # ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
 # experiment's internal 192.168.x.x hosts at all.
 ansible_runner = AnsibleRunner(
-    ssh_key_path=perry_cfg.openstack_config.ssh_key_path,
+    ssh_key_path=(perry_cfg.gcp_config.ssh_key_path if cloud_backend == "gcp" else perry_cfg.openstack_config.ssh_key_path),
     management_ip=config["bastion_ip"],
     ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
     log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
@@ -200,15 +202,25 @@ print(
     flush=True,
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-orchestrator = OpenstackOrchestrator(
-    openstack_conn=openstack_conn,
-    ansible_runner=ansible_runner,
-    external_elasticsearch_server=es_url,
-    elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-    config=perry_cfg,
-    network=network,
-    action_logger=action_logger,
-)
+if cloud_backend == "gcp":
+    orchestrator = GCPOrchestrator(
+        ansible_runner=ansible_runner,
+        external_elasticsearch_server=es_url,
+        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
+        config=perry_cfg,
+        network=network,
+        action_logger=action_logger,
+    )
+else:
+    orchestrator = OpenstackOrchestrator(
+        openstack_conn=openstack_conn,
+        ansible_runner=ansible_runner,
+        external_elasticsearch_server=es_url,
+        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
+        config=perry_cfg,
+        network=network,
+        action_logger=action_logger,
+    )
 
 strategy = strategy_cls(
     arsenal=arsenal,
