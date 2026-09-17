@@ -78,7 +78,11 @@ from defender.telemetry import FalcoBasicAnalysis
 from defender.telemetry.NoTelemetry import NoTelemetry
 from defender.telemetry.telemetry_service import TelemetryService
 from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
-from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
+# GCPOrchestrator is imported lazily inside the `cloud_backend == "gcp"` branch below.
+# It only exists on the Defense repo's `gcp-backend` branch; the OpenStack batch runs
+# `fix/parallel-decoy-deploy`, which lacks it, so a top-level import here crashed every
+# OpenStack defender on startup (ModuleNotFoundError) — see runbook §7. The usage is
+# already guarded by cloud_backend, so the import belongs there too.
 from defender.strategy import (
     AIAttackerDetection,
     StaticLayeredHostName,
@@ -203,6 +207,7 @@ print(
 )
 telemetry_service = TelemetryService(telemetry_analysis)
 if cloud_backend == "gcp":
+    from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
     orchestrator = GCPOrchestrator(
         ansible_runner=ansible_runner,
         external_elasticsearch_server=es_url,
