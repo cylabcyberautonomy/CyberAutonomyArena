@@ -55,9 +55,11 @@ class AttackerPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
     async def launch_c2c(  # noqa: D401
-        self, experiment_name: str, cfg: ExperimentManagerConfig
+        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Start the C2 server. Returns (container_id, kali_url, local_url) or (None, None, None)."""
+        """Start the C2 server. Returns (container_id, kali_url, local_url) or (None, None, None).
+        mgmt_ip is accepted (and ignored here) so setup() can pass it uniformly; the GCP C2
+        needs it, and any plugin not overriding this must still accept the call."""
         return None, None, None
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
