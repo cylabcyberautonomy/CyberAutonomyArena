@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import yaml
 from pydantic import BaseModel
@@ -25,6 +25,11 @@ class ExperimentManagerConfig(BaseModel):
     max_retries: int = 3
     max_active_experiments: int = 25  # hard cap on concurrently ACTIVE experiments (DEPLOYING..RUNNING..teardown); excess stays QUEUED. Bounds cluster network load (routers/FIPs/L3) which the vCPU CapacityTracker does not model - at ~27 concurrent, mgmt-FIP SSH began timing out during provisioning.
     max_active_vms: Optional[int] = None  # cap on total VMs across active experiments (harness-tracked by CapacityTracker; counts each topology's VMs incl. mgmt host, plus an estimate of the defender's decoy VMs - see capacity.estimate_decoy_vms). None = no cap. Bounds compute/VM pile-up more predictably than max_active_experiments (which varies 6-35 VMs/env). A single env larger than the cap still runs alone rather than deadlocking.
+    # GCP-only capacity limits (opt-in). Both default to "off" so the OpenStack backend's admission is
+    # byte-for-byte unchanged. On GCP the binding quota is the GLOBAL CPUS_ALL_REGIONS, which a VM-count
+    # cap cannot model (an e2-standard-8 attacker is 1 VM but 8 CPUs), so set these in config.gcp.yaml.
+    max_active_cpus: Optional[int] = None  # CPU-budget admission cap sized to the GCP global CPUS_ALL_REGIONS quota (minus headroom for the per-experiment C2 host, which is not in the topology). When set, an experiment is admitted only if its GCP vCPU cost fits the remaining budget; an env whose own cost exceeds the budget waits in QUEUED rather than provisioning partway and stranding. None = no CPU gate.
+    gcp_flavor_cpu_cost: Dict[str, int] = {}  # MHBench flavor -> GCP CPUS_ALL_REGIONS cost (measured live: e2-small/m1.small=1, e2-standard-8/m2.large=8). Feeds max_active_cpus and the decoy CPU estimate; a flavor absent here falls back to the placeholder vCPU count. Empty = no remap (OpenStack).
     max_deployed: int = 10  # back-pressure: cap experiments in the deploy stage (DEPLOYING+DEPLOYED). A deploy slot is held from provision-start until configure-start, so when configure backs up, provisioning halts instead of piling up idle hosts.
     attacker_timeout_seconds: Optional[float] = None  # harness-enforced attacker wall-clock cap on REAL elapsed time; None = no cap. On timeout the harness SIGTERMs the attacker (escalating to a SIGKILL of its process group if it ignores that) and marks status TimedOut (terminal, no retry). No rate-limit backoff credit — a heavily-throttled run is measured on real time, so raise the cap if throttling pushes healthy runs over it.
     ansible_verbosity: int = int(os.environ.get("ANSIBLE_VERBOSITY", "0"))  # 0-4 (-vvvv); default from $ANSIBLE_VERBOSITY (main.sh), config.yaml overrides

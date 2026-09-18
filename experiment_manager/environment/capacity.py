@@ -51,8 +51,15 @@ def _read_mgmt_flavor(mhbench_dir: Path) -> str:
     return cfg["management"]["flavor"]
 
 
-async def count_vm_specs(topology_path: Path, mhbench_dir: Path) -> list[tuple[int, int, int]]:
-    """Return (vcpus, ram_mb, disk_gb) for each VM in the topology, including the management host."""
+async def count_vm_specs(topology_path: Path, mhbench_dir: Path,
+                         flavor_cpu_cost: dict[str, int] | None = None) -> list[tuple[int, int, int]]:
+    """Return (vcpus, ram_mb, disk_gb) for each VM in the topology, including the management host.
+
+    flavor_cpu_cost (GCP only): map of MHBench flavor -> GCP CPUS_ALL_REGIONS cost. When given, the
+    vcpu field of each spec is taken from this map (falling back to the placeholder count for a flavor
+    not listed), so the vCPU reservation reflects the real GCP quota cost instead of the (2,4096,20)
+    placeholder that _get_flavor_specs returns when there's no OpenStack. RAM/disk are left as-is.
+    Omit it (or pass None/empty) on OpenStack for unchanged behavior."""
     topology = json.loads(topology_path.read_text())
     flavors: list[str] = [_read_mgmt_flavor(mhbench_dir)]
     for network in topology.get("networks", []):
@@ -62,8 +69,13 @@ async def count_vm_specs(topology_path: Path, mhbench_dir: Path) -> list[tuple[i
                 if flavor:
                     flavors.append(flavor)
 
-    specs = await asyncio.gather(*[_get_flavor_specs(f) for f in flavors])
-    return list(specs)
+    specs = list(await asyncio.gather(*[_get_flavor_specs(f) for f in flavors]))
+    if flavor_cpu_cost:
+        specs = [
+            (int(flavor_cpu_cost.get(flavor, vcpus)), ram, disk)
+            for flavor, (vcpus, ram, disk) in zip(flavors, specs)
+        ]
+    return specs
 
 
 def _defended_host_count(topology: dict) -> int:
@@ -182,8 +194,12 @@ class CapacityTracker:
     """
 
     def __init__(self, max_active_vms: int | None = None,
-                 active_source: Callable[[], Iterable[Any]] | None = None) -> None:
+                 active_source: Callable[[], Iterable[Any]] | None = None,
+                 max_active_cpus: int | None = None) -> None:
         self._max_active_vms: int | None = max_active_vms
+        # GCP-only CPU budget (the global CPUS_ALL_REGIONS quota). None = no CPU gate, so on
+        # OpenStack admission is decided by the VM-count rule alone, exactly as before.
+        self._max_active_cpus: int | None = max_active_cpus
         # Returns every experiment the harness knows about; the tracker filters with
         # _holds_vms(). Defaults to "none" so a tracker with no registry acts uncapped.
         self._active_source: Callable[[], Iterable[Any]] = active_source or (lambda: ())
@@ -251,44 +267,60 @@ class CapacityTracker:
             )
 
     async def reserve(self, vm_specs: list[tuple[int, int, int]], experiment_name: str,
-                      extra_vms: int = 0,
+                      extra_vms: int = 0, extra_vcpus: int = 0,
                       on_admit: Callable[[Reservation], None] | None = None) -> Reservation:
-        """Block until the VM-count cap allows this experiment.
+        """Block until the VM-count cap AND (on GCP) the CPU budget allow this experiment.
 
         extra_vms: the defender's decoy VMs - real VMs deployed later by the defender
         subprocess, so not in vm_specs, but they count toward the cap.
+
+        extra_vcpus: the CPU cost of those decoys (GCP only; 0 on OpenStack). Folded into the
+        reservation's vcpus so the CPU budget accounts for decoys the same way n_vms accounts
+        for their count.
 
         on_admit(reservation) is invoked INSIDE the lock the moment admission is decided. The
         caller must use it to set vms_reserved / vcpus_reserved / ram_mb_reserved /
         disk_gb_reserved on the experiment, so that the registry already shows this experiment
         as holding VMs before any other reserve() can evaluate the count."""
-        total_vcpus = sum(v for v, _, _ in vm_specs)
+        total_vcpus = sum(v for v, _, _ in vm_specs) + max(0, extra_vcpus)
         total_ram = sum(r for _, r, _ in vm_specs)
         total_disk = sum(dk for _, _, dk in vm_specs)
         n_vms = len(vm_specs) + max(0, extra_vms)
         async with self._condition:
             while True:
                 active = self.active_vms
-                # Admit if under the cap, OR if nothing else holds VMs - the latter lets a
-                # single env larger than the cap still run (alone) instead of deadlocking
-                # forever waiting for room that can never free up.
-                if (self._max_active_vms is None
-                        or active + n_vms <= self._max_active_vms
-                        or active == 0):
+                active_cpus = self._reserved_totals()[0]
+                # VM-count rule: admit if under the cap, OR if nothing else holds VMs - the
+                # latter lets a single env larger than the cap still run (alone) instead of
+                # deadlocking forever waiting for room that can never free up.
+                vm_ok = (self._max_active_vms is None
+                         or active + n_vms <= self._max_active_vms
+                         or active == 0)
+                # CPU budget (GCP): the global CPUS_ALL_REGIONS quota is a HARD ceiling - it
+                # cannot be exceeded even by a lone experiment (that just strands mid-provision
+                # with QUOTA_EXCEEDED), so there is deliberately no active==0 escape here. An
+                # env whose own CPU cost exceeds the budget waits in QUEUED instead. None (the
+                # OpenStack default) makes this always true, leaving admission to the VM rule.
+                cpu_ok = (self._max_active_cpus is None
+                          or active_cpus + total_vcpus <= self._max_active_cpus)
+                if vm_ok and cpu_ok:
                     reservation = Reservation(total_vcpus, total_ram, total_disk, n_vms)
                     if on_admit is not None:
                         on_admit(reservation)
                     logger.info(
                         "[%s] Admitted: %d VMs (%d topology + %d decoy; %d vCPUs / %d MB RAM / %d GB disk); "
-                        "active VMs now %d%s",
+                        "active VMs now %d%s%s",
                         experiment_name, n_vms, len(vm_specs), max(0, extra_vms),
                         total_vcpus, total_ram, total_disk, self.active_vms, self._cap_str(),
+                        (f"; active vCPUs now {self._reserved_totals()[0]}/{self._max_active_cpus}"
+                         if self._max_active_cpus is not None else ""),
                     )
                     self._warn_if_overcommitted(experiment_name, reservation)
                     return reservation
                 logger.info(
-                    "[%s] Waiting for VM capacity: need %d VMs, active %d%s",
-                    experiment_name, n_vms, active, self._cap_str(),
+                    "[%s] Waiting for capacity: need %d VMs / %d vCPUs, active %d VMs%s / %d vCPUs%s",
+                    experiment_name, n_vms, total_vcpus, active, self._cap_str(), active_cpus,
+                    (f"/{self._max_active_cpus}" if self._max_active_cpus is not None else ""),
                 )
                 try:
                     # Condition.wait() re-acquires the lock in its finally even when cancelled

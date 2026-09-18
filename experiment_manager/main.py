@@ -170,7 +170,8 @@ async def lifespan(app: FastAPI):
     # The registry is the tracker's source of truth: the VM count is derived on every check
     # from which experiments currently hold VMs (capacity._holds_vms), not from paired
     # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
-    _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load)
+    _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
+                                max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
     yield
     await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
@@ -662,11 +663,16 @@ async def _run_experiment(experiment: Experiment) -> None:
     deploy_slot_held = False
     try:
         topology_path = cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
-        vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir)
+        vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir,
+                                        flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
         # Count the defender's decoy VMs toward the VM-count cap (they're real VMs the
-        # defender stands up during arming, not in vm_specs). vCPU/RAM/disk aren't
-        # reserved for them (unknown flavor here; decoys are small) — see reserve().
+        # defender stands up during arming, not in vm_specs). On GCP their CPU cost also
+        # counts toward the CPU budget (extra_vcpus below); decoys are e2-small, i.e. the
+        # same GCP cost as an m1.small host. On OpenStack gcp_flavor_cpu_cost is empty so
+        # extra_vcpus is 0 and nothing changes.
         decoy_vms = estimate_decoy_vms(experiment.defender, topology_path)
+        decoy_cpu_each = (cfg.gcp_flavor_cpu_cost or {}).get("m1.small", 0)
+        decoy_vcpus = decoy_vms * decoy_cpu_each
 
         def _record_reservation(res) -> None:
             # Runs INSIDE the tracker's lock at the moment of admission, so the registry
@@ -675,7 +681,8 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.vcpus_reserved, experiment.ram_mb_reserved = res.vcpus, res.ram_mb
             experiment.disk_gb_reserved, experiment.vms_reserved = res.disk_gb, res.n_vms
 
-        await _capacity.reserve(vm_specs, name, extra_vms=decoy_vms, on_admit=_record_reservation)
+        await _capacity.reserve(vm_specs, name, extra_vms=decoy_vms, extra_vcpus=decoy_vcpus,
+                                on_admit=_record_reservation)
         config_path.write_text(experiment.config_json())
         await registry.update(experiment)
 
