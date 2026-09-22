@@ -1,0 +1,19 @@
+name: Custom.MHBench.ProcessMonitor
+description: |
+  Continuous process-execution telemetry for MHBench defender detection.
+
+  Sources the built-in Linux.Events.ProcessExecutions (execve monitoring), which
+  captures short-lived processes (e.g. `nc`, a reverse shell) that a periodic
+  pslist snapshot would miss. The harness-side runner reads this monitoring log
+  and applies the kill-chain detection rules; keeping the rules in the runner
+  (not baked into VQL here) makes them reviewable and tunable without redeploying.
+type: CLIENT_EVENT
+sources:
+  - query: |
+      SELECT System.Timestamp AS Timestamp,
+             Pid, Ppid,
+             Username,
+             Name AS Comm,
+             CommandLine,
+             Exe
+      FROM Artifact.Linux.Events.ProcessExecutions()
