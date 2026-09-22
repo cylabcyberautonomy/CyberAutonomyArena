@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from ..attacker import AttackerConfig
 from ..defender import DefenderConfig
+from ..traffic import TrafficConfig
 
 
 class ExperimentStatus(str, Enum):
@@ -28,6 +29,7 @@ class ExperimentSpecs(BaseModel):
     environment: str
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
+    traffic: Optional[TrafficConfig] = None  # third plugin class: benign background traffic on victim hosts
     c2c_server: Optional[str] = None  # TEST ONLY: bypasses C2 container startup
     trial: int = 0
     output_dir: Optional[str] = None  # write this experiment's output tree here instead of cfg.output_dir
@@ -50,6 +52,7 @@ _CONFIG_KEYS = {
     "environment": ("spec",),
     "attacker": ("config",),
     "defender": ("config",),
+    "traffic": ("config",),
 }
 
 
@@ -104,9 +107,13 @@ class Experiment:
     defender = _Field("defender", "config")
     defender_started_at = _Field("defender", "started_at")
     defender_finished_at = _Field("defender", "finished_at")
+    # --- traffic (third plugin class: background traffic on victim hosts) ---
+    traffic = _Field("traffic", "config")
+    traffic_started_at = _Field("traffic", "started_at")
+    traffic_finished_at = _Field("traffic", "finished_at")
 
     def __init__(self, experiment_name, status, environment_spec, attacker=None, defender=None,
-                 trial=0, teardown=True, created_at=None, updated_at=None):
+                 traffic=None, trial=0, teardown=True, created_at=None, updated_at=None):
         created_at = created_at or datetime.now(timezone.utc)
         self.metadata = {
             "experiment": {
@@ -126,6 +133,9 @@ class Experiment:
             },
             "defender": {
                 "config": defender, "started_at": None, "finished_at": None,
+            },
+            "traffic": {
+                "config": traffic, "started_at": None, "finished_at": None,
             },
         }
 
