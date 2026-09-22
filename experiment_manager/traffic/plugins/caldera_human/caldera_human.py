@@ -87,6 +87,7 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
     persona: str = "office_worker"
     persona_inline: Optional[dict[str, Any]] = None
     allow_browser: bool = False
+    allow_gui: bool = False
 
     # -- persona resolution + validation (harness side) --------------------
     def _render_persona_file(self, cfg: ExperimentManagerConfig, dest_dir: Path) -> Path:
@@ -106,7 +107,7 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
             data = json.loads(src.read_text())
 
         reasons = workflows_mod.check_persona_runnable(
-            [a.workflow for a in p.activities], allow_browser=self.allow_browser, allow_gui=False
+            [a.workflow for a in p.activities], allow_browser=self.allow_browser, allow_gui=self.allow_gui
         )
         if reasons:
             raise RuntimeError(f"persona {p.name!r} not runnable on victim hosts: {'; '.join(reasons)}")
@@ -156,7 +157,12 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
             None,
             lambda: bg_ansible.run_play(
                 action="install",
-                extravars={"bgtraffic_src": str(bg), "bgtraffic_persona_src": str(persona_file)},
+                extravars={
+                    "bgtraffic_src": str(bg),
+                    "bgtraffic_persona_src": str(persona_file),
+                    "bgtraffic_allow_browser": self.allow_browser,
+                    "bgtraffic_allow_gui": self.allow_gui,
+                },
                 **common,
             ),
         )

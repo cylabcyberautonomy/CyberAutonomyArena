@@ -16,6 +16,11 @@
     bgtraffic_dest: /opt/caldera-human-traffic
     bgtraffic_log: /var/log/bgtraffic/activity.jsonl
     bgtraffic_user: ubuntu
+    bgtraffic_allow_browser: false
+    bgtraffic_allow_gui: false
+    # Flags shared by the install-time --check and the running unit, so the on-host
+    # dependency preflight and the daemon agree on which workflow classes are permitted.
+    _bgtraffic_flags: "{{ '--allow-browser ' if bgtraffic_allow_browser else '' }}{{ '--allow-gui ' if bgtraffic_allow_gui else '' }}"
 
   tasks:
     # ---- install -------------------------------------------------------------
@@ -45,10 +50,10 @@
         dest: "{{ bgtraffic_dest }}/persona.json"
         mode: "0644"
 
-    - name: validate persona is runnable on this host (fails install if not)
+    - name: preflight persona + deps on this host (fails install fast if python3/pkgs missing)
       when: bgtraffic_action == 'install'
       command:
-        cmd: "python3 -m caldera_human_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --check"
+        cmd: "python3 -m caldera_human_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --check {{ _bgtraffic_flags }}"
         chdir: "{{ bgtraffic_dest }}"
       changed_when: false
 
@@ -66,7 +71,7 @@
           Type=simple
           WorkingDirectory={{ bgtraffic_dest }}
           Environment=PYTHONPATH={{ bgtraffic_dest }}
-          ExecStart=/usr/bin/python3 -m caldera_human_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --log {{ bgtraffic_log }}
+          ExecStart=/usr/bin/python3 -m caldera_human_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --log {{ bgtraffic_log }} {{ _bgtraffic_flags }}
           Restart=on-failure
           User={{ bgtraffic_user }}
 
@@ -84,6 +89,15 @@
       systemd:
         name: bgtraffic.service
         state: started
+
+    - name: verify the daemon stayed up (catches runtime-only failures --check can't, e.g. a missing Chromium binary)
+      when: bgtraffic_action == 'start'
+      command: systemctl is-active bgtraffic.service
+      register: _bg_active
+      until: _bg_active.stdout == 'active'
+      retries: 5
+      delay: 2
+      changed_when: false
 
     - name: stop background traffic
       when: bgtraffic_action == 'stop'
