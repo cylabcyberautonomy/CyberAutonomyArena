@@ -1,0 +1,60 @@
+# Live smoke test (opt-in, real cloud + LLM credits)
+
+The fast contract test (`test_arena_contract.py`) proves the four systems still fit together
+without deploying anything. This is the occasional full end-to-end check: it actually deploys a
+range, runs the attacker, runs a defender, and asserts real outcomes. Run it deliberately, not
+in CI.
+
+## The baseline combo
+
+| System | Choice | Why |
+| --- | --- | --- |
+| environment | `equifax_small` | fast; same `.10` DB key-holder structure as medium/large |
+| attacker | `incalmo_strategy` / `GraphSearch` | deterministic strategy, no attacker-LLM refusal risk |
+| defender | `llm_soc` / `FalcoLLM` | reads telemetry, deploys **no** decoys (decoy defenders are tightly coupled to MHBench) |
+
+Note: `equifax_small` is not instrumented. FalcoLLM needs Falco telemetry, so for the defender
+half either use `equifax_small_instrumented`, or rely on the llm_soc runner's own `InstallFalco`
+step. For a pure attacker-reaches-DB check, the environment choice above is enough.
+
+## ⚠ Before you run
+
+- A manager's **startup clean-slate wipes the OpenStack cloud (all projects)**. Do NOT start a
+  second OpenStack manager against the shared cluster to run this — it will delete the live
+  batch's VMs. Either use the already-running manager, or run on a cloud/tenant nobody else is
+  using.
+- This spends real LLM credits (the FalcoLLM defender) and real cluster time (~an hour).
+
+## Run it against an already-running manager
+
+```bash
+curl -sS -X POST http://localhost:8000/experiments \
+  -H 'content-type: application/json' \
+  -d '{
+        "experiment_name": "smoke_arena_contract",
+        "environment": "equifax_small_instrumented",
+        "attacker":  {"type": "incalmo_strategy", "strategy": "GraphSearch"},
+        "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"},
+        "teardown": true,
+        "priority": 1000
+      }'
+# then poll:
+curl -sS http://localhost:8000/experiments/smoke_arena_contract | python3 -m json.tool
+```
+
+## Pass criteria
+
+1. Status reaches `Finished` (not `Error` / `TimedOut` / `Blocked`).
+2. Attacker reached the DB tier: the attacker output records lateral movement past webserver0
+   and at least one exfiltrated data file — this is the regression the blacklist fix protects
+   (a blacklisted `.10` webserver0 gives 0 files).
+3. Defender armed: `output/<exp>/defender/defender_ready` was created and the defender log shows
+   telemetry being read (FalcoLLM issuing at least one LLM call, or an explicit "no alerts"
+   heartbeat).
+4. Logs collected before teardown: `output/<exp>/environment/<host>/` holds each victim's
+   `audit.log` / `syslog`.
+
+## After a refactor
+
+Run `test_arena_contract.py` first (fast). Only when it is green, run this once to confirm the
+live path still works end to end.
