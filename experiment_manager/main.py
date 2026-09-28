@@ -62,6 +62,13 @@ _PRIORITY_TEARDOWN = 0
 _PRIORITY_DEPLOY = 1
 
 
+def _gate_priority(experiment) -> int:
+    """Setup-gate priority for an experiment (lower = served first, per _PriorityLock). A labeled
+    priority run (experiment.priority > 0) maps to a lower gate number so it is admitted ahead of
+    normal runs; the default priority 0 maps to _PRIORITY_DEPLOY (unchanged behavior)."""
+    return _PRIORITY_DEPLOY - int(getattr(experiment, "priority", 0) or 0)
+
+
 def _force_kill_attacker(pid: Optional[int], exp_log) -> None:
     """Last-resort SIGKILL for an attacker that ignored the graceful stop (SIGTERM).
     Kills the whole process GROUP when the attacker was launched in its own session
@@ -142,15 +149,17 @@ cfg: ExperimentManagerConfig
 registry: Registry
 _openstack_lock: _PriorityLock
 _configure_lock: _PriorityLock
+_collect_lock: asyncio.Semaphore  # caps concurrent post-attacker host-log collects (bastion SSH burst / shared FIP-L3 load)
+_attacker_setup_lock: _PriorityLock  # caps concurrent attacker C2 bring-up — ONLY used when c2_on_kali (bastion-FIP SSH into Kali)
 _deploy_buffer: asyncio.Semaphore
-_inflight_gate: asyncio.Semaphore  # caps concurrently-active (non-queued, non-terminal) experiments
+_inflight_gate: _PriorityLock  # caps concurrently-active (non-queued, non-terminal) experiments; priority-ordered
 _capacity: CapacityTracker
 _tasks: dict[str, asyncio.Task] = {}  # experiment_name -> its _run_experiment task; lets a single run be cancelled/evicted (rerun) without a whole-harness restart
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_lock, _configure_lock, _deploy_buffer, _inflight_gate, _capacity
+    global cfg, registry, _openstack_lock, _configure_lock, _collect_lock, _attacker_setup_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
     logger.warning("experiment_manager starting: cloud_backend=%s (config=%s)",
@@ -160,8 +169,10 @@ async def lifespan(app: FastAPI):
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
+    _collect_lock = asyncio.Semaphore(cfg.max_concurrent_collects)        # concurrent COLLECT (post-attacker host-log fetch burst)
+    _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent attacker C2 bring-up (only enforced under c2_on_kali)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
-    _inflight_gate = asyncio.Semaphore(cfg.max_active_experiments)        # hard cap on concurrently-active experiments; overflow waits in QUEUED
+    _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments; overflow waits in QUEUED (priority-ordered)
     if cfg.cloud_backend == "gcp":
         # HARD GATE: a GCP manager must never run the all-projects OpenStack clean-slate.
         logger.warning("cloud_backend=gcp — SKIPPING OpenStack clean-slate; this manager will not touch the shared OpenStack cloud")
@@ -312,6 +323,68 @@ async def _openstack_clean_slate() -> None:
     logger.info("=== OpenStack teardown complete ===")
 
 
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _proc_ppid(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read().decode("utf-8", "replace")
+        # comm (field 2) is parenthesized and may itself contain spaces/parens;
+        # ppid is the 2nd whitespace-separated field after the final ')'.
+        after = data[data.rfind(")") + 1:].split()
+        return int(after[1])
+    except Exception:
+        return 0
+
+
+def _has_gcp_ancestor(pid: int) -> bool:
+    """True if `pid` or any ancestor's cmdline references a GCP-backend config - i.e. it
+    belongs to a GCP-backend manager (:8001 config.gcp.yaml, :8002 config.gcp2.yaml, ...)
+    or one of its MHBench/ansible children. Those run on this SHARED host but manage a
+    separate cloud, so an OpenStack manager's clean-slate must never kill them (a blunt
+    `pkill -f ansible` would SIGKILL a GCP provision/teardown mid-flight and strand GCP
+    resources). Match the "config.gcp" stem so EVERY GCP config is spared, not just
+    config.gcp.yaml — a literal "config.gcp.yaml" check does NOT contain "config.gcp2.yaml"
+    (the '2' breaks the substring), so :8002's cli.py/ansible children would otherwise be
+    reaped. OpenStack managers use config.yaml (never "config.gcp*"), so this can't
+    false-spare an OpenStack subprocess. Bounded walk (guards PID reuse cycles and depth)
+    so it always terminates."""
+    seen: set[int] = set()
+    cur = pid
+    for _ in range(64):
+        if cur <= 1 or cur in seen:
+            break
+        seen.add(cur)
+        if "config.gcp" in _proc_cmdline(cur):
+            return True
+        cur = _proc_ppid(cur)
+    return False
+
+
+async def _pgrep_f(pattern: str) -> list[int]:
+    """PIDs whose full cmdline matches `pattern` (like `pgrep -f`). Empty on error."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pgrep", "-f", pattern,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        pids = []
+        for tok in out.decode("utf-8", "replace").split():
+            try:
+                pids.append(int(tok))
+            except ValueError:
+                pass
+        return pids
+    except Exception:
+        return []
+
+
 async def _clean_slate() -> None:
     """On startup, kill all running processes, stop C2 containers, tear down environments."""
     # GCP-backed isolated manager: never run the OpenStack clean-slate. It would (a) delete the
@@ -324,15 +397,65 @@ async def _clean_slate() -> None:
     # Reap MHBench provision/configure/collect subprocesses (+ their ansible children) left over from a
     # prior harness that died without cleaning up: orphaned to init, they keep hammering torn-down bastions
     # for the full check_if_host_up timeout (~18 min) and write stale host-logs into reused same-name output
-    # dirs, polluting the fresh run. A fresh start has no legit ones running, so a blunt pkill is safe here.
+    # dirs, polluting the fresh run.
+    #
+    # SCOPED, not a blunt host-wide `pkill -9 -f`: this box also runs the GCP-backend manager
+    # (:8001, config.gcp.yaml), whose in-flight MHBench/cli.py + ansible children match these same
+    # patterns. A blunt pkill would SIGKILL them mid provision/configure/teardown and strand GCP
+    # resources. So we enumerate matches ourselves and skip any PID whose own or ancestor cmdline
+    # references config.gcp.yaml (that manager's whole subprocess tree), plus our own PID.
     for pattern in ("MHBench/cli.py", "ansible"):  # cli.py parents first, then their ansible children
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "pkill", "-9", "-f", pattern,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await proc.wait()
+            for pid in await _pgrep_f(pattern):
+                if pid == os.getpid() or _has_gcp_ancestor(pid):
+                    continue  # never touch the GCP manager's subprocess tree (or ourselves)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    logger.exception("Failed to SIGKILL pid %s ('%s') on clean-slate", pid, pattern)
         except Exception:
-            logger.exception("Failed to pkill '%s' on clean-slate", pattern)
+            logger.exception("Failed to reap '%s' on clean-slate", pattern)
+
+    # Reap the bare `ssh` CLIENTS the cli.py/ansible reaper above misses — the ControlMaster /
+    # ProxyCommand connections ansible spawns, plus the kali_c2 poll/tunnel ssh. They are NOT matched
+    # by "MHBench/cli.py"/"ansible", so every kill -9 restart orphaned them (ppid=1) and they PILED UP
+    # (observed 1,600+ this session), drowning beluga's fds/proc table AND holding/retrying connections
+    # that keep the bastions'/Kali's sshd near MaxStartups — a prime driver of the "SSH to Kali never
+    # came up" + mid-run tunnel-drop failures. Scope to OpenStack ssh (they use the openstack key
+    # id_ed25519, which GCP ssh do not) and explicitly skip any GCP ssh; comm=="ssh" guards against
+    # killing a non-ssh proc that merely mentions the key. At clean-slate every pre-existing OpenStack
+    # ssh is stale by definition (the cloud is being wiped), so killing them all is safe.
+    try:
+        for pid in await _pgrep_f("id_ed25519"):
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/comm") as _cf:
+                    if _cf.read().strip() != "ssh":
+                        continue
+            except Exception:
+                continue
+            cl = _proc_cmdline(pid)
+            if any(g in cl for g in ("gcloud", "google_compute", "config.gcp", "output_gcp")):
+                continue  # spare GCP ssh (:8001/:8002)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                logger.exception("Failed to SIGKILL stale ssh pid %s on clean-slate", pid)
+    except Exception:
+        logger.exception("Failed to reap stale ssh on clean-slate")
+
+    # Reap orphaned in-env-Kali-C2 ssh -L tunnels left by a crashed prior manager (c2_on_kali).
+    # Lazy import so a GCP manager never loads it; no-op when no state dir / no tunnels.
+    try:
+        from .attacker.plugins.incalmo import kali_c2
+        kali_c2.sweep_stale_tunnels()
+    except Exception:
+        logger.exception("Failed to sweep stale Kali-C2 tunnels on clean-slate")
 
     experiments = registry.load()
 
@@ -400,10 +523,14 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
             )
 
     # Pull ground-truth host logs while the range is still up. Best-effort: a collection failure
-    # must never block teardown (leaking VMs is worse than losing logs), and it needs no op-slot
-    # (SSH via the bastion, not an OpenStack API call), so it runs before we acquire one.
+    # must never block teardown (leaking VMs is worse than losing logs). It takes no OpenStack
+    # op-slot (SSH via the bastion, not a nova API call), but it DOES fan a per-host SSH burst out
+    # over the bastion, so it acquires the dedicated _collect_lock: many large collects finishing
+    # together otherwise storm the shared FIP/L3 datapath and wedge (see max_concurrent_collects).
+    # The lock is released before teardown so a wedged collect can't hold a slot past its own cap.
     try:
-        await collect_environment(experiment, cfg)
+        async with _collect_lock:
+            await collect_environment(experiment, cfg)
     except Exception:
         get_logger(experiment.experiment_name).exception("Host-log collection failed for '%s'", experiment.experiment_name)
 
@@ -622,12 +749,10 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
     QUEUED (its status is not advanced here) until a slot frees, so no more than
     cfg.max_active_experiments experiments are ever past QUEUED (DEPLOYING through
     RUNNING and teardown) at once. Released on every exit path, including retries
-    and exceptions, so a slot is never leaked."""
-    await _inflight_gate.acquire()
-    try:
+    and exceptions, so a slot is never leaked. Priority-ordered: a labeled-priority experiment
+    takes the next freed active slot ahead of normal queued ones."""
+    async with _inflight_gate.acquire(_gate_priority(experiment)):
         await _run_experiment(experiment)
-    finally:
-        _inflight_gate.release()
 
 
 async def _run_experiment(experiment: Experiment) -> None:
@@ -682,7 +807,8 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment.disk_gb_reserved, experiment.vms_reserved = res.disk_gb, res.n_vms
 
         await _capacity.reserve(vm_specs, name, extra_vms=decoy_vms, extra_vcpus=decoy_vcpus,
-                                on_admit=_record_reservation)
+                                on_admit=_record_reservation,
+                                priority=int(getattr(experiment, "priority", 0) or 0))
         config_path.write_text(experiment.config_json())
         await registry.update(experiment)
 
@@ -692,7 +818,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         await _deploy_buffer.acquire()
         deploy_slot_held = True
 
-        async with _openstack_lock.acquire(_PRIORITY_DEPLOY):
+        async with _openstack_lock.acquire(_gate_priority(experiment)):
 
             experiment.status = ExperimentStatus.DEPLOYING
             experiment.environment_deploy_started_at = datetime.now(timezone.utc)
@@ -714,7 +840,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # configure gate back-pressures onto provisioning (DEPLOYED experiments pile up, new provisions block).
         experiment.status = ExperimentStatus.DEPLOYED
         await registry.update(experiment)
-        async with _configure_lock.acquire(_PRIORITY_DEPLOY):
+        async with _configure_lock.acquire(_gate_priority(experiment)):
             _deploy_buffer.release()   # DEPLOYED → CONFIGURING hand-off: free the deploy slot so a queued env can provision now
             deploy_slot_held = False
             experiment.status = ExperimentStatus.CONFIGURING
@@ -734,12 +860,22 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # kali, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
+    # NOTE: the pre-launch _teardown_stale_c2_before_launch() sweep was REMOVED (2026-09-21) — suspected of
+    # interfering with concurrent runs' C2s. Stale/leftover C2s are already handled per-run: setup_c2 does
+    # `docker rm -f c2` + a fresh tunnel on its own Kali, _handle_failure/teardown reaps each run's own C2,
+    # and _clean_slate sweeps on restart. So the pre-launch global sweep was redundant.
     try:
-        await _teardown_stale_c2_before_launch(experiment)
-    except Exception:
-        exp_log.exception("Pre-launch stale C2 teardown failed for '%s'", experiment.experiment_name)
-    try:
-        prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
+        # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
+        # which has no floating IP — through the bastion to install docker, ship the image, and open
+        # the tunnel). Many large setups at once storm the shared FIP/L3 datapath and the kali_c2 SSH
+        # poll never connects. Gate it like configure so only a few run concurrently. Legacy
+        # beluga-docker C2 setup is a local `docker run` (no bastion SSH) — run it ungated. Teardown on
+        # failure is uncapped and never takes this lock, so _handle_failure below cannot deadlock.
+        if getattr(cfg, "c2_on_kali", False):
+            async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
+                prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
+        else:
+            prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
         kali_c2c_url, local_c2c_url = prepared.remote_url, prepared.local_url
         if prepared.container_id:
             experiment.c2c_container_id = prepared.container_id
@@ -760,7 +896,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # ansible single-file while the attack phase still runs many-in-parallel.
         # Teardown on failure is uncapped and never takes this lock, so calling
         # _handle_failure inside the block cannot deadlock; the lock releases on return.
-        async with _configure_lock.acquire(_PRIORITY_DEPLOY):
+        async with _configure_lock.acquire(_gate_priority(experiment)):
             try:
                 # Drop any marker left by a previous run of this experiment name
                 # (overwrite=true reuses the output dir) before the gate below.
@@ -816,7 +952,10 @@ async def _run_experiment(experiment: Experiment) -> None:
     try:
         # On GCP the attacker LLM runs on beluga and must reach the C2 at its EXTERNAL IP (local_c2c_url);
         # kali_c2c_url is the in-VPC internal IP the sandcat agents beacon to, unreachable from beluga.
-        attacker_c2c = local_c2c_url if getattr(cfg, 'cloud_backend', 'openstack') == 'gcp' else kali_c2c_url
+        # Same when c2_on_kali: the C2 is on the Kali VM's in-tenant IP (kali_c2c_url), which beluga
+        # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
+        attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
+                                         or getattr(cfg, 'c2_on_kali', False)) else kali_c2c_url
         process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
@@ -1000,6 +1139,7 @@ async def add_experiment(data: ExperimentSpecs):
         teardown=data.teardown,
         created_at=now,
         updated_at=now,
+        priority=max(0, min(1000, int(data.priority))),  # clamp to a sane band so gate ordering can't be abused
     )
 
     try:
@@ -1009,6 +1149,25 @@ async def add_experiment(data: ExperimentSpecs):
 
     _tasks[experiment.experiment_name] = asyncio.create_task(_run_experiment_gated(experiment))
     return {"experiment_name": experiment.experiment_name, "status": experiment.status}
+
+
+@app.post("/experiments/{experiment_name}/priority")
+async def set_priority(experiment_name: str, body: dict):
+    """Re-prioritize an experiment on the fly (higher = admitted from the queue sooner). Works
+    whether it is still QUEUED (re-ranks it in the capacity queue immediately) or already running
+    (updates the record + its remaining setup-gate acquires). Returns whether it was re-ranked in
+    the live queue (waiting=true) vs only recorded (already admitted / not yet at the gate)."""
+    try:
+        priority = max(0, min(1000, int(body.get("priority"))))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="body must be {\"priority\": <int>}")
+    experiment = next((e for e in registry.load() if e.experiment_name == experiment_name), None)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail=f"'{experiment_name}' not found")
+    experiment.priority = priority
+    await registry.update(experiment)
+    waiting = await _capacity.reprioritize(experiment_name, priority)
+    return {"experiment_name": experiment_name, "priority": priority, "requeued": waiting}
 
 
 @app.get("/experiments")
