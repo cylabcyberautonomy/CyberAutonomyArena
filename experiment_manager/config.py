@@ -45,6 +45,16 @@ class ExperimentManagerConfig(BaseModel):
     # experiment rather than silently racing.
     defender_ready_timeout_seconds: float = 1800
     deception_python: Optional[Path] = None
+    # Background-traffic (third plugin class): local checkout of the
+    # caldera-human-traffic repo, deployed onto victim hosts by the CalderaHuman
+    # traffic plugin. None (default) = no traffic layer available; a run that asks
+    # for one then fails fast with a clear message rather than a silent no-noise run.
+    bgtraffic_dir: Optional[Path] = None
+    # Velociraptor EDR defender: dir holding the velociraptor binary at bin/velociraptor
+    # (downloaded once; a single static Go binary). The plugin ships it to the experiment
+    # bastion (server) and victim hosts (clients). None (default) = the velociraptor
+    # defender is unavailable; selecting it then fails fast with a clear message.
+    velociraptor_dir: Optional[Path] = None
     # Detection: Zircolite runs the shipped Sigma Linux ruleset over each host's collected auditd log.
     zircolite_dir: Path = Path.home() / "Zircolite"
     zircolite_python: Optional[Path] = None  # defaults to <zircolite_dir>/.venv/bin/python

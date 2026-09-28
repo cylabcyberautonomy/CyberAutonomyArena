@@ -543,6 +543,18 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Attacker-log collection failed for '%s'", experiment.experiment_name)
 
+    # Background traffic's labeled activity log — pull it before the VMs die so benign events stay
+    # separable from the attacker's at scoring time. Best-effort, like every other collection here.
+    if experiment.traffic:
+        try:
+            await experiment.traffic.collect_logs(
+                experiment, cfg,
+                output_root(experiment.experiment_name, cfg) / experiment.experiment_name,
+                None,  # mgmt_ip re-read from provision_result.json by the plugin
+            )
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Background-traffic log collection failed for '%s'", experiment.experiment_name)
+
     # Defender teardown (e.g. deleting decoy VMs - see DefenderPlugin.teardown) runs
     # before MHBench's own teardown: those decoys aren't in the topology JSON, so
     # MHBench can't see them, and if left alive they keep this experiment's security
@@ -941,6 +953,25 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await _handle_failure(experiment, f"Defender failed to arm — {e}")
                 return
 
+    # Background traffic (third plugin class): INSTALL on the victim hosts before rotation, so the
+    # install's own file-copy noise is rotated away and only the running daemon's activity lands in the
+    # attack-phase telemetry. A requested-but-failing traffic layer fails the run (like the defender):
+    # silently producing an un-noised run would misreport the experiment.
+    if experiment.traffic:
+        try:
+            async with _configure_lock.acquire(_PRIORITY_DEPLOY):  # heavy bastion ansible — same gate as configure/arming
+                await experiment.traffic.setup(experiment, cfg, mgmt_ip)
+        except Exception as e:
+            exp_log.exception("Background-traffic install failed for '%s'", experiment.experiment_name)
+            if defender_process:
+                try:
+                    defender_process.terminate()
+                    await defender_process.wait()
+                except Exception:
+                    pass
+            await _handle_failure(experiment, f"Background-traffic install failed — {e}")
+            return
+
     # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
     # by construction (awaited before run_attacker). Best-effort: a rotation failure must not waste a
     # full deploy — that host just falls back to needing a timestamp trim at analysis time.
@@ -948,6 +979,17 @@ async def _run_experiment(experiment: Experiment) -> None:
         await rotate_environment(experiment, cfg)
     except Exception:
         exp_log.exception("Pre-attack log rotation failed for '%s' — proceeding (logs may include pre-attack noise)", experiment.experiment_name)
+
+    # START background traffic AFTER rotation so its benign activity is captured in the same
+    # attack-phase telemetry the defender is scored on. Best-effort: noise failing to start must not
+    # waste a full deploy — the run just proceeds with less (or no) background traffic.
+    if experiment.traffic:
+        try:
+            await experiment.traffic.start(experiment, cfg, mgmt_ip)
+            experiment.traffic_started_at = datetime.now(timezone.utc)
+            await registry.update(experiment)
+        except Exception:
+            exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
     try:
         # On GCP the attacker LLM runs on beluga and must reach the C2 at its EXTERNAL IP (local_c2c_url);
@@ -1013,6 +1055,13 @@ async def _run_experiment(experiment: Experiment) -> None:
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)
+        # Stop background traffic once the attacker has finished (best-effort; VMs get torn down anyway).
+        if experiment.traffic:
+            try:
+                await experiment.traffic.stop(experiment, cfg, mgmt_ip)
+                experiment.traffic_finished_at = datetime.now(timezone.utc)
+            except Exception:
+                exp_log.exception("Error stopping background traffic for '%s'", experiment.experiment_name)
 
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
@@ -1135,6 +1184,7 @@ async def add_experiment(data: ExperimentSpecs):
         environment_spec=data.environment,
         attacker=data.attacker,
         defender=data.defender,
+        traffic=data.traffic,
         trial=data.trial,
         teardown=data.teardown,
         created_at=now,
