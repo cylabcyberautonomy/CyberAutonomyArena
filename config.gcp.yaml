@@ -28,7 +28,7 @@ max_retries: 0
 # The CPU budget is the real gate; the VM/experiment caps are set high enough not to bind first.
 max_active_cpus: 80          # 90 quota - ~10 headroom (per-run C2 hosts + retry/teardown overlap)
 max_active_vms: 100          # >= worst case 80 e2-small VMs under the CPU budget; won't bind first
-max_active_experiments: 8    # lets several small envs pack into the CPU budget; CPU budget still gates
+max_active_experiments: 1    # GCP runs strictly sequentially (decoys reuse the payload name; no concurrent collisions)
 gcp_flavor_cpu_cost:         # MHBench flavor -> GCP CPUS_ALL_REGIONS cost (measured live)
   m1.small: 1                # -> e2-small
   m2.large: 8                # -> e2-standard-8
