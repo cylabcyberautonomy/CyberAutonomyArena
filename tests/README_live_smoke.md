@@ -27,6 +27,20 @@ step. For a pure attacker-reaches-DB check, the environment choice above is enou
 
 ## Run it against an already-running manager
 
+Use the script — it submits, polls to a terminal state, and checks the pass criteria below:
+
+```bash
+python3 tests/run_experiment_smoke.py --yes                    # named combo, teardown on
+python3 tests/run_experiment_smoke.py --defender none --keep --yes   # attacker-only, leave range up
+python3 tests/run_experiment_smoke.py --delete-only --name smoke_arena_contract  # clean up
+```
+
+Key flags: `--url` (default `http://localhost:8000`), `--environment`, `--attacker` (Incalmo
+strategy), `--defender` (llm_soc strategy or `none`), `--traffic` (persona or `none`), `--keep`,
+`--overwrite`, `--timeout`, `--output-root`. `--yes` skips the confirmation prompt.
+
+Or by hand:
+
 ```bash
 curl -sS -X POST http://localhost:8000/experiments \
   -H 'content-type: application/json' \
@@ -38,7 +52,6 @@ curl -sS -X POST http://localhost:8000/experiments \
         "teardown": true,
         "priority": 1000
       }'
-# then poll:
 curl -sS http://localhost:8000/experiments/smoke_arena_contract | python3 -m json.tool
 ```
 
