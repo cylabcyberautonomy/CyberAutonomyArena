@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -94,9 +95,16 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
             f"    cd {cfg.incalmo_dir} && uv sync"
         )
     # 2. Incalmo's ConfigService reads ./config/config.json (relative to incalmo_dir, the attacker's
-    #    cwd) when the strategy builds its C2 client. Its c2c_server is overridden by the C2C_SERVER
-    #    env var we pass, so the file only has to exist and parse as an AttackerConfig; seed it from
-    #    the shipped example when absent rather than making the operator create it by hand.
+    #    cwd). Its c2c_server is overridden by the C2C_SERVER env var we pass, but — contrary to a
+    #    long-standing assumption that this file "only has to exist and parse" — the low-level
+    #    scan_network action ALSO reads blacklist_ips from it (via ConfigService, NOT the per-run
+    #    AttackerConfig the strategy gets). The shipped example historically blacklisted
+    #    192.168.199.10 and 192.168.200.10, so nmap ran `--exclude 192.168.199.10,192.168.200.10`
+    #    and the attacker never discovered any host at .10 — in MHBench's equifax/enterprise
+    #    topologies that .10 is the key-holding webserver0, so the attacker could never reach the
+    #    database tier (0 files exfiltrated). Seed the file when absent, then FORCE blacklist_ips
+    #    empty so a stale/hand-edited config.json can't silently blind the attacker again. Per-run
+    #    exclusions, if ever needed, belong in the run's AttackerConfig, not this shared file.
     config_json = cfg.incalmo_dir / "config" / "config.json"
     if not config_json.exists():
         example = cfg.incalmo_dir / "config" / "config_example.json"
@@ -106,6 +114,23 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
                 f"Create {config_json} with a valid AttackerConfig before running an Incalmo attacker."
             )
         shutil.copyfile(example, config_json)
+    try:
+        _cfg = json.loads(config_json.read_text())
+        # Force blacklist_ips to exclude ONLY Kali's docker bridge (172.17.0.0/16), never any
+        # 192.168.x victim IP. Two reasons: (a) the shipped default historically blacklisted
+        # 192.168.199.10/200.10, hiding the webserver0 that holds the DB keys -> 0 exfil; we must
+        # never reintroduce that. (b) Kali runs the C2 in docker, so its host carries 172.17.0.1;
+        # Incalmo derives a 172.17.0.0/24 subnet from it and GraphSearch ping-scans it, flooding the
+        # attack graph with ~250 phantom bridge hosts that dilute the (shuffled) attack-path queue.
+        # scan_network reads blacklist_ips via ConfigService from THIS file, so excluding the bridge
+        # here (nmap --exclude 172.17.0.0/16) keeps the graph to real victims.
+        if _cfg.get("blacklist_ips") != ["172.17.0.0/16"]:
+            _cfg["blacklist_ips"] = ["172.17.0.0/16"]
+            config_json.write_text(json.dumps(_cfg, indent=4))
+    except (OSError, ValueError):
+        # A malformed config.json will fail loudly when the attacker subprocess loads it;
+        # don't mask that here — just skip the blacklist normalization.
+        pass
 
 
 class _IncalmoAttacker(AttackerPlugin):
@@ -121,9 +146,10 @@ class _IncalmoAttacker(AttackerPlugin):
         return await super().setup(experiment, cfg, mgmt_ip)
 
     async def launch_c2c(
-        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None
+        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
+        kali_ip: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -203,10 +229,10 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             "strategy": strategy,
             "environment": environment.spec if environment else "none",
             "c2c_server": c2c_url,
-            "blacklist_ips": [],
+            "blacklist_ips": ["172.17.0.0/16"],
         }
 
-    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
+    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str, agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
@@ -217,6 +243,11 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
+                # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
+                # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
+                # fall back to C2C_SERVER, which under c2_on_kali is the 127.0.0.1 tunnel a victim
+                # can't reach. Defaults to c2c_url so non-kali backends are unchanged.
+                "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
@@ -305,10 +336,10 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             },
             "environment": environment.spec if environment else "none",
             "c2c_server": c2c_url,
-            "blacklist_ips": [],
+            "blacklist_ips": ["172.17.0.0/16"],
         }
 
-    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str) -> asyncio.subprocess.Process:
+    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str, agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
@@ -319,6 +350,11 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             env={
                 **os.environ,
                 "C2C_SERVER": c2c_url,
+                # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
+                # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
+                # fall back to C2C_SERVER, which under c2_on_kali is the 127.0.0.1 tunnel a victim
+                # can't reach. Defaults to c2c_url so non-kali backends are unchanged.
+                "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
