@@ -64,6 +64,17 @@ async def run_defender(
     # random experiment's private OpenStack subnet.
     built["management_ip"] = cfg.host_ip
     built["bastion_ip"] = mgmt_ip
+    # GCP-only: the address GCP victims' falcosidekick ships Falco alerts to. On GCP the
+    # victim egress firewall blocks the on-prem harness ES (management_ip/host_ip), so alerts
+    # go to a socat relay on the management host (gcp_relay_ip:9200), which forwards them over
+    # a reverse SSH tunnel to the harness ES. The runner uses this ONLY for perry_cfg.external_ip
+    # (falcosidekick's target); the defender itself still reads ES directly at management_ip.
+    # Absent on OpenStack, where victims reach host_ip directly.
+    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+        # getattr default so an already-running manager (config object predating the
+        # gcp_relay_ip field) still resolves it without a restart; a restart picks up
+        # any override from config.gcp.yaml.
+        built["falco_relay_ip"] = getattr(cfg, "gcp_relay_ip", "10.0.1.10")
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")

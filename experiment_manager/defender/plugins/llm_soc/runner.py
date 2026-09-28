@@ -21,6 +21,7 @@ Receives a config JSON path as argv[1]. The JSON must contain:
   deception_dir, management_ip, log_dir
 """
 import json
+import os
 import signal
 import sys
 import time
@@ -98,7 +99,12 @@ perry_cfg = Config(**perry_config_data)
 # (database0-23 among them) and restored its own host0 off the back of that.
 perry_cfg.experiment_name = experiment_name
 
-openstack_conn = openstack.connect()
+# cloud_backend comes from the deception repo's config/config.json (perry_cfg), exactly as
+# prompt_injection/runner.py reads it. On GCP there is no OpenStack cloud to connect to, and
+# the orchestrator below is swapped for GCPOrchestrator. Defaults to 'openstack' so the
+# OpenStack path is byte-for-byte unchanged.
+cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
+openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
 # http, not https, and no api_key: this is the harness's own Elasticsearch
 # container (see the deception plugin's setup.py), which runs plain HTTP with
@@ -114,7 +120,7 @@ es_conn = Elasticsearch(es_url)
 # ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
 # experiment's internal 192.168.x.x hosts at all.
 ansible_runner = AnsibleRunner(
-    ssh_key_path=perry_cfg.openstack_config.ssh_key_path,
+    ssh_key_path=(perry_cfg.gcp_config.ssh_key_path if cloud_backend == "gcp" else perry_cfg.openstack_config.ssh_key_path),
     management_ip=config["bastion_ip"],
     ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
     log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
@@ -136,7 +142,23 @@ if network is not None:
     # es_url above already uses this experiment's actual management_ip rather
     # than whatever's baked into config/config.json on disk - keep InstallFalco
     # (which reads config.external_ip internally) consistent with that.
-    perry_cfg.external_ip = management_ip
+    #
+    # external_ip is what falcosidekick ON THE VICTIMS ships Falco alerts to (InstallFalco
+    # writes it into each host's /etc/falcosidekick/config.yaml hostport). On OpenStack that
+    # is management_ip (the harness ES) directly. On GCP the victim egress firewall blocks the
+    # on-prem harness ES, so ship to the management-host socat relay (falco_relay_ip:9200),
+    # which forwards over a reverse SSH tunnel to the harness ES. The defender's OWN reads still
+    # use es_url=management_ip above (it runs on the harness, which reaches ES directly).
+    # config["falco_relay_ip"] is threaded by defender.py on GCP, but that runs in the
+    # long-lived manager process; a manager that predates that edit won't have written it.
+    # Since the runner is a fresh subprocess every run, default it here too so the fix takes
+    # effect without a manager restart. MHB_FALCO_RELAY_IP overrides; 10.0.1.10 is the GCP
+    # management host's internal IP on the victim-reachable management CIDR (where the socat
+    # relay listens). OpenStack is untouched (victims reach management_ip directly).
+    falco_relay_ip = config.get("falco_relay_ip") or os.environ.get("MHB_FALCO_RELAY_IP", "10.0.1.10")
+    perry_cfg.external_ip = (
+        falco_relay_ip if (cloud_backend == "gcp" and falco_relay_ip) else management_ip
+    )
     print(f"[{experiment_name}] Installing Falco on all hosts...", flush=True)
     # install_falco.yml's tasks are creates:-guarded, so this is safe to run
     # even if Falco is already present (e.g. baked into a *_instrumented image).
@@ -185,20 +207,50 @@ if strategy_cls is None:
     )
     sys.exit(1)
 
+# Safety gate: FalcoLLMC2Block blocks the WHOLE C2 IP (falco_llm_c2_block.py). That is only
+# safe when the C2 runs on its own dedicated in-env IP (c2_on_kali) — otherwise the C2 IP is
+# beluga's shared ES/telemetry IP (host_ip), and a whole-IP block would sever the defender's
+# own telemetry feed. The harness sets MHB_C2_ON_KALI from cfg.c2_on_kali; fail CLOSED (refuse
+# to arm) unless it is explicitly enabled. (Live once the manager has been restarted with the
+# llm_soc plugin change that sets this env — see llm_soc.py run().)
+if config["strategy"] == "FalcoLLMC2Block" and cloud_backend != "gcp" and os.environ.get("MHB_C2_ON_KALI") != "1":
+    print(
+        f"[{experiment_name}] REFUSING to arm FalcoLLMC2Block: c2_on_kali is not enabled. "
+        f"It blocks the WHOLE C2 IP, which is only safe when the C2 has its own in-env IP. "
+        f"Set c2_on_kali: true in config.yaml and restart the manager; otherwise the C2 IP is "
+        f"beluga's shared ES/telemetry IP and the block would cut the defender's own telemetry.",
+        flush=True,
+    )
+    sys.exit(1)
+
 arsenal = CountArsenal(config.get("arsenal", {}))
 telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
     es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-orchestrator = OpenstackOrchestrator(
-    openstack_conn=openstack_conn,
-    ansible_runner=ansible_runner,
-    external_elasticsearch_server=es_url,
-    elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-    config=perry_cfg,
-    network=network,
-    action_logger=action_logger,
-)
+if cloud_backend == "gcp":
+    # GCPOrchestrator exists only on the Defense repo's gcp-backend branch; import it lazily
+    # inside this branch so the OpenStack path never depends on it. It wires BlockIP via the
+    # backend-agnostic ansible actuator (iptables over the bastion), needing no openstack_conn.
+    from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
+    orchestrator = GCPOrchestrator(
+        ansible_runner=ansible_runner,
+        external_elasticsearch_server=es_url,
+        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
+        config=perry_cfg,
+        network=network,
+        action_logger=action_logger,
+    )
+else:
+    orchestrator = OpenstackOrchestrator(
+        openstack_conn=openstack_conn,
+        ansible_runner=ansible_runner,
+        external_elasticsearch_server=es_url,
+        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
+        config=perry_cfg,
+        network=network,
+        action_logger=action_logger,
+    )
 
 strategy = strategy_cls(
     arsenal=arsenal,

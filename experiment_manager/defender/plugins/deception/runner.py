@@ -6,8 +6,10 @@ Receives a config JSON path as argv[1]. The JSON must contain:
   deception_dir, management_ip, log_dir
 """
 import json
+import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +49,7 @@ from defender.strategy import (
     StaticLayered,
     ReactiveLayered,
     ReactiveStandalone,
+    HoneyShell,
     NaiveDecoyCredential,
     NaiveDecoyHost,
 )
@@ -57,6 +60,7 @@ STRATEGY_MAP = {
     "StaticLayered": StaticLayered,
     "ReactiveLayered": ReactiveLayered,
     "ReactiveStandalone": ReactiveStandalone,
+    "HoneyShell": HoneyShell,
     "NaiveDecoyCredential": NaiveDecoyCredential,
     "NaiveDecoyHost": NaiveDecoyHost,
 }
@@ -178,12 +182,41 @@ _running = True
 
 
 def _shutdown(signum, frame):
+    # Force immediate exit. Clearing the flag isn't enough: the reactive defender's
+    # run loop blocks inside a C call in defender.run() (telemetry/ES poll), so
+    # _running is only re-checked once run() returns — leaving the process alive after
+    # SIGTERM and wedging the whole experiment at Running until it is SIGKILLed (seen
+    # live on the o46 reactive-layered runs, which sat Running for 90+ min after the
+    # attacker finished). SIGTERM only ever means "the harness is tearing you down".
     global _running
     _running = False
+    os._exit(0)
 
 
 signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
+
+# [REACTIVE-REAP FIX] Ported from prompt_injection/runner.py (commit 5e06fd4): the
+# _shutdown handler above only runs when the main thread executes Python bytecode, but
+# the run loop blocks inside a C call in defender.run(), so on SIGTERM the Python handler
+# is DEFERRED and never fires — which is exactly why the deception (reactive) runs never
+# terminated and held VMs at the cap (the prompt_injection runner had this watchdog; the
+# deception runner never got it). set_wakeup_fd writes the signal number to a pipe from
+# the C-level signal trampoline the instant a signal arrives (no Python handler/GIL
+# needed); this daemon watchdog — runnable because the blocked main thread's I/O releases
+# the GIL — then hard-exits ~1ms after SIGTERM.
+_wd_r, _wd_w = os.pipe()
+os.set_blocking(_wd_w, False)
+signal.set_wakeup_fd(_wd_w)
+
+def _sigkill_watchdog():
+    try:
+        os.read(_wd_r, 1)  # blocks until the first signal (SIGTERM/SIGINT) arrives
+    except Exception:
+        pass
+    os._exit(0)
+
+threading.Thread(target=_sigkill_watchdog, daemon=True, name="sigkill-watchdog").start()
 
 # Real hosts boot with sysflow already running, exporting to the Elasticsearch
 # baked into their image (MHBench's aux_files/pipeline.local.json - a different,
