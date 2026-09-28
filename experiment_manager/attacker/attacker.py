@@ -51,8 +51,17 @@ async def run_attacker(
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     built = attacker.build_config(experiment_name, environment, c2c_server)
+    # Target-side payloads (ExploitStruts, ssh/nc agent-spawn) make the VICTIM fetch the implant
+    # from a C2 URL. Normally that's c2c_server, but under c2_on_kali c2c_server is a 127.0.0.1
+    # ssh -L tunnel usable only by the strategy on beluga — victims must use the Kali in-tenant
+    # URL (prepared.remote_url). Record it separately so low-level download actions use the
+    # victim-reachable address without changing the strategy's own C2 API URL. Other backends:
+    # agent_c2c == c2c_server, so their payloads are unchanged.
+    agent_c2c = prepared.remote_url if (getattr(cfg, "c2_on_kali", False) and prepared.remote_url) else c2c_server
+    if agent_c2c:
+        built["agent_c2c_server"] = agent_c2c
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
-    process = await attacker.start(prepared, config_path, experiment_name, cfg, c2c_server)
+    process = await attacker.start(prepared, config_path, experiment_name, cfg, c2c_server, agent_c2c_url=agent_c2c)
     log(experiment_name, f"Attacker process started (pid={process.pid})")
     return process

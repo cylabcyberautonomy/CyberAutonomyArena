@@ -119,7 +119,8 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             raise RuntimeError(f"Failed to push {dest} to kali: {stderr.decode().strip()}")
 
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
-                    cfg: ExperimentManagerConfig, c2c_url: Optional[str]) -> asyncio.subprocess.Process:
+                    cfg: ExperimentManagerConfig, c2c_url: Optional[str],
+                    agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
         ssh_key, mgmt_ip, kali_ip = self._ssh_ctx(experiment_name, cfg)
         ssh_base = self._ssh_base(ssh_key, mgmt_ip, kali_ip)
         await self._push(ssh_base, f"{_REMOTE_DIR}/cai_runner.py", _RUNNER.read_text())
@@ -130,6 +131,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
         return await asyncio.create_subprocess_exec(
             *ssh_base, f"{_REMOTE_DIR}/venv/bin/python {_REMOTE_DIR}/cai_runner.py {_REMOTE_DIR}/attacker_config.json",
             stdout=log_file, stderr=subprocess.STDOUT,
+            start_new_session=True,  # own group so a force-kill reaps the local ssh client cleanly (remote runner is killed via stop()'s pkill)
         )
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:

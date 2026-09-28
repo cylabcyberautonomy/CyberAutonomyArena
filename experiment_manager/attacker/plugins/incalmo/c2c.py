@@ -45,7 +45,7 @@ async def _ensure_image_built(experiment_name: str, cfg: ExperimentManagerConfig
     log(experiment_name, f"Built '{_C2C_IMAGE}' successfully.")
 
 
-async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None) -> tuple[str, str, str]:
+async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, kali_ip: str | None = None) -> tuple[str, str, str]:
     """
     Launch the Incalmo C2 Docker container and return immediately.
     Returns (container_id, kali_url, local_url) — container may not be ready yet.
@@ -66,6 +66,17 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, m
         # polls + attacker LLM) = external. GCP Cloud NAT can't hairpin a VM to a same-VPC external IP,
         # so agents MUST use the internal IP.
         return f"gcp-c2:{experiment_name}", internal_url, external_url
+    if getattr(cfg, "c2_on_kali", False) and getattr(cfg, "cloud_backend", "openstack") == "openstack":
+        # Opt-in: run the C2 on the in-environment Kali VM instead of a beluga docker container.
+        # remote_url (agents/setup play) = Kali's in-tenant IP:8888 — so a defender's BlockIP hits
+        # only attacker infra, not beluga's shared ES/telemetry IP. local_url (beluga: readiness +
+        # attacker LLM) = an ssh -L tunnel to Kali through the bastion (Kali has no floating IP).
+        from . import kali_c2
+        loop = asyncio.get_event_loop()
+        sentinel, remote_url, local_url = await loop.run_in_executor(
+            None, kali_c2.setup_c2, experiment_name, cfg, mgmt_ip, kali_ip)
+        log(experiment_name, f"Kali C2: env/agents -> {remote_url}, harness (tunnel) -> {local_url}")
+        return sentinel, remote_url, local_url
     await _ensure_image_built(experiment_name, cfg)
     name = _container_name(experiment_name)
 
@@ -113,6 +124,11 @@ async def stop_c2c_server(container_id: str) -> None:
         from . import gcp_c2
         exp = container_id[len("gcp-c2:"):]
         await asyncio.get_event_loop().run_in_executor(None, gcp_c2.teardown_c2, exp, None)
+        return
+    if container_id and container_id.startswith("kali-c2:"):
+        from . import kali_c2
+        exp = container_id[len("kali-c2:"):]
+        await asyncio.get_event_loop().run_in_executor(None, kali_c2.teardown_c2, exp, None)
         return
     """Force-kill and remove the C2 container. `rm -f` (SIGKILL) skips `docker stop`'s 10s SIGTERM grace —
     these are throwaway containers, and on shutdown they're stopped one-by-one, so that grace × N was

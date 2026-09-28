@@ -51,15 +51,18 @@ class AttackerPlugin(BaseModel):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
         c2c_url: str,
+        agent_c2c_url: Optional[str] = None,
     ) -> asyncio.subprocess.Process:
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
     async def launch_c2c(  # noqa: D401
-        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None
+        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
+        kali_ip: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Start the C2 server. Returns (container_id, kali_url, local_url) or (None, None, None).
-        mgmt_ip is accepted (and ignored here) so setup() can pass it uniformly; the GCP C2
-        needs it, and any plugin not overriding this must still accept the call."""
+        mgmt_ip/kali_ip are accepted (and ignored here) so setup() can pass them uniformly; the GCP
+        C2 needs mgmt_ip and the in-env Kali C2 (c2_on_kali) needs kali_ip. Any plugin not overriding
+        this must still accept the call."""
         return None, None, None
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
@@ -76,7 +79,10 @@ class AttackerPlugin(BaseModel):
         attacker's setup_play on the kali host, and block until the attacker channel is ready. Transactional:
         tears down its own partial C2 on failure."""
         from ...environment.deployer import run_attacker_setup_play
-        container_id, remote_url, local_url = await self.launch_c2c(experiment.experiment_name, cfg, mgmt_ip)
+        # kali_ip: the in-environment Kali VM's (internal) address, where the C2 runs when
+        # c2_on_kali is set. deployed_environment.ip holds it; None for envs without one.
+        kali_ip = experiment.deployed_environment.ip if experiment.deployed_environment else None
+        container_id, remote_url, local_url = await self.launch_c2c(experiment.experiment_name, cfg, mgmt_ip, kali_ip)
         try:
             if local_url:
                 await self.wait_c2c_ready(local_url, experiment.experiment_name)
@@ -97,9 +103,10 @@ class AttackerPlugin(BaseModel):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
         c2c_url: Optional[str],
+        agent_c2c_url: Optional[str] = None,
     ) -> asyncio.subprocess.Process:
         """Launch the attacker process (exit code = verdict). Channel readiness was established in setup()."""
-        return await self.run(config_path, experiment_name, cfg, c2c_url)
+        return await self.run(config_path, experiment_name, cfg, c2c_url, agent_c2c_url)
 
     async def stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
         """Terminate the attacker process(es). Local pid here; override to also kill remote procs.
