@@ -17,6 +17,21 @@ Note: `equifax_small` is not instrumented. FalcoLLM needs Falco telemetry, so fo
 half either use `equifax_small_instrumented`, or rely on the llm_soc runner's own `InstallFalco`
 step. For a pure attacker-reaches-DB check, the environment choice above is enough.
 
+## Connectivity-only run (cheap, no LLM)
+
+Before spending credits on FalcoLLM, prove the defender-side plumbing works with the **canary
+defender** (`defender: canary`) — a diagnostic that SSHes to every victim through the bastion,
+checks model-name vs OS-hostname resolution, confirms this run's `falco-<exp>`/`sysflow-<exp>`
+indices exist, and reads `/etc/shadow` on a victim to confirm the event reaches the telemetry
+store. It deploys no decoys and calls no LLM. Its report lands at
+`output/<exp>/defender/connectivity_report.json`.
+
+```bash
+python3 tests/run_experiment_smoke.py --defender canary --environment equifax_small_instrumented --yes
+```
+
+If the canary passes, a real telemetry defender can connect on that environment.
+
 ## ⚠ Before you run
 
 - A manager's **startup clean-slate wipes the OpenStack cloud (all projects)**. Do NOT start a

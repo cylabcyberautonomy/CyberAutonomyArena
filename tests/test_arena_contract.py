@@ -82,7 +82,7 @@ def _mhbench_dir() -> Path | None:
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
     assert {"incalmo_strategy", "incalmo_llm", "cai_llm"} <= set(AttackerPlugin._registry)
-    assert {"llm_soc", "velociraptor", "deception", "prompt_injection"} <= set(DefenderPlugin._registry)
+    assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
 
@@ -158,6 +158,17 @@ def test_defender_llm_soc_build_config_contract():
     assert "llm_model" in built
 
 
+def test_defender_canary_build_config_contract():
+    """The canary (connectivity diagnostic) defender: no decoys, no LLM, stdlib runner.
+    Its build_config carries the topology + the connectivity knobs the runner needs."""
+    dfn = DefenderPlugin._registry["canary"].model_validate({"type": "canary"})
+    built = dfn.build_config("ci_exp", FAKE_ENV)
+    assert built["experiment_name"] == "ci_exp"
+    assert built["topology_spec"] == FAKE_ENV.topology_spec
+    assert set(built["checks"]) <= {"ssh", "resolve", "telemetry", "canary_event"}
+    assert "fail_closed" in built and "ssh_key" in built
+
+
 def test_defender_velociraptor_build_config_contract():
     """Velociraptor is the least MHBench-coupled defender (a good early refactor target);
     lock its build_config shape too."""
@@ -206,6 +217,7 @@ def test_environment_module_exposes_lifecycle():
     (AttackerPlugin, "incalmo_strategy"),
     (DefenderPlugin, "llm_soc"),
     (DefenderPlugin, "velociraptor"),
+    (DefenderPlugin, "canary"),
 ])
 def test_ui_schema_returns_dict(registry, key):
     schema = registry._registry[key].ui_schema()

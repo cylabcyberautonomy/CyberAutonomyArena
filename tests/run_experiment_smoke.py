@@ -144,6 +144,16 @@ def _check_outputs(name: str, expect_defender: bool, output_root: str | None) ->
         ready = out / "defender" / "defender_ready"
         rows.append(("defender armed (defender_ready marker)", ready.exists(),
                      "present" if ready.exists() else "missing"))
+        # canary defender: surface its connectivity report per-check
+        report = out / "defender" / "connectivity_report.json"
+        if report.exists():
+            try:
+                rep = json.loads(report.read_text())
+                for check, res in rep.get("results", {}).items():
+                    rows.append((f"connectivity: {check}", bool(res.get("ok")),
+                                 res.get("detail") or res.get("note") or ""))
+            except Exception as e:  # noqa: BLE001
+                rows.append(("connectivity report", False, f"unreadable: {e}"))
 
     # host logs collected before teardown
     env_dir = out / "environment"
@@ -160,7 +170,8 @@ def main() -> int:
     ap.add_argument("--environment", default="equifax_small_instrumented")
     ap.add_argument("--attacker", default="GraphSearch", help="Incalmo strategy name")
     ap.add_argument("--defender", default="FalcoLLM",
-                    help="llm_soc strategy, or 'none' for an attacker-only run")
+                    help="llm_soc strategy, 'canary' for the connectivity diagnostic defender, "
+                         "or 'none' for an attacker-only run")
     ap.add_argument("--traffic", default="none", help="caldera_human persona, or 'none'")
     ap.add_argument("--keep", action="store_true", help="leave the range standing (teardown=false)")
     ap.add_argument("--overwrite", action="store_true", help="replace a same-named prior run")
@@ -177,7 +188,9 @@ def main() -> int:
         print(f"DELETE {args.name}: HTTP {code} {resp.get('detail', '')}")
         return 0 if code in (200, 204, 404) else 1
 
-    expect_defender = args.defender.lower() != "none"
+    dfn = args.defender.lower()
+    expect_defender = dfn != "none"
+    is_canary = dfn == "canary"
     specs: dict = {
         "experiment_name": args.name,
         "environment": args.environment,
@@ -186,7 +199,9 @@ def main() -> int:
         "overwrite": args.overwrite,
         "priority": args.priority,
     }
-    if expect_defender:
+    if is_canary:
+        specs["defender"] = {"type": "canary"}
+    elif expect_defender:
         specs["defender"] = {"type": "llm_soc", "strategy": args.defender}
     if args.traffic.lower() != "none":
         specs["traffic"] = {"type": "caldera_human", "persona": args.traffic}
