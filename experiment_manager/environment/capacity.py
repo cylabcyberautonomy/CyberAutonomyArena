@@ -207,6 +207,14 @@ class CapacityTracker:
         # which case the over-commit warning is simply skipped (admission is unaffected).
         self._totals: tuple[int, int, int] | None = None
         self._condition = asyncio.Condition()
+        # Priority-ordered admission. Currently-waiting reservers:
+        #   experiment_name -> (neg_priority, seq, n_vms, total_vcpus)
+        # A waiter admits only when it fits AND no higher-ranked waiter that ALSO currently fits is
+        # queued — so a labeled-priority experiment jumps ahead, while a priority run too big for the
+        # free capacity still lets smaller lower-priority runs fill the gap ("whoever fits"). Rank is
+        # (neg_priority, seq): lower = served first (neg_priority = -priority; seq = FIFO tiebreak).
+        self._waiting: dict[str, tuple] = {}
+        self._wait_seq: int = 0
 
     # ----------------------------------------------------------- state-derived views
     def _holders(self) -> list:
@@ -266,9 +274,33 @@ class CapacityTracker:
                 experiment_name, "; ".join(over), self._cap_str(),
             )
 
+    def _fits(self, n_vms: int, total_vcpus: int, active: int, active_cpus: int) -> bool:
+        """Whether a demand of (n_vms, total_vcpus) can be admitted against the current active totals.
+        Mirrors the vm_ok/cpu_ok rules in reserve() (incl. the active==0 lone-oversized escape) so the
+        priority outranking check uses the exact same admission logic."""
+        vm_ok = (self._max_active_vms is None
+                 or active + n_vms <= self._max_active_vms
+                 or active == 0)
+        cpu_ok = (self._max_active_cpus is None
+                  or active_cpus + total_vcpus <= self._max_active_cpus)
+        return vm_ok and cpu_ok
+
+    async def reprioritize(self, experiment_name: str, priority: int) -> bool:
+        """Change a still-QUEUED experiment's scheduling priority on the fly. Returns True if it was
+        currently waiting (and got re-ranked + everyone re-woken), False if it isn't waiting anymore
+        (already admitted / unknown). Higher priority = sooner."""
+        async with self._condition:
+            w = self._waiting.get(experiment_name)
+            if w is None:
+                return False
+            self._waiting[experiment_name] = (-priority, w[1], w[2], w[3])  # keep seq/n_vms/vcpus
+            self._condition.notify_all()
+            return True
+
     async def reserve(self, vm_specs: list[tuple[int, int, int]], experiment_name: str,
                       extra_vms: int = 0, extra_vcpus: int = 0,
-                      on_admit: Callable[[Reservation], None] | None = None) -> Reservation:
+                      on_admit: Callable[[Reservation], None] | None = None,
+                      priority: int = 0) -> Reservation:
         """Block until the VM-count cap AND (on GCP) the CPU budget allow this experiment.
 
         extra_vms: the defender's decoy VMs - real VMs deployed later by the defender
@@ -287,7 +319,10 @@ class CapacityTracker:
         total_disk = sum(dk for _, _, dk in vm_specs)
         n_vms = len(vm_specs) + max(0, extra_vms)
         async with self._condition:
-            while True:
+            self._wait_seq += 1
+            self._waiting[experiment_name] = (-priority, self._wait_seq, n_vms, total_vcpus)
+            try:
+              while True:
                 active = self.active_vms
                 active_cpus = self._reserved_totals()[0]
                 # VM-count rule: admit if under the cap, OR if nothing else holds VMs - the
@@ -303,10 +338,20 @@ class CapacityTracker:
                 # OpenStack default) makes this always true, leaving admission to the VM rule.
                 cpu_ok = (self._max_active_cpus is None
                           or active_cpus + total_vcpus <= self._max_active_cpus)
-                if vm_ok and cpu_ok:
+                # Priority gate: yield to any higher-ranked waiter that ALSO fits right now, so
+                # labeled-priority experiments are admitted first. A higher-priority run that is
+                # too big to fit does NOT block us (it isn't counted as outranking), so smaller
+                # lower-priority runs still fill the gap.
+                my_rank = self._waiting[experiment_name][:2]
+                outranked = any(
+                    (w[0], w[1]) < my_rank and self._fits(w[2], w[3], active, active_cpus)
+                    for nm, w in self._waiting.items() if nm != experiment_name
+                )
+                if vm_ok and cpu_ok and not outranked:
                     reservation = Reservation(total_vcpus, total_ram, total_disk, n_vms)
                     if on_admit is not None:
                         on_admit(reservation)
+                    self._condition.notify_all()  # let any waiters that yielded to us re-check now
                     logger.info(
                         "[%s] Admitted: %d VMs (%d topology + %d decoy; %d vCPUs / %d MB RAM / %d GB disk); "
                         "active VMs now %d%s%s",
@@ -328,6 +373,11 @@ class CapacityTracker:
                     await asyncio.wait_for(self._condition.wait(), timeout=_RECHECK_SECONDS)
                 except asyncio.TimeoutError:
                     pass  # backstop: loop and re-derive the count from state (free; no I/O)
+            finally:
+                # Deregister from the priority queue on EVERY exit (admit, cancel/eviction, error) so a
+                # departed waiter never keeps outranking the others. Runs with the condition lock held
+                # (the async-with hasn't exited), and before the post-admit notify_all reaches anyone.
+                self._waiting.pop(experiment_name, None)
 
     def release(self, experiment_name: str) -> None:
         """Call after an experiment's teardown has RUN - whether or not it succeeded - and

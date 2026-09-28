@@ -33,6 +33,7 @@ class ExperimentSpecs(BaseModel):
     output_dir: Optional[str] = None  # write this experiment's output tree here instead of cfg.output_dir
     teardown: bool = True  # set False to leave the env + C2 standing (success AND failure) to run an exploit by hand
     overwrite: bool = False  # if an output folder with this name already exists: false (default) → reject the request (409); true → replace it
+    priority: int = 0  # scheduling priority: higher = admitted from the queue sooner; 0 (default) = normal "whoever fits". Ties break FIFO.
 
 
 def _json_default(o):
@@ -46,7 +47,7 @@ def _json_default(o):
 # Which metadata keys are input config (→ experiment_config.json). Everything else is runtime state
 # (status + all timestamps + reservations/pid/c2c/deployed) and goes to experiment_result.json.
 _CONFIG_KEYS = {
-    "experiment": ("name", "trial", "teardown"),
+    "experiment": ("name", "trial", "teardown", "priority"),
     "environment": ("spec",),
     "attacker": ("config",),
     "defender": ("config",),
@@ -83,6 +84,7 @@ class Experiment:
     retry_count = _Field("experiment", "retry_count")
     base_name = _Field("experiment", "base_name")
     teardown = _Field("experiment", "teardown")
+    priority = _Field("experiment", "priority")  # queue scheduling priority; higher = sooner (see reserve())
     created_at = _Field("experiment", "created_at")
     updated_at = _Field("experiment", "updated_at")
     # --- environment ---
@@ -90,6 +92,12 @@ class Experiment:
     deployed_environment = _Field("environment", "deployed")
     vcpus_reserved = _Field("environment", "vcpus_reserved")
     ram_mb_reserved = _Field("environment", "ram_mb_reserved")
+    disk_gb_reserved = _Field("environment", "disk_gb_reserved")
+    # VMs this experiment was admitted for (topology incl. mgmt host + estimated decoys).
+    # Set under the CapacityTracker's lock at admission; cleared on retry. Together with
+    # teardown_finished_at this is what decides whether the experiment currently HOLDS
+    # VMs (see capacity._holds_vms) - the registry is the tracker's source of truth.
+    vms_reserved = _Field("environment", "vms_reserved")
     environment_deploy_started_at = _Field("environment", "deploy_started_at")
     environment_deploy_finished_at = _Field("environment", "deploy_finished_at")
     teardown_started_at = _Field("environment", "teardown_started_at")
@@ -106,17 +114,18 @@ class Experiment:
     defender_finished_at = _Field("defender", "finished_at")
 
     def __init__(self, experiment_name, status, environment_spec, attacker=None, defender=None,
-                 trial=0, teardown=True, created_at=None, updated_at=None):
+                 trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
         self.metadata = {
             "experiment": {
                 "name": experiment_name, "trial": trial, "status": status, "error": None,
-                "retry_count": 0, "base_name": "", "teardown": teardown,
+                "retry_count": 0, "base_name": "", "teardown": teardown, "priority": priority,
                 "created_at": created_at, "updated_at": updated_at or created_at,
             },
             "environment": {
                 "spec": environment_spec, "deployed": None,
                 "vcpus_reserved": None, "ram_mb_reserved": None,
+                "disk_gb_reserved": None, "vms_reserved": None,
                 "deploy_started_at": None, "deploy_finished_at": None,
                 "teardown_started_at": None, "teardown_finished_at": None,
             },
