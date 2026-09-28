@@ -5,3 +5,20 @@ __pycache__/
 output/
 
 config.yaml
+# logs and local ops artifacts
+*.log
+*.bak
+*.bak.*
+config.gcp2.yaml
+config.gcp2.yaml.bak
+run_dashboard_8080.sh
+prewarm_cache.sh
+
+# alternate/backend output trees and scratch
+output_gcp/
+output_gcp2/
+Equifax_small_instrumented_trial_1/
+archive/
+
+# stray editor backups
+*.py.bak
