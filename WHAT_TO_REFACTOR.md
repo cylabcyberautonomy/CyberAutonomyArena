@@ -51,28 +51,36 @@ and teardown, plus an output that produces the attacker's and the defender's spe
 MHBench coupling elsewhere exists because nothing gives the other systems a neutral
 description of the environment, so they read MHBench files directly.
 
-## Environment plugin responsibilities (write into the interface)
+## Trust model + environment security responsibilities (write into the interface)
 
-The environment produces the attacker-facing `AttackerEnvSpec` and owns how the box is reached
-(`AttackerFoothold.ssh_common_args` — a ProxyCommand for a bastion/relay, an IAP tunnel, or empty
-for a directly-reachable box). Some routing carries reachability info (e.g. a bastion IP). That is
-**not** a secret the design relies on, so the environment MUST enforce, at the network/credential
-level, that the management plane cannot be used by the adversary:
+**Trust boundary.** The attacker/defender/traffic *plugins* are trusted harness code. The *adversary*
+the attacker plugin drives (e.g. Incalmo running on the foothold) is untrusted by construction — it
+is an attacker trying to move through the network. The environment defends against the adversary,
+not against the plugin.
 
-- **The management plane is unreachable from inside the environment.** Firewall the bastion/jump so
-  victims and the attacker foothold cannot open its SSH (or any management port); it accepts
-  management connections only from the harness. The adversary can discover the bastion by scanning
-  its own network regardless of what the spec says — hiding the IP is not a control; isolation is.
-- **Routing credentials are scoped and not usable for a shell.** A jump credential embedded in
-  `ssh_common_args` should be forward-only (`restrict,command="…"`); the box key
-  (`AttackerFoothold.ssh_key`) authenticates only to `user@host`. No management/global key is left
-  on any in-environment host.
-- **`AttackerEnvSpec` is for the trusted attacker *plugin* (setup code), not the adversary.** The
-  adversary under evaluation only ever gets the C2 + the landed foothold — never the spec. A plugin
-  is semi-trusted; the scoping above is the defense-in-depth for a malicious/buggy one.
+Consequences:
+- `AttackerEnvSpec` (incl. `ssh_common_args`, which may reveal a bastion IP) is consumed only by the
+  trusted attacker plugin. The adversary never receives it — it only ever gets the C2 + the landed
+  foothold. So bastion info in the spec is fine, and we assume the plugin won't hand it to the
+  adversary.
 
-This is the environment's contract, not the attacker's — state it explicitly in the environment
-plugin interface when the environment becomes a plugin.
+**The one required control (regardless of plugin trust): the bastion's ingress is fully decoupled
+from the environment.** Connectivity is one-directional by design — the harness SSHes *into* the
+bastion, and the bastion opens forwards *out* to the victims (ProxyJump). Victims and the attacker
+foothold never need to initiate anything toward the bastion, so the environment MUST firewall the
+bastion so that **no in-environment host can open a connection to it — only the harness can.** With
+ingress decoupled, the bastion is safe even if its IP or key leaked (the adversary literally cannot
+reach it), so hiding the IP in the spec was never the control; ingress isolation is.
+
+**Defense-in-depth** (secondary once ingress is decoupled; matters more if plugins are untrusted):
+- Don't leave a usable management key on in-env hosts (the adversary loots victim filesystems). Note
+  a global key that also opens *other victims* is a separate, lateral-movement axis — that's attack
+  surface, not a bastion concern.
+- Scope routing credentials: a jump credential in `ssh_common_args` forward-only
+  (`restrict,command="…"`), the box key (`AttackerFoothold.ssh_key`) valid only for `user@host`.
+
+State this trust model and the required items explicitly in the environment plugin interface when
+the environment becomes a plugin.
 
 ## Regression guard
 
