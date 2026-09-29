@@ -43,7 +43,7 @@ from experiment_manager.attacker.plugins.base import AttackerPlugin
 from experiment_manager.defender.plugins.base import DefenderPlugin
 from experiment_manager.traffic.plugins.base import TrafficPlugin
 from experiment_manager.environment import DeployedEnvironment
-from experiment_manager.attacker.env_spec import AttackerEnvSpec
+from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerJump
 from experiment_manager.experiment.models import ExperimentSpecs
 
 ENV_NAME = "equifax_small"
@@ -56,8 +56,13 @@ FAKE_ENV = DeployedEnvironment(
     ip="192.168.202.100",   # attacker (kali) IP in equifax_small
     spec=ENV_NAME,
 )
-# The attacker-facing spec the attacker actually consumes (adapted from FAKE_ENV).
-FAKE_ATTACKER_SPEC = AttackerEnvSpec.from_deployed(FAKE_ENV)
+# The attacker-facing spec the attacker actually consumes (a pure DTO the environment produces).
+FAKE_ATTACKER_SPEC = AttackerEnvSpec(
+    objective=ENV_NAME,
+    entry_ip="192.168.202.100",   # the attacker's Kali box
+    entry_ssh_key="/tmp/box_key",
+    jump=AttackerJump(host="192.168.1.156", ssh_key="/tmp/jump_key"),  # bastion, separate credential
+)
 
 
 def _mhbench_dir() -> Path | None:
@@ -122,14 +127,23 @@ def test_experimentspecs_without_traffic_still_valid():
 
 # ------------------------------------------------- attacker -> runner build_config contract
 
-def test_attacker_env_spec_adapter():
-    """The attacker consumes AttackerEnvSpec, not the raw DeployedEnvironment. The Stage-A
-    adapter must carry the objective (env label) and the entry (kali) IP through."""
-    spec = AttackerEnvSpec.from_deployed(FAKE_ENV)
+def test_attacker_env_spec_is_pure_dto_with_scoped_credentials():
+    """AttackerEnvSpec is a provider-agnostic DTO the environment produces — no MHBench-specific
+    adapter baked in, and the box credential is separate from the jump credential (so neither is a
+    single management key)."""
+    assert not hasattr(AttackerEnvSpec, "from_deployed"), "DTO must not carry an env-specific adapter"
+    spec = FAKE_ATTACKER_SPEC
     assert spec.objective == ENV_NAME
-    assert str(spec.entry_ip) == "192.168.202.100"
-    # a None environment yields a usable, empty spec (no crash)
-    assert AttackerEnvSpec.from_deployed(None).objective == "none"
+    assert spec.entry_ssh_key == "/tmp/box_key"
+    assert spec.jump is not None and spec.jump.ssh_key == "/tmp/jump_key"
+    assert spec.entry_ssh_key != spec.jump.ssh_key  # box key is not the jump key
+
+
+def test_environment_produces_attacker_env_spec():
+    """The environment side (MHBench today) is what serves up the AttackerEnvSpec — the arena gets
+    it from there, not from the attacker parsing topology."""
+    from experiment_manager.environment import deployer
+    assert callable(deployer.attacker_env_spec)
 
 
 def test_attacker_graphsearch_build_config_contract():

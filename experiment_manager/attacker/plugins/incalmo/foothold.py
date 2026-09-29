@@ -43,30 +43,35 @@ def _caldera_ip_port(remote_url: Optional[str]) -> tuple[Optional[str], Optional
 
 
 def _write_inventory(env_spec: AttackerEnvSpec, tmp: Path) -> Path:
-    if not env_spec.entry_ip or not env_spec.bastion_ip or not env_spec.ssh_key:
+    if not env_spec.entry_ip or not env_spec.entry_ssh_key:
         raise RuntimeError(
-            "attacker foothold prep needs entry_ip + bastion_ip + ssh_key in the AttackerEnvSpec "
-            f"(got entry_ip={env_spec.entry_ip}, bastion_ip={env_spec.bastion_ip}, ssh_key={env_spec.ssh_key})"
+            "attacker foothold prep needs entry_ip + entry_ssh_key in the AttackerEnvSpec "
+            f"(got entry_ip={env_spec.entry_ip}, entry_ssh_key={env_spec.entry_ssh_key})"
         )
-    ssh_key = os.path.expanduser(env_spec.ssh_key)
-    # ProxyCommand through the bastion, UserKnownHostsFile=/dev/null on BOTH hops (recycled-FIP
-    # host-key trap) — the shape the other self-contained plugins use.
-    proxy = (
-        f"ssh -W %h:%p -i {ssh_key} -o BatchMode=yes -o PasswordAuthentication=no "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{env_spec.bastion_ip}"
+    entry_key = os.path.expanduser(env_spec.entry_ssh_key)
+    common = (
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "-o ServerAliveInterval=30 -o ServerAliveCountMax=10"
     )
+    # If the box is behind a jump, route through it with the JUMP's own credential (scoped/forward-
+    # only), not the box key. UserKnownHostsFile=/dev/null on BOTH hops (recycled-FIP host-key trap).
+    if env_spec.jump is not None:
+        j = env_spec.jump
+        jump_key = os.path.expanduser(j.ssh_key) if j.ssh_key else entry_key
+        proxy = (
+            f"ssh -W %h:%p -i {jump_key} -p {j.port} -o BatchMode=yes -o PasswordAuthentication=no "
+            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {j.user}@{j.host}"
+        )
+        common += f' -o ProxyCommand="{proxy}"'
     inv = {
         "attacker": {
             "hosts": {
                 _KALI_ALIAS: {
                     "ansible_host": str(env_spec.entry_ip),
-                    "ansible_user": "root",
-                    "ansible_ssh_private_key_file": ssh_key,
-                    "ansible_ssh_common_args": (
-                        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                        "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
-                        f'-o ProxyCommand="{proxy}"'
-                    ),
+                    "ansible_port": env_spec.entry_port,
+                    "ansible_user": env_spec.entry_user,
+                    "ansible_ssh_private_key_file": entry_key,
+                    "ansible_ssh_common_args": common,
                 }
             }
         }

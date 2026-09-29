@@ -10,8 +10,6 @@ from typing import ClassVar, Literal, Optional
 
 from pydantic import field_validator
 
-import yaml
-
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from . import foothold
 from ....config import ExperimentManagerConfig
@@ -21,27 +19,13 @@ from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
 
 
-def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
-    """The private key MHBench injected into the hosts — the attacker uses it to reach its own box
-    (Stage A: read from MHBench's config; Stage B: comes from the AttackerEnvSpec the env emits)."""
-    default = str(Path("~/.ssh/id_ed25519").expanduser())
-    try:
-        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
-        data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
-        backend = data.get("backend", "openstack")
-        block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
-        key = block.get("ssh_key_path") or data.get("ssh_key_path")
-        return os.path.expanduser(key) if key else default
-    except Exception:  # noqa: BLE001 — config drift must not break prep; fall back to the default key
-        return default
-
-
-def _attacker_env_spec(experiment, cfg: ExperimentManagerConfig, mgmt_ip) -> AttackerEnvSpec:
-    """Stage-A adapter: build the attacker's box-access spec from the deployed (MHBench) environment.
-    Stage B: the environment plugin emits this directly."""
-    return AttackerEnvSpec.from_deployed(
-        experiment.deployed_environment, bastion_ip=mgmt_ip, ssh_key=_mhbench_ssh_key(cfg),
-    )
+def _env_spec(experiment) -> AttackerEnvSpec:
+    """The attacker-facing spec the arena attached (produced by the environment). The attacker reads
+    it — it does not build it or know which environment plugin produced it."""
+    spec = getattr(experiment, "_attacker_env_spec", None)
+    if spec is None:
+        raise RuntimeError("no AttackerEnvSpec on the experiment — the arena must attach one before setup")
+    return spec
 
 _LLM_GROUPS = [
     # LiteLLM deployments routed through the CMU AI gateway (single LITELLM_API_KEY).
@@ -173,7 +157,7 @@ class _IncalmoAttacker(AttackerPlugin):
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
         # The attacker preps its OWN box: land the sandcat C2 agent over the bastion using the
         # AttackerEnvSpec credentials — no MHBench cli, no environment.deployer.
-        env_spec = _attacker_env_spec(experiment, cfg, mgmt_ip)
+        env_spec = _env_spec(experiment)
         await foothold.land_sandcat(env_spec, remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(
@@ -217,7 +201,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
         await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
         # Only install msf for strategies that actually dispatch Metasploit ops.
         if self.strategy in _MSF_STRATEGIES:
-            await foothold.install_metasploit(_attacker_env_spec(experiment, cfg, mgmt_ip), cfg, experiment.experiment_name)
+            await foothold.install_metasploit(_env_spec(experiment), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -304,7 +288,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
         # run on the Kali box itself (it binds 127.0.0.1, and the box has no floating IP), which is
         # exactly why the attacker installs it on its own foothold here.
-        await foothold.install_metasploit(_attacker_env_spec(experiment, cfg, mgmt_ip), cfg, experiment.experiment_name)
+        await foothold.install_metasploit(_env_spec(experiment), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:

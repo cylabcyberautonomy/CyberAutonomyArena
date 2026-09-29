@@ -48,6 +48,38 @@ def _mhb_config_args(cfg) -> list:
     return ["--config", cfg.mhbench_config] if getattr(cfg, "mhbench_config", None) else []
 
 
+def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
+    """The key MHBench injected into the hosts. Read from MHBench's own config (backend-aware)."""
+    import yaml  # local import: only the attacker-spec adapter needs it
+    default = str(Path("~/.ssh/id_ed25519").expanduser())
+    try:
+        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
+        data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
+        backend = data.get("backend", "openstack")
+        block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
+        key = block.get("ssh_key_path") or data.get("ssh_key_path")
+        return os.path.expanduser(key) if key else default
+    except Exception:  # noqa: BLE001 — config drift must not break the adapter; use the default key
+        return default
+
+
+def attacker_env_spec(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: MHBench 'serves up' the attacker-facing AttackerEnvSpec from what it deployed.
+    This is where MHBench-specific knowledge lives (kali = deployed.ip, jump = the bastion, key = the
+    MHBench key); when the environment becomes a plugin it returns AttackerEnvSpec directly and this
+    goes away. NOTE: MHBench uses one shared root key for the bastion and the box today, so entry and
+    jump carry the same (over-privileged) key — scope them separately once MHBench issues per-box keys."""
+    from ..attacker.env_spec import AttackerEnvSpec, AttackerJump  # lazy: avoid import cycle at module load
+    key = _mhbench_ssh_key(cfg)
+    return AttackerEnvSpec(
+        objective=(deployed.spec if deployed else None) or "none",
+        entry_ip=(str(deployed.ip) if (deployed and deployed.ip) else None),
+        entry_user="root",
+        entry_ssh_key=key,
+        jump=(AttackerJump(host=mgmt_ip, user="root", ssh_key=key) if mgmt_ip else None),
+    )
+
+
 def _provision_sync(
     experiment_name: str,
     environment_spec: str,

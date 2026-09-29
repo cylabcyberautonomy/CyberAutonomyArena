@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
-from .environment.deployer import provision_environment, configure_environment
+from .environment.deployer import provision_environment, configure_environment, attacker_env_spec
 from .environment.teardown import teardown_environment
 from .environment.collect import collect_environment
 from .environment.rotate import rotate_environment
@@ -920,6 +920,10 @@ async def _run_experiment(experiment: Experiment) -> None:
     # experiment. Attach the channel now so the attacker's run_setup/run_stop templates can emit.
     attacker_lc = AttackerLifecycle(on_emit=_attacker_signal_persister(experiment))
     experiment._attacker_lifecycle = attacker_lc
+    # The environment produces the attacker-facing spec (entry box + scoped access + objective); the
+    # arena hands it to the attacker. Stage A: MHBench serves it via this adapter. Stage B: the env
+    # plugin returns it directly. The attacker reads it off the experiment; it never parses topology.
+    experiment._attacker_env_spec = attacker_env_spec(experiment.deployed_environment, mgmt_ip, cfg)
     try:
         # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
         # which has no floating IP — through the bastion to install docker, ship the image, and open
@@ -1043,7 +1047,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
         attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
                                          or getattr(cfg, 'c2_on_kali', False)) else kali_c2c_url
-        process = await run_attacker(experiment.attacker, experiment.deployed_environment, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
+        process = await run_attacker(experiment.attacker, experiment._attacker_env_spec, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
