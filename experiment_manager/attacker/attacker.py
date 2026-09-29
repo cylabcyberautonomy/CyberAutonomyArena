@@ -42,12 +42,13 @@ class AttackerConfig:
 
 async def run_attacker(
     attacker: AttackerConfig,
-    env_spec: AttackerEnvSpec,
-    experiment_name: str,
+    experiment,
     cfg: ExperimentManagerConfig,
     prepared: PreparedAttacker,
     c2c_server: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
+    experiment_name = experiment.experiment_name
+    env_spec = experiment._attacker_env_spec  # adversary-safe spec the arena attached (env-produced)
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # The attacker consumes the attacker-facing env spec the environment produced (passed in by the
@@ -64,6 +65,7 @@ async def run_attacker(
         built["agent_c2c_server"] = agent_c2c
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
-    process = await attacker.start(prepared, config_path, experiment_name, cfg, c2c_server, agent_c2c_url=agent_c2c)
+    # run_start launches the process AND emits RUNNING (attacker-emitted; the arena waits for it).
+    process = await attacker.run_start(experiment, prepared, config_path, cfg, c2c_server, agent_c2c_url=agent_c2c)
     log(experiment_name, f"Attacker process started (pid={process.pid})")
     return process

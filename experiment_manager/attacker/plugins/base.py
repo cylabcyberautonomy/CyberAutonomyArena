@@ -151,6 +151,17 @@ class AttackerPlugin(BaseModel):
             await lc.emit(AttackerSignal.READY)
         return prepared
 
+    async def run_start(self, experiment: "Experiment", prepared: PreparedAttacker, config_path: Path,
+                        cfg: ExperimentManagerConfig, c2c_url: Optional[str],
+                        agent_c2c_url: Optional[str] = None) -> "asyncio.subprocess.Process":
+        """Launch the attack process, then emit RUNNING — the attacker telling the arena its process
+        is up. The arena waits for RUNNING (it does not emit it), same as READY."""
+        process = await self.start(prepared, config_path, experiment.experiment_name, cfg, c2c_url, agent_c2c_url)
+        lc = self._lifecycle(experiment)
+        if lc is not None:
+            await lc.emit(AttackerSignal.RUNNING)
+        return process
+
     async def run_stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
         lc = self._lifecycle(experiment)
         if lc is not None:

@@ -28,14 +28,19 @@ class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
             raise RuntimeError("boom in setup")
         return PreparedAttacker()
 
+    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None):
+        await asyncio.sleep(0)
+        return object()  # stand-in for the spawned process
+
     async def stop(self, experiment, cfg):
         await asyncio.sleep(0)
 
 
 class _Exp:
-    """Stand-in for Experiment: only needs to carry the lifecycle handle."""
-    def __init__(self, lc):
+    """Stand-in for Experiment: carries the lifecycle handle + a name (run_start needs it)."""
+    def __init__(self, lc, name="lc_test"):
         self._attacker_lifecycle = lc
+        self.experiment_name = name
 
 
 def _record(seq):
@@ -58,8 +63,10 @@ async def test_setup_run_stop_handshake_sequence():
     await lc.wait(AttackerSignal.READY, timeout=5)
     assert isinstance(prepared, PreparedAttacker)
 
-    # running is emitted by the arena once the process is up
-    await lc.emit(AttackerSignal.RUNNING)
+    # RUNNING is emitted by the ATTACKER (run_start, when its process is up); the arena waits for it.
+    proc = await atk.run_start(exp, prepared, config_path=None, cfg=None, c2c_url=None)
+    await lc.wait(AttackerSignal.RUNNING, timeout=5)
+    assert proc is not None
 
     # send stop: STOPPING then STOPPED
     await atk.run_stop(exp, cfg=None)

@@ -1049,7 +1049,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
         attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
                                          or getattr(experiment.attacker, 'c2_on_kali', False)) else kali_c2c_url
-        process = await run_attacker(experiment.attacker, experiment._attacker_env_spec, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
+        process = await run_attacker(experiment.attacker, experiment, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
@@ -1063,8 +1063,9 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     experiment.pid = process.pid
     experiment.status = ExperimentStatus.RUNNING
-    # Attacker lifecycle: process is launched -> RUNNING (sets attacker_started_at via the persister).
-    await attacker_lc.emit(AttackerSignal.RUNNING)
+    # RUNNING is emitted by the attacker (run_start, when its process is up); the arena WAITS for it,
+    # same as READY. The persister set attacker_started_at when it arrived; this confirms + records.
+    await attacker_lc.wait(AttackerSignal.RUNNING)
     await registry.update(experiment)
 
     returncode = None
