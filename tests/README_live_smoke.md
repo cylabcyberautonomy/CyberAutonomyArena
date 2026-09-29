@@ -56,13 +56,21 @@ strategy), `--defender` (llm_soc strategy or `none`), `--traffic` (persona or `n
 
 Or by hand:
 
+The attacker config is a (plugin + spec-file) pair: `attacker_plugin` selects the plugin and
+`attacker_spec` is a path to a JSON/YAML file holding its bespoke spec. (The embedded
+`attacker: {type, ...}` form still works for back-compat.)
+
 ```bash
+# write the attacker spec to a file, then reference it by path
+echo '{"strategy": "GraphSearch"}' > /tmp/atk_spec.json
+
 curl -sS -X POST http://localhost:8000/experiments \
   -H 'content-type: application/json' \
   -d '{
         "experiment_name": "smoke_arena_contract",
         "environment": "equifax_small_instrumented",
-        "attacker":  {"type": "incalmo_strategy", "strategy": "GraphSearch"},
+        "attacker_plugin": "incalmo_strategy",
+        "attacker_spec": "/tmp/atk_spec.json",
         "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"},
         "teardown": true,
         "priority": 1000
