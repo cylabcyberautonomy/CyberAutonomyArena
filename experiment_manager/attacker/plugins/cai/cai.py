@@ -7,13 +7,13 @@ import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
-import yaml
 
 from ....config import ExperimentManagerConfig
 from ...env_spec import AttackerEnvSpec
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
+from ..access_ssh import persist_primary_access, load_primary_access, ssh_base
 
 _RUNNER = Path(__file__).parent / "cai_runner.py"
 _REMOTE_DIR = "/opt/cai"
@@ -55,12 +55,8 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "kali_ip": (env_spec.primary.host if env_spec.primary else None),
         }
 
-    def _ssh_key(self, cfg: ExperimentManagerConfig) -> str:
-        mh = yaml.safe_load((cfg.mhbench_dir / "config" / "config.yaml").read_text())
-        return os.path.expanduser(mh["openstack"]["ssh_key_path"])
-
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        ssh_base = self._ssh_base(self._ssh_key(cfg), mgmt_ip, experiment.deployed_environment.ip)
+        base = ssh_base(persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
         install = (
             "set -e; mkdir -p /opt/cai/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -70,7 +66,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "uv pip install --python /opt/cai/venv/bin/python cai-framework"
         )
         proc = await asyncio.create_subprocess_exec(
-            *ssh_base, install, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            *base, install, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
         if proc.returncode != 0:
             raise RuntimeError(f"CAI install on kali failed: {stderr.decode()[-800:]}")
@@ -79,38 +75,17 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     async def stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
         await super().stop(experiment, cfg)
         try:
-            ssh_key, mgmt_ip, kali_ip = self._ssh_ctx(experiment.experiment_name, cfg)
-            ssh_base = self._ssh_base(ssh_key, mgmt_ip, kali_ip)
+            base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
             proc = await asyncio.create_subprocess_exec(
-                *ssh_base, "pkill -f cai_runner || true",
+                *base, "pkill -f cai_runner || true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             await asyncio.wait_for(proc.wait(), timeout=30)
         except Exception:
             pass
 
-    def _ssh_ctx(self, experiment_name: str, cfg: ExperimentManagerConfig) -> tuple[str, str, str]:
-        mh = yaml.safe_load((cfg.mhbench_dir / "config" / "config.yaml").read_text())
-        ssh_key = os.path.expanduser(mh["openstack"]["ssh_key_path"])
-        out = output_root(experiment_name, cfg) / experiment_name
-        mgmt_ip = json.loads((out / "experiment" / "provision_result.json").read_text())["mgmt_ip"]
-        kali_ip = json.loads((out / "attacker" / "attacker_config.json").read_text())["kali_ip"]
-        return ssh_key, mgmt_ip, kali_ip
-
-    def _ssh_base(self, ssh_key: str, mgmt_ip: str, kali_ip: str) -> list[str]:
-        proxy = (
-            f"ssh -W %h:%p -i {ssh_key} -o BatchMode=yes "
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"
-        )
-        return [
-            "ssh", "-i", ssh_key, "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=10",
-            "-o", f"ProxyCommand={proxy}", f"root@{kali_ip}",
-        ]
-
-    async def _push(self, ssh_base: list[str], dest: str, content: str) -> None:
+    async def _push(self, base: list[str], dest: str, content: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_base, f"cat > {dest}",
+            *base, f"cat > {dest}",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
@@ -121,25 +96,23 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
                     agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
-        ssh_key, mgmt_ip, kali_ip = self._ssh_ctx(experiment_name, cfg)
-        ssh_base = self._ssh_base(ssh_key, mgmt_ip, kali_ip)
-        await self._push(ssh_base, f"{_REMOTE_DIR}/cai_runner.py", _RUNNER.read_text())
-        await self._push(ssh_base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
+        base = ssh_base(load_primary_access(experiment_name, cfg))
+        await self._push(base, f"{_REMOTE_DIR}/cai_runner.py", _RUNNER.read_text())
+        await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
-            *ssh_base, f"{_REMOTE_DIR}/venv/bin/python {_REMOTE_DIR}/cai_runner.py {_REMOTE_DIR}/attacker_config.json",
+            *base, f"{_REMOTE_DIR}/venv/bin/python {_REMOTE_DIR}/cai_runner.py {_REMOTE_DIR}/attacker_config.json",
             stdout=log_file, stderr=subprocess.STDOUT,
             start_new_session=True,  # own group so a force-kill reaps the local ssh client cleanly (remote runner is killed via stop()'s pkill)
         )
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        ssh_key, mgmt_ip, kali_ip = self._ssh_ctx(experiment.experiment_name, cfg)
-        ssh_base = self._ssh_base(ssh_key, mgmt_ip, kali_ip)
+        base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
         dest.mkdir(parents=True, exist_ok=True)
         proc = await asyncio.create_subprocess_exec(
-            *ssh_base, f"tar czf - -C {_REMOTE_DIR}/logs {experiment.experiment_name} 2>/dev/null",
+            *base, f"tar czf - -C {_REMOTE_DIR}/logs {experiment.experiment_name} 2>/dev/null",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         data, _ = await proc.communicate()
