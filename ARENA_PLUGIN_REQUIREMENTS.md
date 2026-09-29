@@ -44,9 +44,11 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
 - **[ENFORCED]** The **attacker box** always exists (never nonexistent) and is SERVED to the attacker
   via `attacker_spec().footholds` (non-empty). Location is flexible.
 - **[DESIGN / DEFERRED]** Both boxes get internet **EGRESS (outbound-only)** — for the LLM API — and
-  **NO ingress** from the internet. The environment provisions the egress path (NAT/SNAT); scope the
-  LLM egress with a forward proxy + domain allowlist (IP rules can't pin CDN-hosted APIs). Attacker→
+  **NO ingress** from the internet. The environment provisions the egress path (NAT/SNAT). Attacker→
   defender-box is blocked.
+- **[PINNED]** Scoping the LLM egress with a forward proxy + domain allowlist (IP rules can't pin
+  CDN-hosted APIs) is **deferred** (user, 2026-09-29): plain egress via the router SNAT suffices for
+  now. The interface makes no room for a proxy yet; revisit if egress needs to be locked down.
 
 ### Per-system credential issuance (no god-key)
 - **[ENFORCED]** `attacker_credential()` and `defender_credential()` are DISTINCT (not one key).
@@ -78,9 +80,15 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
   protocol)`; grouping by source gives multi-stream routing AND same-stream fan-out.
 - **[DESIGN]** Byte-for-byte: keep reshaping shippers (falcosidekick) off the path; forward raw sensor
   output. Server-mediated EDRs (Velociraptor/Wazuh) use the bespoke path, not the common relay.
-- **[DEFERRED]** Standing up the actual transparent fan-out relay (socat / Vector / Fluent Bit) on the
-  mgmt host + baking sensors to `telemetry_ingest`. (NATS is an optional future upgrade, only for
-  dynamic pub/sub or replay.)
+- **[VALIDATED 2026-09-29]** The transparent fan-out relay works live. A stdlib HTTP relay
+  (`MHBench src/playbooks/plays/aux_files/telemetry_relay.py`) ran on the mgmt host at the constant
+  `telemetry_ingest` address (`10.0.1.10:9200`); host0's falcosidekick, repointed there, delivered
+  falco `/etc/shadow` alerts through it into the harness ES byte-for-byte. Redirection lives in the
+  relay's `dests.json`, not on the victim.
+- **[DEFERRED]** Remaining: auto-provision the relay (systemd unit on the mgmt host started at
+  configure with a per-deploy `dests.json`), open `management_sg` tcp/9200 from the victim subnets,
+  and bake sensor `es_address` to `telemetry_ingest` instead of a hardcoded ES. (NATS is an optional
+  future upgrade, only for dynamic pub/sub or replay.)
 
 ---
 
