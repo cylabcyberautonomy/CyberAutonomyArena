@@ -1,50 +1,55 @@
-"""AttackerEnvSpec — the attacker-facing view of a deployed environment.
+"""Attacker-facing environment types.
 
-A pure, provider-agnostic DTO: only the entry point + objective + box access an attacker
-legitimately gets, never the full topology. The ENVIRONMENT produces it (MHBench today, other
-env plugins later) and hands it to the arena, which passes it to the attacker — the attacker never
-parses raw environment internals.
+Two deliberately separate objects:
 
-Consumed by the trusted attacker *plugin* (harness setup code), NOT by the adversary under
-evaluation (the strategy/LLM only ever gets the C2 + the landed foothold). Still, credentials are
-scoped on purpose: `entry_ssh_key` should authenticate ONLY to `entry_user@entry_ip`, and if the
-box is only reachable through a jump, `jump` carries its own (ideally forward-only) credential —
-never one management key that opens the bastion, the box and every victim. MHBench currently uses
-one shared root key for both hops (over-privileged); the split here lets scoped keys drop in later
-without changing this contract.
+  AttackerEnvSpec  — ADVERSARY-SAFE. You could hand this to the adversary under evaluation and
+                     nothing bad happens: it carries only the objective and the foothold IDENTITY
+                     (name/host/user — the box's own in-env address and account, which the adversary
+                     already knows about itself). NO keys, NO bastion, NO routing. This is what
+                     build_config() consumes and what conceptually "the attacker gets".
+
+  FootholdAccess   — HARNESS-ONLY. How the trusted attacker *plugin* reaches a foothold to set it up
+                     (ssh key + routing, e.g. a bastion ProxyCommand). Produced by the environment,
+                     handed to the plugin's prepare_foothold(), and NEVER given to the adversary.
+
+Keeping them separate makes the invariant checkable: AttackerEnvSpec has no field that would matter
+if it leaked. The management plane's safety does not rest on hiding it here — it rests on the
+environment decoupling the bastion's ingress from the environment (see WHAT_TO_REFACTOR.md).
+
+Both are provider-agnostic DTOs the ENVIRONMENT produces (MHBench today via
+environment/deployer.py; other env plugins later).
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-class AttackerJump(BaseModel):
-    """SSH ProxyJump routing to the box when it isn't directly reachable. An SSH jump inherently
-    needs *some* credential to open the forward (the box auth is still end-to-end over it), so this
-    credential should be scoped to forwarding only — a forced-command / restricted key that can't get
-    a shell on the jump — not a management key.
-
-    PREFERRED ALTERNATIVE — no jump auth at all: have the environment expose the box through a dumb
-    L4 relay (socat / iptables DNAT / a pre-opened tunnel) so the attacker connects to a forwarded
-    endpoint and authenticates ONLY to the box, end-to-end. In that case leave `jump` None and point
-    `entry_ip`/`entry_port` at the forwarded endpoint. Use AttackerJump only when the box is reachable
-    solely via an SSH bastion."""
-    host: str
+class AttackerFoothold(BaseModel):
+    """Adversary-safe identity of a box the attacker starts on / operates from."""
+    name: str = "foothold"
+    host: Optional[str] = None   # the box's own in-env IP (the adversary knows its own address)
     user: str = "root"
-    ssh_key: Optional[str] = None
-    port: int = 22
 
 
 class AttackerEnvSpec(BaseModel):
-    # Env label / goal context the strategy or LLM keys off (Incalmo's "environment" field).
+    """Adversary-safe. objective + foothold identities only."""
     objective: str = "none"
-    # The attacker's foothold box (its entry point).
-    entry_ip: Optional[str] = None
-    entry_port: int = 22
-    entry_user: str = "root"
-    # Key valid ONLY for entry_user@entry_ip. Never a management/global key.
-    entry_ssh_key: Optional[str] = None
-    # Present only when the box must be reached through a jump; the environment owns routing.
-    jump: Optional[AttackerJump] = None
+    footholds: list[AttackerFoothold] = Field(default_factory=list)
+
+    @property
+    def primary(self) -> Optional[AttackerFoothold]:
+        return self.footholds[0] if self.footholds else None
+
+
+class FootholdAccess(BaseModel):
+    """Harness-only: how the trusted plugin reaches one foothold to prep it. Never given to the
+    adversary. Routing (bastion/relay/direct/IAP) is opaque in ssh_common_args and owned by the
+    environment; ssh_key should be scoped to user@host."""
+    name: str = "foothold"
+    host: str
+    user: str = "root"
+    port: int = 22
+    ssh_key: Optional[str] = None
+    ssh_common_args: str = ""   # e.g. a ProxyCommand for a bastion/relay; "" = directly reachable

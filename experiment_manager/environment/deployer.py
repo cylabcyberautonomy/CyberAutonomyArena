@@ -63,21 +63,36 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
         return default
 
 
-def attacker_env_spec(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: MHBench 'serves up' the attacker-facing AttackerEnvSpec from what it deployed.
-    This is where MHBench-specific knowledge lives (kali = deployed.ip, jump = the bastion, key = the
-    MHBench key); when the environment becomes a plugin it returns AttackerEnvSpec directly and this
-    goes away. NOTE: MHBench uses one shared root key for the bastion and the box today, so entry and
-    jump carry the same (over-privileged) key — scope them separately once MHBench issues per-box keys."""
-    from ..attacker.env_spec import AttackerEnvSpec, AttackerJump  # lazy: avoid import cycle at module load
-    key = _mhbench_ssh_key(cfg)
+_KALI_FOOTHOLD = "kali"  # logical name for the attacker's foothold (MHBench's kali box)
+
+
+def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: MHBench serves up the ADVERSARY-SAFE AttackerEnvSpec (objective + foothold
+    identity only — no keys, no bastion). Stage B: the env plugin returns it directly."""
+    from ..attacker.env_spec import AttackerEnvSpec, AttackerFoothold  # lazy: avoid import cycle
+    kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     return AttackerEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
-        entry_ip=(str(deployed.ip) if (deployed and deployed.ip) else None),
-        entry_user="root",
-        entry_ssh_key=key,
-        jump=(AttackerJump(host=mgmt_ip, user="root", ssh_key=key) if mgmt_ip else None),
+        footholds=[AttackerFoothold(name=_KALI_FOOTHOLD, host=kali_ip, user="root")] if kali_ip else [],
     )
+
+
+def attacker_foothold_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: MHBench serves up the HARNESS-ONLY FootholdAccess (how to reach the foothold
+    to prep it — key + routing through the bastion). Never given to the adversary. MHBench uses one
+    shared root key today; ssh_common_args routes through the bastion via ProxyCommand."""
+    from ..attacker.env_spec import FootholdAccess  # lazy: avoid import cycle
+    kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
+    if not kali_ip:
+        return []
+    key = _mhbench_ssh_key(cfg)
+    proxy = ""
+    if mgmt_ip:
+        proxy = (
+            f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
+            f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"'
+        )
+    return [FootholdAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
 
 def _provision_sync(

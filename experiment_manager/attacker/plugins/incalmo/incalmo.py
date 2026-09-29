@@ -19,13 +19,13 @@ from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
 
 
-def _env_spec(experiment) -> AttackerEnvSpec:
-    """The attacker-facing spec the arena attached (produced by the environment). The attacker reads
-    it — it does not build it or know which environment plugin produced it."""
-    spec = getattr(experiment, "_attacker_env_spec", None)
-    if spec is None:
-        raise RuntimeError("no AttackerEnvSpec on the experiment — the arena must attach one before setup")
-    return spec
+def _foothold_access(experiment):
+    """The HARNESS-ONLY FootholdAccess list the arena attached (how to reach the footholds to prep
+    them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
+    access = getattr(experiment, "_attacker_access", None)
+    if not access:
+        raise RuntimeError("no FootholdAccess on the experiment — the arena must attach it before setup")
+    return access
 
 _LLM_GROUPS = [
     # LiteLLM deployments routed through the CMU AI gateway (single LITELLM_API_KEY).
@@ -155,10 +155,9 @@ class _IncalmoAttacker(AttackerPlugin):
         return await super().setup(experiment, cfg, mgmt_ip)
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
-        # The attacker preps its OWN box: land the sandcat C2 agent over the bastion using the
-        # AttackerEnvSpec credentials — no MHBench cli, no environment.deployer.
-        env_spec = _env_spec(experiment)
-        await foothold.land_sandcat(env_spec, remote_url, cfg, experiment.experiment_name)
+        # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
+        # FootholdAccess (key + routing) — no MHBench cli, no environment.deployer.
+        await foothold.land_sandcat(_foothold_access(experiment), remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
@@ -201,7 +200,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
         await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
         # Only install msf for strategies that actually dispatch Metasploit ops.
         if self.strategy in _MSF_STRATEGIES:
-            await foothold.install_metasploit(_env_spec(experiment), cfg, experiment.experiment_name)
+            await foothold.install_metasploit(_foothold_access(experiment), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -288,7 +287,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
         # run on the Kali box itself (it binds 127.0.0.1, and the box has no floating IP), which is
         # exactly why the attacker installs it on its own foothold here.
-        await foothold.install_metasploit(_env_spec(experiment), cfg, experiment.experiment_name)
+        await foothold.install_metasploit(_foothold_access(experiment), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:

@@ -52,7 +52,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "api_base": self.api_base,
             "objective": _OBJECTIVE,
             "output_dir": f"{_REMOTE_DIR}/logs/{experiment_name}",
-            "kali_ip": env_spec.entry_ip,
+            "kali_ip": (env_spec.primary.host if env_spec.primary else None),
         }
 
     def _ssh_key(self, cfg: ExperimentManagerConfig) -> str:

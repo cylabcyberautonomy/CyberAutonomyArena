@@ -43,7 +43,7 @@ from experiment_manager.attacker.plugins.base import AttackerPlugin
 from experiment_manager.defender.plugins.base import DefenderPlugin
 from experiment_manager.traffic.plugins.base import TrafficPlugin
 from experiment_manager.environment import DeployedEnvironment
-from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerJump
+from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, FootholdAccess
 from experiment_manager.experiment.models import ExperimentSpecs
 
 ENV_NAME = "equifax_small"
@@ -56,12 +56,10 @@ FAKE_ENV = DeployedEnvironment(
     ip="192.168.202.100",   # attacker (kali) IP in equifax_small
     spec=ENV_NAME,
 )
-# The attacker-facing spec the attacker actually consumes (a pure DTO the environment produces).
+# The adversary-safe spec build_config consumes: objective + foothold identity only (no keys/bastion).
 FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective=ENV_NAME,
-    entry_ip="192.168.202.100",   # the attacker's Kali box
-    entry_ssh_key="/tmp/box_key",
-    jump=AttackerJump(host="192.168.1.156", ssh_key="/tmp/jump_key"),  # bastion, separate credential
+    footholds=[AttackerFoothold(name="kali", host="192.168.202.100", user="root")],
 )
 
 
@@ -127,23 +125,30 @@ def test_experimentspecs_without_traffic_still_valid():
 
 # ------------------------------------------------- attacker -> runner build_config contract
 
-def test_attacker_env_spec_is_pure_dto_with_scoped_credentials():
-    """AttackerEnvSpec is a provider-agnostic DTO the environment produces — no MHBench-specific
-    adapter baked in, and the box credential is separate from the jump credential (so neither is a
-    single management key)."""
-    assert not hasattr(AttackerEnvSpec, "from_deployed"), "DTO must not carry an env-specific adapter"
-    spec = FAKE_ATTACKER_SPEC
-    assert spec.objective == ENV_NAME
-    assert spec.entry_ssh_key == "/tmp/box_key"
-    assert spec.jump is not None and spec.jump.ssh_key == "/tmp/jump_key"
-    assert spec.entry_ssh_key != spec.jump.ssh_key  # box key is not the jump key
+def test_attacker_env_spec_is_adversary_safe():
+    """AttackerEnvSpec could be handed to the adversary and be fine: objective + foothold IDENTITY
+    only, no keys / bastion / routing. Those live in the harness-only FootholdAccess."""
+    spec_fields = set(AttackerEnvSpec.model_fields)
+    assert spec_fields == {"objective", "footholds"}, f"spec leaks fields: {spec_fields}"
+    foothold_fields = set(AttackerFoothold.model_fields)
+    assert foothold_fields == {"name", "host", "user"}, f"foothold leaks fields: {foothold_fields}"
+    # anything sensitive must NOT be nameable on the adversary-safe types
+    for banned in ("ssh_key", "ssh_common_args", "jump", "bastion", "key"):
+        assert banned not in spec_fields and banned not in foothold_fields
 
 
-def test_environment_produces_attacker_env_spec():
-    """The environment side (MHBench today) is what serves up the AttackerEnvSpec — the arena gets
-    it from there, not from the attacker parsing topology."""
+def test_foothold_access_is_harness_only_and_carries_routing():
+    """FootholdAccess is the harness-only side: keys + opaque routing for the trusted plugin's prep."""
+    fields = set(FootholdAccess.model_fields)
+    assert {"ssh_key", "ssh_common_args", "host", "user"} <= fields
+
+
+def test_environment_produces_both_spec_and_access():
+    """The environment serves up the adversary-safe spec AND the harness-only access — the arena
+    hands each to the right place; the attacker never parses topology."""
     from experiment_manager.environment import deployer
     assert callable(deployer.attacker_env_spec)
+    assert callable(deployer.attacker_foothold_access)
 
 
 def test_attacker_graphsearch_build_config_contract():

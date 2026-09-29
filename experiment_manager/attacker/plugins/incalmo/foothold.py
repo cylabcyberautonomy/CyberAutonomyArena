@@ -22,10 +22,9 @@ from urllib.parse import urlparse
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import log, output_root
-from ...env_spec import AttackerEnvSpec
+from ...env_spec import FootholdAccess
 
 _AUX = Path(__file__).parent / "aux"
-_KALI_ALIAS = "attacker_kali"  # inventory alias the vendored plays' `{{ host }}` resolves to
 
 
 def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:
@@ -42,46 +41,37 @@ def _caldera_ip_port(remote_url: Optional[str]) -> tuple[Optional[str], Optional
     return u.hostname, (u.port or 80)
 
 
-def _write_inventory(env_spec: AttackerEnvSpec, tmp: Path) -> Path:
-    if not env_spec.entry_ip or not env_spec.entry_ssh_key:
-        raise RuntimeError(
-            "attacker foothold prep needs entry_ip + entry_ssh_key in the AttackerEnvSpec "
-            f"(got entry_ip={env_spec.entry_ip}, entry_ssh_key={env_spec.entry_ssh_key})"
-        )
-    entry_key = os.path.expanduser(env_spec.entry_ssh_key)
-    common = (
+def _write_inventory(access: list[FootholdAccess], tmp: Path) -> Path:
+    """One inventory over every foothold — ansible preps them all at once (multi-host)."""
+    if not access:
+        raise RuntimeError("attacker foothold prep got no FootholdAccess entries")
+    base = (
         "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=10"
     )
-    # If the box is behind a jump, route through it with the JUMP's own credential (scoped/forward-
-    # only), not the box key. UserKnownHostsFile=/dev/null on BOTH hops (recycled-FIP host-key trap).
-    if env_spec.jump is not None:
-        j = env_spec.jump
-        jump_key = os.path.expanduser(j.ssh_key) if j.ssh_key else entry_key
-        proxy = (
-            f"ssh -W %h:%p -i {jump_key} -p {j.port} -o BatchMode=yes -o PasswordAuthentication=no "
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {j.user}@{j.host}"
-        )
-        common += f' -o ProxyCommand="{proxy}"'
-    inv = {
-        "attacker": {
-            "hosts": {
-                _KALI_ALIAS: {
-                    "ansible_host": str(env_spec.entry_ip),
-                    "ansible_port": env_spec.entry_port,
-                    "ansible_user": env_spec.entry_user,
-                    "ansible_ssh_private_key_file": entry_key,
-                    "ansible_ssh_common_args": common,
-                }
-            }
+    hosts = {}
+    for fa in access:
+        if not fa.host or not fa.ssh_key:
+            raise RuntimeError(f"foothold {fa.name!r} needs host + ssh_key (got host={fa.host}, ssh_key={fa.ssh_key})")
+        # Routing (bastion/relay ProxyCommand, or empty for direct) is opaque and env-owned.
+        common = f"{base} {fa.ssh_common_args}".strip()
+        hosts[fa.name] = {
+            "ansible_host": str(fa.host),
+            "ansible_port": fa.port,
+            "ansible_user": fa.user,
+            "ansible_ssh_private_key_file": os.path.expanduser(fa.ssh_key),
+            "ansible_ssh_common_args": common,
+            "user": fa.user,  # the vendored plays' `become_user: {{ user }}` resolves per-host from here
         }
-    }
     p = tmp / "inventory.json"
-    p.write_text(json.dumps(inv))
+    p.write_text(json.dumps({"attacker": {"hosts": hosts}}))
     return p
 
 
-def _run_play_sync(play: str, env_spec: AttackerEnvSpec, extravars: dict,
+_GROUP = "attacker"  # inventory group holding every foothold; the vendored plays' `{{ host }}` targets it
+
+
+def _run_play_sync(play: str, access: list[FootholdAccess], extravars: dict,
                    cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     play_path = _AUX / play
     if not play_path.exists():
@@ -90,10 +80,12 @@ def _run_play_sync(play: str, env_spec: AttackerEnvSpec, extravars: dict,
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        inv = _write_inventory(env_spec, tmp)
+        inv = _write_inventory(access, tmp)
         varfile = tmp / "vars.json"
-        # The vendored plays use `{{ host }}`/`{{ user }}`; MHBench ran them as user=root.
-        varfile.write_text(json.dumps({"host": _KALI_ALIAS, "user": env_spec.entry_user, **extravars}))
+        # The vendored plays use `{{ host }}` (the target group) and `{{ user }}` (per-host, resolved
+        # from each foothold's inventory `user` var — see _write_inventory), so multiple footholds
+        # with different accounts still work.
+        varfile.write_text(json.dumps({"host": _GROUP, **extravars}))
         cmd = [str(_ansible_playbook_bin(cfg)), str(play_path), "-i", str(inv), "-e", f"@{varfile}"]
         env = {
             **os.environ,
@@ -107,33 +99,32 @@ def _run_play_sync(play: str, env_spec: AttackerEnvSpec, extravars: dict,
             "ANSIBLE_SSH_RETRIES": "3",
         }
         with open(log_path, "a") as lf:
-            _via = f" via {env_spec.jump.host}" if env_spec.jump else ""
-            lf.write(f"\n=== attacker foothold play {play} on {env_spec.entry_ip}{_via} ===\n")
+            lf.write(f"\n=== attacker foothold play {play} on {[fa.host for fa in access]} ===\n")
             lf.flush()
             r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"attacker foothold play '{play}' failed with exit {r.returncode} (see {log_path})")
 
 
-async def run_play(play: str, env_spec: AttackerEnvSpec, extravars: dict,
+async def run_play(play: str, access: list[FootholdAccess], extravars: dict,
                    cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     import asyncio
-    log(experiment_name, f"Attacker prepping its foothold: {play} on {env_spec.entry_ip}")
+    log(experiment_name, f"Attacker prepping its foothold(s): {play} on {[fa.host for fa in access]}")
     await asyncio.get_event_loop().run_in_executor(
-        None, _run_play_sync, play, env_spec, extravars, cfg, experiment_name
+        None, _run_play_sync, play, access, extravars, cfg, experiment_name
     )
 
 
-async def land_sandcat(env_spec: AttackerEnvSpec, remote_url: Optional[str],
+async def land_sandcat(access: list[FootholdAccess], remote_url: Optional[str],
                        cfg: ExperimentManagerConfig, experiment_name: str) -> None:
-    """Download + start the sandcat C2 agent on the attacker's box (was MHBench's start_incalmo play)."""
+    """Download + start the sandcat C2 agent on the attacker's foothold(s) (MHBench's start_incalmo)."""
     caldera_ip, caldera_port = _caldera_ip_port(remote_url)
     if not caldera_ip or not caldera_port:
         raise RuntimeError(f"cannot derive caldera_ip/port from C2 URL {remote_url!r} for sandcat landing")
-    await run_play("start_incalmo.yml", env_spec,
+    await run_play("start_incalmo.yml", access,
                    {"caldera_ip": caldera_ip, "caldera_port": caldera_port}, cfg, experiment_name)
 
 
-async def install_metasploit(env_spec: AttackerEnvSpec, cfg: ExperimentManagerConfig, experiment_name: str) -> None:
-    """Install msfrpcd + pymetasploit3 on the attacker's box (was MHBench's install_metasploit play)."""
-    await run_play("install_metasploit.yml", env_spec, {}, cfg, experiment_name)
+async def install_metasploit(access: list[FootholdAccess], cfg: ExperimentManagerConfig, experiment_name: str) -> None:
+    """Install msfrpcd + pymetasploit3 on the attacker's foothold(s) (MHBench's install_metasploit)."""
+    await run_play("install_metasploit.yml", access, {}, cfg, experiment_name)
