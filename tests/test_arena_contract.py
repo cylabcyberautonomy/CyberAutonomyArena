@@ -319,6 +319,23 @@ def test_environment_plugin_lifecycle_and_signals():
         == {s.value for s in EnvironmentSignal}
 
 
+def test_environment_commands_arena_to_env():
+    """The arena also has commands it SENDS to the environment (Provision/Configure/Teardown),
+    recorded for an auditable command/ack trace. There is deliberately NO run/start command — the
+    environment just idles as VMs once configured."""
+    from experiment_manager.environment import EnvironmentLifecycle, EnvironmentCommand
+    cmds = {c.value for c in EnvironmentCommand}
+    assert cmds == {"Provision", "Configure", "Teardown"}
+    assert not any("run" in c.lower() or "start" in c.lower() for c in cmds), \
+        "environment must have no run/start command"
+    sent = []
+    lc = EnvironmentLifecycle(on_command=lambda c: sent.append(c))
+    lc.send(EnvironmentCommand.PROVISION)
+    lc.send(EnvironmentCommand.TEARDOWN)
+    assert lc.commands == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
+    assert sent == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
+
+
 def test_experiment_environment_property_returns_plugin():
     """experiment.environment derives the plugin from environment_spec (Stage 1a: bare name → mhbench)."""
     from experiment_manager.experiment.models import Experiment, ExperimentStatus

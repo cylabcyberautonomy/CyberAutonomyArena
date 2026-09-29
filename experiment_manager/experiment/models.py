@@ -109,6 +109,7 @@ class Experiment:
     # Deploying/Deployed/Configuring/Configured/TearingDown/TornDown/Failed and the arena records the
     # latest here — distinct from the whole-experiment `status` above.
     environment_status = _Field("environment", "lifecycle_status")
+    environment_last_command = _Field("environment", "last_command")  # last command the arena SENT (Provision/Configure/Teardown)
     # --- attacker ---
     attacker = _Field("attacker", "config")
     pid = _Field("attacker", "pid")
@@ -143,7 +144,8 @@ class Experiment:
                 "created_at": created_at, "updated_at": updated_at or created_at,
             },
             "environment": {
-                "spec": environment_spec, "deployed": None, "lifecycle_status": None,
+                "spec": environment_spec, "deployed": None,
+                "lifecycle_status": None, "last_command": None,
                 "vcpus_reserved": None, "ram_mb_reserved": None,
                 "disk_gb_reserved": None, "vms_reserved": None,
                 "deploy_started_at": None, "deploy_finished_at": None,

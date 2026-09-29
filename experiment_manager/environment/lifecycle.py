@@ -22,6 +22,16 @@ from enum import Enum
 from typing import Callable, Optional
 
 
+class EnvironmentCommand(str, Enum):
+    """Arena -> environment. The arena SENDS these to drive each phase; recorded for an auditable
+    command/ack trace. NOTE: there is deliberately NO 'start/run' command — unlike the attacker, the
+    environment has no active run phase; once provisioned+configured it just idles as VMs in the
+    background until torn down."""
+    PROVISION = "Provision"   # bring the network + VMs up
+    CONFIGURE = "Configure"   # run setup on the hosts
+    TEARDOWN = "Teardown"     # tear it all down (collect runs best-effort just before)
+
+
 class EnvironmentSignal(str, Enum):
     """Environment -> arena. The plugin EMITS these; the arena records them."""
     DEPLOYING = "Deploying"       # provision started (VMs/network coming up)
@@ -34,10 +44,15 @@ class EnvironmentSignal(str, Enum):
 
 
 class EnvironmentLifecycle:
-    def __init__(self, on_emit: Optional[Callable[[EnvironmentSignal, Optional[str]], None]] = None):
-        # on_emit persists each signal (e.g. onto the Experiment). Called synchronously.
+    def __init__(self,
+                 on_emit: Optional[Callable[[EnvironmentSignal, Optional[str]], None]] = None,
+                 on_command: Optional[Callable[[EnvironmentCommand], None]] = None):
+        # on_emit persists each env->arena signal; on_command records each arena->env command.
+        # Both called synchronously (the environment is driven in-process by the arena).
         self._on_emit = on_emit
+        self._on_command = on_command
         self._history: list[EnvironmentSignal] = []
+        self._commands: list[EnvironmentCommand] = []
         self._status: Optional[EnvironmentSignal] = None
         self._error: Optional[str] = None
 
@@ -50,8 +65,19 @@ class EnvironmentLifecycle:
         return list(self._history)
 
     @property
+    def commands(self) -> list[EnvironmentCommand]:
+        return list(self._commands)
+
+    @property
     def error(self) -> Optional[str]:
         return self._error
+
+    def send(self, command: EnvironmentCommand) -> None:
+        """Arena -> environment: record the command that drives the next phase (in-process the arena
+        then invokes the matching plugin method)."""
+        self._commands.append(command)
+        if self._on_command is not None:
+            self._on_command(command)
 
     def emit(self, signal: EnvironmentSignal, error: Optional[str] = None) -> None:
         self._status = signal

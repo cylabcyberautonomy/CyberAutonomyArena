@@ -1,5 +1,5 @@
 from .models import DeployedEnvironment
-from .lifecycle import EnvironmentLifecycle, EnvironmentSignal
+from .lifecycle import EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 
 
 def build_environment(value):
@@ -26,4 +26,5 @@ def build_environment(value):
     raise ValueError(f"Expected str / dict / EnvironmentPlugin, got {type(value)}")
 
 
-__all__ = ["DeployedEnvironment", "EnvironmentLifecycle", "EnvironmentSignal", "build_environment"]
+__all__ = ["DeployedEnvironment", "EnvironmentLifecycle", "EnvironmentSignal",
+           "EnvironmentCommand", "build_environment"]

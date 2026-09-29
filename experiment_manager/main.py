@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from .attacker import run_attacker
 from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerCommand
 from .defender import run_defender
-from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal
+from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
 from .environment.deployer import attacker_env_spec, attacker_setup_access
 from .environment.rotate import rotate_environment
@@ -24,15 +24,24 @@ from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
 
 
-def _env_lc(experiment) -> EnvironmentLifecycle:
-    """A fresh EnvironmentLifecycle whose on_emit persists the environment system's signal onto the
-    experiment (environment_status) and logs it — so DEPLOYING/DEPLOYED/CONFIGURING/CONFIGURED/
-    TEARING_DOWN/TORN_DOWN/FAILED are visible per phase, distinct from the whole-experiment status."""
+def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecycle:
+    """A fresh EnvironmentLifecycle wired to persist onto the experiment: on_emit records the env
+    system's signal (environment_status), on_command records the arena's command (environment_last_command)
+    — so the arena->env command and the env->arena signal (Provision→Deploying→Deployed, etc.) are both
+    visible per phase, distinct from the whole-experiment status. If `command` is given it is sent now."""
     def _on_emit(signal: EnvironmentSignal, error) -> None:
         experiment.environment_status = signal.value
         log(experiment.experiment_name,
             f"environment: {signal.value}" + (f" ({error})" if error else ""))
-    return EnvironmentLifecycle(on_emit=_on_emit)
+
+    def _on_command(cmd: EnvironmentCommand) -> None:
+        experiment.environment_last_command = cmd.value
+        log(experiment.experiment_name, f"environment <- {cmd.value}")
+
+    lc = EnvironmentLifecycle(on_emit=_on_emit, on_command=_on_command)
+    if command is not None:
+        lc.send(command)
+    return lc
 
 logger = logging.getLogger(__name__)
 
@@ -582,7 +591,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # instead of queueing behind provisions — deletion is far lighter than creation (no image pull/expand),
     # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
     try:
-        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment))
+        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment, EnvironmentCommand.TEARDOWN))
         # This is what stops the experiment holding VMs in the CapacityTracker (see
         # capacity._holds_vms). On failure it stays unset on purpose: the VMs may well
         # still be on the cluster, so the experiment keeps holding its count until a
@@ -730,7 +739,7 @@ async def _cancel_and_remove(name: str) -> None:
         except Exception:
             logger.exception("Defender teardown failed for '%s'", name)
     try:
-        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment))  # deletes all VMs/networks by project name
+        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment, EnvironmentCommand.TEARDOWN))  # deletes all VMs/networks by project name
     except Exception:
         logger.exception("Failed to tear down environment for '%s'", name)
     # This path never sets teardown_finished_at, so it is the registry removal that stops
@@ -887,7 +896,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
             # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
             try:
-                deployed, mgmt_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment))
+                deployed, mgmt_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.PROVISION))
                 experiment.deployed_environment = deployed
                 await registry.update(experiment)
             except NotImplementedError:
@@ -904,7 +913,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             deploy_slot_held = False
             experiment.status = ExperimentStatus.CONFIGURING
             await registry.update(experiment)
-            await experiment.environment.configure(experiment, mgmt_ip, None, cfg, lc=_env_lc(experiment))
+            await experiment.environment.configure(experiment, mgmt_ip, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.CONFIGURE))
             experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
