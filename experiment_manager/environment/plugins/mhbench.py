@@ -1,11 +1,13 @@
 """MHBench environment plugin — a wrapper making MHBench compatible with the harness.
 
-The environment is identified by name (`environment_spec`), loaded from environments/<name>.json.
-Stage 1a delegation: lifecycle methods call the existing (live-validated) environment functions, which
-key off experiment.environment_spec (the name). Behavior is identical.
+The environment is identified by `environment_spec` — a PATH to a topology JSON (absolute, or relative
+to mhbench_dir, e.g. 'environments/instrumented/equifax_small_instrumented.json'). Stage 1a delegation:
+lifecycle methods call the existing (live-validated) environment functions, which resolve the path via
+deployer.resolve_topology_path. The short label (Incalmo's env name) is the path stem.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
 from ...config import ExperimentManagerConfig
@@ -22,12 +24,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     """Deploys an MHBench topology by name (environments/<environment_spec>.json)."""
 
     type: Literal["mhbench"] = "mhbench"
-    environment_spec: str  # env name, e.g. "equifax_small_instrumented"
+    environment_spec: str  # PATH to a topology JSON (abs, or relative to mhbench_dir)
 
     @property
     def spec(self) -> str:
-        """The env name the deployer keys off (environments/<name>.json)."""
-        return self.environment_spec
+        """The short env label (Incalmo's env name) — the topology file's stem."""
+        return Path(self.environment_spec).stem
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -36,7 +38,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             "label": "MHBench",
             "cartesian_product": False,
             "fields": [
-                {"field_type": "text", "label": "Environment spec (name)", "key": "environment_spec"},
+                {"field_type": "text", "label": "Environment spec (path to topology JSON)",
+                 "key": "environment_spec"},
             ],
         }
 
@@ -44,7 +47,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         self, experiment: "Experiment", cfg: ExperimentManagerConfig
     ) -> list[tuple[int, int, int]]:
         from ..capacity import count_vm_specs
-        topology_path = cfg.mhbench_dir / "environments" / f"{self.spec}.json"
+        from ..deployer import resolve_topology_path
+        topology_path = resolve_topology_path(self.environment_spec, cfg)
         return await count_vm_specs(topology_path, cfg.mhbench_dir,
                                     flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
 

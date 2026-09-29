@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerComma
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
-from .environment.deployer import attacker_env_spec, attacker_setup_access
+from .environment.deployer import attacker_env_spec, attacker_setup_access, resolve_topology_path
 from .environment.rotate import rotate_environment
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -856,7 +856,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     prepared = None
 
     experiment.deployed_environment = DeployedEnvironment(
-        topology_spec=str(cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"),
+        topology_spec=str(resolve_topology_path(experiment.environment_spec, cfg)),
     )
     await registry.update(experiment)
 

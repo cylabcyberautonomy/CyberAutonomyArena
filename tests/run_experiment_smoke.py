@@ -167,7 +167,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="http://localhost:8000", help="running manager base URL")
     ap.add_argument("--name", default="smoke_arena_contract")
-    ap.add_argument("--environment", default="equifax_small_instrumented")
+    ap.add_argument("--environment", default="environments/instrumented/equifax_small_instrumented.json")
     ap.add_argument("--attacker", default="GraphSearch", help="Incalmo strategy name")
     ap.add_argument("--defender", default="FalcoLLM",
                     help="llm_soc strategy, 'canary' for the connectivity diagnostic defender, "

@@ -6,13 +6,14 @@ import subprocess
 from ..config import ExperimentManagerConfig
 from .deployer import _mhb_config_args
 from ..experiment import Experiment
+from .deployer import resolve_topology_path
 from ..experiment_log import init_logger, log, output_root
 
 
 def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     name = experiment.experiment_name
     mhbench_dir = cfg.mhbench_dir
-    topology_path = mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
+    topology_path = resolve_topology_path(experiment.environment_spec, cfg)
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
 

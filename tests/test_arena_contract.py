@@ -46,7 +46,8 @@ from experiment_manager.environment import DeployedEnvironment
 from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAccess
 from experiment_manager.experiment.models import ExperimentSpecs
 
-ENV_NAME = "equifax_small"
+ENV_SPEC = "environments/non-generated/equifax_small.json"  # path (relative to mhbench_dir)
+ENV_STEM = "equifax_small"  # the short label = path stem
 ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
 TRAFFIC = {"type": "caldera_human", "persona": "office_worker"}
@@ -54,11 +55,11 @@ TRAFFIC = {"type": "caldera_human", "persona": "office_worker"}
 FAKE_ENV = DeployedEnvironment(
     topology_spec="/tmp/equifax_small.json",
     ip="192.168.202.100",   # attacker (kali) IP in equifax_small
-    spec=ENV_NAME,
+    spec=ENV_STEM,
 )
 # The adversary-safe spec build_config consumes: objective + foothold identity only (no keys/bastion).
 FAKE_ATTACKER_SPEC = AttackerEnvSpec(
-    objective=ENV_NAME,
+    objective=ENV_STEM,
     footholds=[AttackerFoothold(name="kali", host="192.168.202.100", user="root")],
 )
 
@@ -99,17 +100,17 @@ def test_named_combo_experimentspecs_validates():
     This is the arena's single entry contract: one spec naming all four systems."""
     specs = ExperimentSpecs(
         experiment_name="ci_contract_smoke",
-        environment=ENV_NAME,
+        environment=ENV_SPEC,
         attacker=ATTACKER,
         defender=DEFENDER,
         traffic=TRAFFIC,
     )
     # environment is a validated EnvironmentConfig (bare string → mhbench).
     assert specs.environment.environment_plugin == "mhbench"
-    assert specs.environment.environment_spec == ENV_NAME
+    assert specs.environment.environment_spec == ENV_SPEC
     dumped = specs.model_dump()
     # the sub-configs survive a dump/reload cycle (what the registry persists + replays)
-    assert dumped["environment"] == {"environment_plugin": "mhbench", "environment_spec": ENV_NAME}
+    assert dumped["environment"] == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC}
     assert dumped["attacker"]["strategy"] == "GraphSearch"
     assert dumped["defender"]["strategy"] == "FalcoLLM"
     assert dumped["traffic"]["persona"] == "office_worker"
@@ -120,24 +121,24 @@ def test_environmentconfig_selectable_and_backcompat():
     {environment_plugin, environment_spec} shape, a bare env-name string, and the legacy {type, spec}
     dict (all back-compat); each validates to the same EnvironmentConfig."""
     explicit = ExperimentSpecs(experiment_name="ci_env_explicit",
-                               environment={"environment_plugin": "mhbench", "environment_spec": ENV_NAME},
+                               environment={"environment_plugin": "mhbench", "environment_spec": ENV_SPEC},
                                attacker=ATTACKER)
     assert explicit.environment.environment_plugin == "mhbench"
-    assert explicit.environment.environment_spec == ENV_NAME
-    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_NAME, attacker=ATTACKER)
+    assert explicit.environment.environment_spec == ENV_SPEC
+    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_SPEC, attacker=ATTACKER)
     legacy = ExperimentSpecs(experiment_name="ci_env_legacy",
-                             environment={"type": "mhbench", "spec": ENV_NAME}, attacker=ATTACKER)
+                             environment={"type": "mhbench", "spec": ENV_SPEC}, attacker=ATTACKER)
     assert (explicit.model_dump()["environment"]
             == bare.model_dump()["environment"]
             == legacy.model_dump()["environment"]
-            == {"environment_plugin": "mhbench", "environment_spec": ENV_NAME})
+            == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC})
 
 
 def test_experimentspecs_without_traffic_still_valid():
     """Traffic is optional: a plain attacker-vs-defender run must not require it."""
     specs = ExperimentSpecs(
         experiment_name="ci_no_traffic",
-        environment=ENV_NAME,
+        environment=ENV_SPEC,
         attacker=ATTACKER,
         defender=DEFENDER,
     )
@@ -211,7 +212,7 @@ def test_attacker_graphsearch_build_config_contract():
     built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "http://c2.example:8888")
     assert built["name"] == "ci_exp"
     assert built["strategy"]["name"] == "GraphSearch"
-    assert built["environment"] == ENV_NAME
+    assert built["environment"] == ENV_STEM
     assert built["c2c_server"] == "http://c2.example:8888"
     assert "blacklist_ips" in built
 
@@ -310,8 +311,8 @@ def test_build_environment_coerces_bare_string():
     """A bare environment-name string coerces to the mhbench plugin (back-compat), a dict validates
     by type, and an unknown type raises."""
     from experiment_manager.environment import build_environment
-    env = build_environment(ENV_NAME)
-    assert env.type == "mhbench" and env.spec == ENV_NAME
+    env = build_environment(ENV_SPEC)
+    assert env.type == "mhbench" and env.spec == ENV_STEM and env.environment_spec == ENV_SPEC
     assert build_environment({"type": "mhbench", "spec": "x"}).spec == "x"
     with pytest.raises(ValueError):
         build_environment({"type": "nope"})
@@ -323,7 +324,7 @@ def test_environment_plugin_lifecycle_and_signals():
     import inspect
     from experiment_manager.environment.plugins.base import EnvironmentPlugin
     from experiment_manager.environment import EnvironmentLifecycle, EnvironmentSignal, build_environment
-    env = build_environment(ENV_NAME)  # → MHBenchEnvironment
+    env = build_environment(ENV_SPEC)  # → MHBenchEnvironment
     for m in ("capacity", "provision", "configure", "collect", "teardown"):
         assert callable(getattr(env, m)), f"environment plugin missing {m}()"
     for m in ("provision", "configure", "teardown"):
@@ -358,11 +359,12 @@ def test_environment_commands_arena_to_env():
 
 
 def test_experiment_environment_property_returns_plugin():
-    """experiment.environment derives the plugin from environment_spec (Stage 1a: bare name → mhbench)."""
+    """experiment.environment derives the plugin from environment_spec (path → mhbench)."""
     from experiment_manager.experiment.models import Experiment, ExperimentStatus
-    exp = Experiment("ci_env_prop", ExperimentStatus.QUEUED, ENV_NAME)
+    exp = Experiment("ci_env_prop", ExperimentStatus.QUEUED, ENV_SPEC)
     assert exp.environment.type == "mhbench"
-    assert exp.environment.spec == ENV_NAME
+    assert exp.environment.spec == ENV_STEM
+    assert exp.environment_spec == ENV_SPEC
     assert exp.environment_status is None  # its own lifecycle signal, distinct from status
 
 
@@ -394,9 +396,9 @@ def test_deployed_environment_object_shape():
     """DeployedEnvironment is the env -> {attacker, defender} handoff object today.
     The refactor will split it into attacker- and defender-relevant specs; this pins the
     current shape so consumers keep working until then."""
-    env = DeployedEnvironment(topology_spec="/x/equifax_small.json", ip="1.2.3.4", spec=ENV_NAME)
+    env = DeployedEnvironment(topology_spec="/x/equifax_small.json", ip="1.2.3.4", spec=ENV_STEM)
     assert env.topology_spec.endswith("equifax_small.json")
-    assert env.spec == ENV_NAME
+    assert env.spec == ENV_STEM
 
 
 # ---------------------------------------------------------- environment spec (needs MHBench)
@@ -407,12 +409,9 @@ def test_equifax_small_spec_exists_and_protects_keyholder():
     md = _mhbench_dir()
     if md is None:
         pytest.skip("mhbench_dir not resolvable; skipping env-file check")
-    spec_path = md / "environments" / f"{ENV_NAME}.json"
+    spec_path = md / ENV_SPEC
     if not spec_path.exists():
-        # non-generated layout
-        spec_path = md / "environments" / "non-generated" / f"{ENV_NAME}.json"
-    if not spec_path.exists():
-        pytest.skip(f"{ENV_NAME}.json not found under {md}/environments")
+        pytest.skip(f"{ENV_SPEC} not found under {md}")
     topo = json.loads(spec_path.read_text())
     hosts = [h for net in topo["networks"] for sub in net["subnets"] for h in sub["hosts"]]
     vm_types = {h["vm_type"] for h in hosts}

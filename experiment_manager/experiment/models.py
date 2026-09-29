@@ -103,7 +103,7 @@ class Experiment:
     updated_at = _Field("experiment", "updated_at")
     # --- environment ---
     environment_config = _Field("environment", "config")  # EnvironmentConfig (environment_plugin + environment_spec)
-    environment_spec = _Field("environment", "spec")  # resolved env name, for the internal readers
+    environment_spec = _Field("environment", "spec")  # the topology PATH, for the internal readers (deployer resolves it)
     deployed_environment = _Field("environment", "deployed")
     vcpus_reserved = _Field("environment", "vcpus_reserved")
     ram_mb_reserved = _Field("environment", "ram_mb_reserved")

@@ -70,8 +70,9 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> Path:
 
 
 def _topology_path(cfg: ExperimentManagerConfig, environment_spec: str) -> Path:
-    # Mirror deployer._provision_sync / _configure_sync exactly.
-    return cfg.mhbench_dir / "environments" / f"{environment_spec}.json"
+    # environment_spec is a PATH to a topology JSON (absolute, or relative to mhbench_dir).
+    p = Path(environment_spec)
+    return p if p.is_absolute() else cfg.mhbench_dir / p
 
 
 def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:

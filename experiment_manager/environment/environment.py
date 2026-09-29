@@ -1,14 +1,18 @@
 """EnvironmentConfig — the environment section of an experiment submission.
 
-Explicit shape (environment only; attacker/defender/traffic keep the embedded-selector idiom):
+Explicit shape (environment only; attacker/defender/traffic keep the embedded-selector idiom),
+consistent with the attacker's `attacker_plugin` + `attacker_spec`:
 
     environment:
-      environment_plugin: mhbench          # which environment implementation
-      environment_spec: equifax_small      # name/path of the env the plugin loads (always a file)
+      environment_plugin: mhbench                                          # which implementation
+      environment_spec: environments/instrumented/equifax_small_instrumented.json  # PATH to a topology JSON
 
-Back-compat: a bare env-name string ("equifax_small") coerces to
-{environment_plugin: mhbench, environment_spec: "equifax_small"}, and the legacy embedded
-{type: mhbench, spec: ...} dict is accepted too.
+`environment_spec` is a PATH (absolute, or relative to mhbench_dir) — NOT a library name. The env
+files live in subdirs (instrumented/, non-generated/, generated/), so a path points at the real file
+regardless of layout.
+
+Back-compat: a bare path string coerces to {environment_plugin: mhbench, environment_spec: <path>},
+and the legacy embedded {type: mhbench, spec: <path>} dict is accepted (its `spec` must now be a path).
 """
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from pydantic import BaseModel, model_validator
 
 class EnvironmentConfig(BaseModel):
     environment_plugin: str
-    environment_spec: str  # name/path of the env the plugin loads (a file reference)
+    environment_spec: str  # PATH to a topology JSON (absolute, or relative to mhbench_dir)
 
     @model_validator(mode="after")
     def _validate(self) -> "EnvironmentConfig":
@@ -49,5 +53,6 @@ class EnvironmentConfig(BaseModel):
 
     @property
     def resolved_name(self) -> str:
-        """The environment's name — the key the MHBench plugin deploys by (environments/<name>.json)."""
+        """The value the internal readers key off (experiment.environment_spec) — the topology PATH.
+        The deployer resolves it via resolve_topology_path; the short label is its stem."""
         return self.environment_spec

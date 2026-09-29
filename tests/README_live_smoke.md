@@ -27,7 +27,7 @@ store. It deploys no decoys and calls no LLM. Its report lands at
 `output/<exp>/defender/connectivity_report.json`.
 
 ```bash
-python3 tests/run_experiment_smoke.py --defender canary --environment equifax_small_instrumented --yes
+python3 tests/run_experiment_smoke.py --defender canary --environment environments/instrumented/equifax_small_instrumented.json --yes
 ```
 
 If the canary passes, a real telemetry defender can connect on that environment.
@@ -61,7 +61,7 @@ curl -sS -X POST http://localhost:8000/experiments \
   -H 'content-type: application/json' \
   -d '{
         "experiment_name": "smoke_arena_contract",
-        "environment": "equifax_small_instrumented",
+        "environment": "environments/instrumented/equifax_small_instrumented.json",
         "attacker":  {"type": "incalmo_strategy", "strategy": "GraphSearch"},
         "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"},
         "teardown": true,

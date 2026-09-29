@@ -43,6 +43,15 @@ def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
     return None
 
 
+def resolve_topology_path(environment_spec: str, cfg) -> Path:
+    """environment_spec is a PATH to a topology JSON — absolute, or relative to mhbench_dir (e.g.
+    'environments/instrumented/equifax_small_instrumented.json'). No library-name resolution: the env
+    files live in subdirs (instrumented/, non-generated/, generated/), so a path points at the real
+    file regardless of layout. Shared by the deployer, collect, rotate, teardown and the plugin."""
+    p = Path(environment_spec)
+    return p if p.is_absolute() else cfg.mhbench_dir / p
+
+
 def _mhb_config_args(cfg) -> list:
     # Route MHBench at a non-default backend config (e.g. GCP). Group option, before the subcommand.
     return ["--config", cfg.mhbench_config] if getattr(cfg, "mhbench_config", None) else []
@@ -102,7 +111,7 @@ def _provision_sync(
     cfg: ExperimentManagerConfig,
 ) -> tuple[DeployedEnvironment, Optional[str]]:
     mhbench_dir = cfg.mhbench_dir
-    topology_path = mhbench_dir / "environments" / f"{environment_spec}.json"
+    topology_path = resolve_topology_path(environment_spec, cfg)
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
     provision_result_path = output_root(experiment_name, cfg) / experiment_name / "experiment" / "provision_result.json"
@@ -134,7 +143,7 @@ def _provision_sync(
     return DeployedEnvironment(
         topology_spec=str(topology_path),
         ip=kali_ip,
-        spec=environment_spec,
+        spec=Path(environment_spec).stem,
     ), mgmt_ip
 
 
@@ -150,7 +159,7 @@ def _configure_sync(
         return
 
     mhbench_dir = cfg.mhbench_dir
-    topology_path = mhbench_dir / "environments" / f"{environment_spec}.json"
+    topology_path = resolve_topology_path(environment_spec, cfg)
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
 
@@ -213,7 +222,7 @@ def _attacker_play_sync(
     if mgmt_ip is None:
         raise RuntimeError("Cannot run attacker setup play without a management IP.")
     mhbench_dir = cfg.mhbench_dir
-    topology_path = mhbench_dir / "environments" / f"{environment_spec}.json"
+    topology_path = resolve_topology_path(environment_spec, cfg)
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
     cmd = [
