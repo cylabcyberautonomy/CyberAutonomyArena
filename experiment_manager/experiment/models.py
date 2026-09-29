@@ -111,6 +111,14 @@ class Experiment:
     c2c_container_id = _Field("attacker", "c2c_container_id")
     attacker_started_at = _Field("attacker", "started_at")
     attacker_finished_at = _Field("attacker", "finished_at")
+    # Lifecycle handshake (see attacker/lifecycle.py): the arena records each attacker signal here
+    # as it drives setup->ready->running->stopping->stopped, so an observer can see exactly which
+    # phase the attacker is in (and a hang shows up as a stalled status, not a silent block).
+    attacker_status = _Field("attacker", "lifecycle_status")
+    attacker_setup_started_at = _Field("attacker", "setup_started_at")
+    attacker_ready_at = _Field("attacker", "ready_at")
+    attacker_stopping_at = _Field("attacker", "stopping_at")
+    attacker_stopped_at = _Field("attacker", "stopped_at")
     # --- defender ---
     defender = _Field("defender", "config")
     defender_started_at = _Field("defender", "started_at")
@@ -139,6 +147,8 @@ class Experiment:
             "attacker": {
                 "config": attacker, "pid": None, "c2c_container_id": None,
                 "started_at": None, "finished_at": None,
+                "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
+                "stopping_at": None, "stopped_at": None,
             },
             "defender": {
                 "config": defender, "started_at": None, "finished_at": None,

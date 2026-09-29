@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
 from ..env_spec import AttackerEnvSpec
+from ..lifecycle import AttackerSignal
 from ...ui_schema import PluginUISchema
 
 if TYPE_CHECKING:
@@ -119,3 +120,36 @@ class AttackerPlugin(BaseModel):
 
     async def collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path) -> None:
         """Pull attacker-specific logs into dest. Default no-op — logs already local."""
+
+    # ------------------------------------------------------------------ lifecycle handshake
+    # Templates the arena drives (see lifecycle.py). They emit the attacker's signals around the
+    # overridable setup()/stop() so the arena can wait for each. The lifecycle lives on the
+    # experiment (set by the arena); when absent (e.g. clean-slate stop of a registry-loaded run)
+    # these behave exactly like the plain methods.
+    @staticmethod
+    def _lifecycle(experiment: "Experiment"):
+        return getattr(experiment, "_attacker_lifecycle", None)
+
+    async def run_setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> "PreparedAttacker":
+        lc = self._lifecycle(experiment)
+        if lc is not None:
+            await lc.emit(AttackerSignal.SETUP_STARTED)
+        try:
+            prepared = await self.setup(experiment, cfg, mgmt_ip)
+        except Exception as e:  # noqa: BLE001 — surface as a FAILED signal, then re-raise for the arena
+            if lc is not None:
+                await lc.emit(AttackerSignal.FAILED, error=str(e))
+            raise
+        if lc is not None:
+            await lc.emit(AttackerSignal.READY)
+        return prepared
+
+    async def run_stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+        lc = self._lifecycle(experiment)
+        if lc is not None:
+            await lc.emit(AttackerSignal.STOPPING)
+        try:
+            await self.stop(experiment, cfg)
+        finally:
+            if lc is not None:
+                await lc.emit(AttackerSignal.STOPPED)

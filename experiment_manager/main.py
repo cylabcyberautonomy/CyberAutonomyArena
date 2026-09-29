@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
+from .attacker.lifecycle import AttackerLifecycle, AttackerSignal
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
@@ -767,6 +768,43 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
         await _run_experiment(experiment)
 
 
+def _attacker_signal_persister(experiment: Experiment):
+    """Return an on_emit callback that records each attacker lifecycle signal onto the experiment
+    (status + the matching timestamp), so an observer sees which phase the attacker is in. Sync
+    (no I/O) — the arena calls registry.update() at phase boundaries to persist to disk."""
+    _ts_field = {
+        AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
+        AttackerSignal.READY: "attacker_ready_at",
+        AttackerSignal.RUNNING: "attacker_started_at",
+        AttackerSignal.STOPPING: "attacker_stopping_at",
+        AttackerSignal.STOPPED: "attacker_stopped_at",
+    }
+
+    def _on_emit(signal: AttackerSignal, error) -> None:
+        experiment.attacker_status = signal.value
+        field = _ts_field.get(signal)
+        if field is not None and getattr(experiment, field) is None:
+            setattr(experiment, field, datetime.now(timezone.utc))
+
+    return _on_emit
+
+
+async def _drive_attacker_setup(experiment: Experiment, cfg, mgmt_ip, lc: AttackerLifecycle):
+    """Handshake the setup phase: send start_setup (run the attacker's setup template as a task),
+    wait for its setup_started ack, then wait for ready. Running setup concurrently is what lets a
+    hang between the two show up as a stalled READY wait rather than a silent block."""
+    task = asyncio.create_task(experiment.attacker.run_setup(experiment, cfg, mgmt_ip))
+    try:
+        # setup_started is emitted at the very top of run_setup, so it arrives promptly; if the ack
+        # wait times out or errors, fall through and let `await task` surface the real cause.
+        await lc.wait(AttackerSignal.SETUP_STARTED, timeout=cfg.attacker_setup_started_timeout_seconds)
+    except Exception:  # noqa: BLE001
+        pass
+    prepared = await task            # completes when READY is emitted (or raises, having emitted FAILED)
+    await lc.wait(AttackerSignal.READY)   # confirm (already satisfied)
+    return prepared
+
+
 async def _run_experiment(experiment: Experiment) -> None:
     name = experiment.experiment_name
     exp_log = init_logger(name, output_root(name, cfg))
@@ -876,6 +914,12 @@ async def _run_experiment(experiment: Experiment) -> None:
     # interfering with concurrent runs' C2s. Stale/leftover C2s are already handled per-run: setup_c2 does
     # `docker rm -f c2` + a fresh tunnel on its own Kali, _handle_failure/teardown reaps each run's own C2,
     # and _clean_slate sweeps on restart. So the pre-launch global sweep was redundant.
+    #
+    # Lifecycle handshake (see attacker/lifecycle.py): the arena drives the attacker through
+    # setup_started -> ready -> running -> (stopping ->) stopped, recording each signal on the
+    # experiment. Attach the channel now so the attacker's run_setup/run_stop templates can emit.
+    attacker_lc = AttackerLifecycle(on_emit=_attacker_signal_persister(experiment))
+    experiment._attacker_lifecycle = attacker_lc
     try:
         # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
         # which has no floating IP — through the bastion to install docker, ship the image, and open
@@ -885,9 +929,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         # failure is uncapped and never takes this lock, so _handle_failure below cannot deadlock.
         if getattr(cfg, "c2_on_kali", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
-                prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
+                prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
         else:
-            prepared = await experiment.attacker.setup(experiment, cfg, mgmt_ip)
+            prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
+        await registry.update(experiment)   # persist the setup_started/ready signals
         kali_c2c_url, local_c2c_url = prepared.remote_url, prepared.local_url
         if prepared.container_id:
             experiment.c2c_container_id = prepared.container_id
@@ -1012,7 +1057,8 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     experiment.pid = process.pid
     experiment.status = ExperimentStatus.RUNNING
-    experiment.attacker_started_at = datetime.now(timezone.utc)
+    # Attacker lifecycle: process is launched -> RUNNING (sets attacker_started_at via the persister).
+    await attacker_lc.emit(AttackerSignal.RUNNING)
     await registry.update(experiment)
 
     returncode = None
@@ -1028,7 +1074,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
         else:
             exp_log.info("[%s] Attacker exceeded %ss wall-clock cap — stopping", name, cfg.attacker_timeout_seconds)
-            await experiment.attacker.stop(experiment, cfg)  # graceful SIGTERM
+            # Handshake stop: send stop -> STOPPING -> STOPPED (run_stop emits both around the
+            # graceful SIGTERM). run_stop reads the lifecycle off the experiment.
+            await experiment.attacker.run_stop(experiment, cfg)  # graceful SIGTERM + STOPPING/STOPPED
             try:
                 await asyncio.wait_for(process.wait(), 15)
             except asyncio.TimeoutError:
@@ -1064,6 +1112,11 @@ async def _run_experiment(experiment: Experiment) -> None:
                 exp_log.exception("Error stopping background traffic for '%s'", experiment.experiment_name)
 
     experiment.attacker_finished_at = datetime.now(timezone.utc)
+    # Terminal lifecycle signal. On a normal finish the attacker exited on its own (the arena never
+    # sent stop), so record STOPPED here; a timeout path already emitted STOPPING->STOPPED, and a
+    # setup failure already emitted FAILED — don't overwrite either.
+    if attacker_lc.status not in (AttackerSignal.STOPPED, AttackerSignal.FAILED):
+        await attacker_lc.emit(AttackerSignal.STOPPED)
     exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
     # A provider guardrail refusal (e.g. OpenAI/Azure "flagged for possible cybersecurity risk") lets the
     # attacker end normally — usually exit 0 → FINISHED — which hides *why* nothing happened and looks like a

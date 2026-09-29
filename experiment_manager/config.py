@@ -44,6 +44,7 @@ class ExperimentManagerConfig(BaseModel):
     # and ansible runs, and scales with the arsenal size. Exceeding it fails the
     # experiment rather than silently racing.
     defender_ready_timeout_seconds: float = 1800
+    attacker_setup_started_timeout_seconds: float = 120  # handshake backstop: how long the arena waits for the attacker's setup_started ack (emitted at the top of setup) before giving up. NOT the setup/ready cap — setup itself (C2 bring-up, foothold prep) is bounded by its own internal waits.
     deception_python: Optional[Path] = None
     # Background-traffic (third plugin class): local checkout of the
     # caldera-human-traffic repo, deployed onto victim hosts by the CalderaHuman
