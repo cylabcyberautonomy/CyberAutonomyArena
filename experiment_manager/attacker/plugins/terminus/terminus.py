@@ -84,7 +84,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
 
     # -- lifecycle (no C2; a pure shell agent, like CAI) -----------------------------------
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        ssh_base_cmd = self.ssh_base(self.persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
+        ssh_base_cmd = self.persist_primary_access(experiment, cfg).ssh_base()  # persist so start()/stop() recover it
         install = (
             "set -e; mkdir -p /opt/terminus/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -104,7 +104,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
                     agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
-        base = self.ssh_base(self.load_primary_access(experiment_name, cfg))
+        base = self.load_primary_access(experiment_name, cfg).ssh_base()
         await self._push(base, f"{_REMOTE_DIR}/terminus_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
@@ -119,7 +119,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     async def stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
         await super().stop(experiment, cfg)
         try:
-            base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
+            base = self.load_primary_access(experiment.experiment_name, cfg).ssh_base()
             proc = await asyncio.create_subprocess_exec(
                 *base, "pkill -f terminus_runner || true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -128,7 +128,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             pass
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
+        base = self.load_primary_access(experiment.experiment_name, cfg).ssh_base()
         dest.mkdir(parents=True, exist_ok=True)
         remote = f"{_REMOTE_DIR}/logs/{experiment.experiment_name}"
         proc = await asyncio.create_subprocess_exec(

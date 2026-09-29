@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import shlex
 import signal
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -131,13 +130,14 @@ class AttackerPlugin(BaseModel):
     async def collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path) -> None:
         """Pull attacker-specific logs into dest. Default no-op — logs already local."""
 
-    # ------------------------------------------------------------------ foothold SSH transport
-    # Shared by the whole class (any attacker plugin that runs ON its foothold): reach the foothold
-    # via the env-produced SetupAccess the arena attached — host/user/port/key + opaque routing
-    # (bastion ProxyCommand / relay / direct in ssh_common_args) — NOT by assuming an MHBench Kali box.
-    # Plugins that do not run on a foothold (e.g. a purely local/containerised C2) simply never call
-    # these. setup() gets the full experiment; start()/stop()/collect_logs() get only experiment_name,
-    # so persist_primary_access() writes the access to disk for load_primary_access() to recover by name.
+    # ------------------------------------------------------------------ foothold access recovery
+    # Attacker-specific glue for plugins that run ON their foothold: setup() gets the full experiment
+    # (so it can read the arena-attached _attacker_access), but start()/stop()/collect_logs() get only
+    # experiment_name — so persist_primary_access() writes the access to the attacker output dir for
+    # load_primary_access() to recover by name. The transport itself is NOT here: it is a pure op on
+    # the SetupAccess data (access.ssh_base()), reusable by any system, not an attacker concern.
+    # (This persist/load glue is attacker-scoped only because it knows the `attacker/` output layout
+    # and the _attacker_access attribute; it will generalise if the defender/traffic gain the same need.)
     _ACCESS_FILE: ClassVar[str] = "setup_access.json"
 
     @staticmethod
@@ -164,23 +164,6 @@ class AttackerPlugin(BaseModel):
     def load_primary_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> SetupAccess:
         """Recover the foothold access persisted by setup()."""
         return SetupAccess.model_validate(json.loads(self._access_path(experiment_name, cfg).read_text()))
-
-    @staticmethod
-    def ssh_base(fa: SetupAccess) -> list[str]:
-        """An ssh command prefix that runs a remote command on the foothold `fa`, using its
-        env-provided routing (fa.ssh_common_args carries the ProxyCommand/relay opts; empty = direct)."""
-        cmd = ["ssh"]
-        if fa.ssh_key:
-            cmd += ["-i", os.path.expanduser(fa.ssh_key)]
-        cmd += [
-            "-p", str(fa.port),
-            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=10",
-        ]
-        if fa.ssh_common_args:
-            cmd += shlex.split(fa.ssh_common_args)  # env-owned routing (e.g. -o ProxyCommand="...")
-        cmd += [f"{fa.user}@{fa.host}"]
-        return cmd
 
     # ------------------------------------------------------------------ lifecycle handshake
     # Templates the arena drives (see lifecycle.py). They emit the attacker's signals around the
