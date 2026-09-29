@@ -30,6 +30,7 @@ THE NAMED BASELINE COMBO (what must keep working across the refactor):
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import os
 from pathlib import Path
 
@@ -366,6 +367,52 @@ def test_experiment_environment_property_returns_plugin():
     assert exp.environment.spec == ENV_STEM
     assert exp.environment_spec == ENV_SPEC
     assert exp.environment_status is None  # its own lifecycle signal, distinct from status
+
+
+def test_env_plugin_produces_both_agent_specs_and_setup_access():
+    """The environment PLUGIN is the producer of the agent-facing specs (attacker_spec + defender_spec)
+    and the harness-only SetupAccess for both sides. Invariant: agent-facing specs carry NO credential
+    field; SetupAccess carries the key + routing."""
+    from experiment_manager.environment import build_environment, DeployedEnvironment
+    from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAccess
+    from experiment_manager.defender.env_spec import DefenderEnvSpec, DefenderHost
+
+    md = _mhbench_dir()
+    if md is None:
+        pytest.skip("mhbench_dir not resolvable")
+    topo = md / ENV_SPEC
+    if not topo.exists():
+        pytest.skip(f"{ENV_SPEC} not found")
+
+    env = build_environment(ENV_SPEC)
+    deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM)
+    cfg = SimpleNamespace(mhbench_dir=md, mhbench_config=None)
+
+    # method presence on the base contract
+    for m in ("attacker_spec", "attacker_setup_access", "defender_spec", "defender_setup_access"):
+        assert callable(getattr(env, m)), f"env plugin missing {m}()"
+
+    # attacker: agent-facing spec = objective + foothold identity, NO creds
+    aspec = env.attacker_spec(deployed, cfg)
+    assert isinstance(aspec, AttackerEnvSpec)
+    assert aspec.primary and aspec.primary.host == "192.168.202.100"
+    assert "ssh_key" not in AttackerFoothold.model_fields and "ssh_key" not in AttackerEnvSpec.model_fields
+    # attacker: setup access = harness-only creds + bastion routing
+    aacc = env.attacker_setup_access(deployed, "1.2.3.4", cfg)
+    assert aacc and isinstance(aacc[0], SetupAccess) and aacc[0].ssh_key
+    assert "ProxyCommand" in aacc[0].ssh_common_args
+
+    # defender: agent-facing spec = host inventory (victims only, roles), NO creds
+    dspec = env.defender_spec(deployed, cfg)
+    assert isinstance(dspec, DefenderEnvSpec)
+    names = {h.name for h in dspec.hosts}
+    assert names and "attacker" not in names  # kali excluded
+    assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
+    assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
+    # defender: setup access = one SetupAccess per victim, with creds
+    dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
+    assert {a.name for a in dacc} == names
+    assert all(a.ssh_key for a in dacc)
 
 
 def test_environment_module_exposes_lifecycle():

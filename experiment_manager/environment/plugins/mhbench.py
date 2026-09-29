@@ -94,6 +94,23 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from ..collect import collect_environment
         await collect_environment(experiment, cfg)
 
+    # -- spec production (delegates to the deployer adapters; env is the producer) ----------------
+    def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
+        from ..deployer import attacker_env_spec
+        return attacker_env_spec(deployed, cfg)
+
+    def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+        from ..deployer import attacker_setup_access
+        return attacker_setup_access(deployed, mgmt_ip, cfg)
+
+    def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
+        from ..deployer import defender_env_spec
+        return defender_env_spec(deployed, cfg)
+
+    def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+        from ..deployer import defender_setup_access
+        return defender_setup_access(deployed, mgmt_ip, cfg)
+
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

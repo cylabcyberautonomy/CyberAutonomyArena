@@ -83,3 +83,21 @@ class EnvironmentPlugin(BaseModel):
     ) -> None:
         """Emits TEARING_DOWN -> TORN_DOWN (or FAILED) on `lc`."""
         raise NotImplementedError(f"{type(self).__name__} must implement teardown()")
+
+    # -- spec production (the env is the producer of the agent-facing specs + setup access) ------
+    # Agent-facing (safe to hand the LLM); Setup-facing (harness-only, creds+routing, never to the agent).
+    def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
+        """AGENT-FACING AttackerEnvSpec: objective + foothold identity (no creds/routing)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement attacker_spec()")
+
+    def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+        """HARNESS-ONLY list[SetupAccess] for the attacker's foothold(s) (key + routing)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement attacker_setup_access()")
+
+    def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
+        """AGENT-FACING DefenderEnvSpec: objective + host inventory (no creds/routing)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement defender_spec()")
+
+    def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+        """HARNESS-ONLY list[SetupAccess] for the victims the defender may reach (key + routing)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")

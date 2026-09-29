@@ -104,6 +104,69 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
     return [SetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
 
+def _iter_victims(topology_path: Path):
+    """Yield each non-attacker host dict from the topology JSON."""
+    topo = json.loads(Path(topology_path).read_text())
+    for net in topo.get("networks", []):
+        for sub in net.get("subnets", []):
+            for h in sub.get("hosts", []):
+                if h.get("vm_type") == "kali_running":
+                    continue
+                yield h
+
+
+def _role_from_name(name: str) -> Optional[str]:
+    """Derive a role from a host name by stripping the trailing index (webserver0 -> webserver)."""
+    return re.sub(r"\d+$", "", name) or None
+
+
+def _bastion_proxy_args(mgmt_ip: Optional[str], key: str) -> str:
+    if not mgmt_ip:
+        return ""
+    return (
+        f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
+        f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"'
+    )
+
+
+def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: MHBench serves up the AGENT-FACING DefenderEnvSpec (objective + host inventory
+    at the defender's knowledge level — no creds/routing). Carries topology_spec for the not-yet-migrated
+    runners. Stage B: the env plugin returns it directly."""
+    from ..defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
+    hosts = []
+    topo = deployed.topology_spec if deployed else None
+    if topo and Path(topo).exists():
+        for h in _iter_victims(topo):
+            ip = h.get("ip_address")
+            hosts.append(DefenderHost(name=h["name"], ip=str(ip) if ip else None,
+                                      role=_role_from_name(h["name"])))
+    return DefenderEnvSpec(
+        objective=(deployed.spec if deployed else None) or "none",
+        hosts=hosts,
+        topology_spec=topo,
+    )
+
+
+def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: HARNESS-ONLY SetupAccess (shared type) for each victim the defender may reach —
+    key + bastion routing. This replaces per-plugin _mhbench_ssh_key + hand-built ProxyCommand. Never
+    given to the defender's brain."""
+    from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    topo = deployed.topology_spec if deployed else None
+    if not (topo and Path(topo).exists()):
+        return []
+    key = _mhbench_ssh_key(cfg)
+    proxy = _bastion_proxy_args(mgmt_ip, key)
+    out = []
+    for h in _iter_victims(topo):
+        ip = h.get("ip_address")
+        if ip:
+            out.append(SetupAccess(name=h["name"], host=str(ip), user="root",
+                                   ssh_key=key, ssh_common_args=proxy))
+    return out
+
+
 def _provision_sync(
     experiment_name: str,
     environment_spec: str,
