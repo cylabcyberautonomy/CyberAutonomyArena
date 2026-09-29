@@ -107,7 +107,8 @@ def _run_play_sync(play: str, env_spec: AttackerEnvSpec, extravars: dict,
             "ANSIBLE_SSH_RETRIES": "3",
         }
         with open(log_path, "a") as lf:
-            lf.write(f"\n=== attacker foothold play {play} on {env_spec.entry_ip} via {env_spec.bastion_ip} ===\n")
+            _via = f" via {env_spec.jump.host}" if env_spec.jump else ""
+            lf.write(f"\n=== attacker foothold play {play} on {env_spec.entry_ip}{_via} ===\n")
             lf.flush()
             r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
     if r.returncode != 0:
