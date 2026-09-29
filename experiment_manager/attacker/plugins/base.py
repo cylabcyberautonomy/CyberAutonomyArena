@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
-from ...environment import DeployedEnvironment
+from ..env_spec import AttackerEnvSpec
 from ...ui_schema import PluginUISchema
 
 if TYPE_CHECKING:
@@ -41,7 +41,7 @@ class AttackerPlugin(BaseModel):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
+        env_spec: AttackerEnvSpec,
         c2c_url: str,
     ) -> dict: ...
 

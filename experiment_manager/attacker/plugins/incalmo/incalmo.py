@@ -13,7 +13,7 @@ from pydantic import field_validator
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
-from ....environment import DeployedEnvironment
+from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
 
@@ -220,14 +220,14 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             ],
         }
 
-    def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
         strategy = {"name": self.strategy}
         if self.script_path:
             strategy["script_path"] = self.script_path
         return {
             "name": experiment_name,
             "strategy": strategy,
-            "environment": environment.spec if environment else "none",
+            "environment": env_spec.objective,
             "c2c_server": c2c_url,
             "blacklist_ips": ["172.17.0.0/16"],
         }
@@ -324,7 +324,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             ],
         }
 
-    def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
         return {
             "name": experiment_name,
             "strategy": {
@@ -334,7 +334,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                 "execution_llm": self.execution_llm or self.planning_llm,
                 "abstraction": self.abstraction,
             },
-            "environment": environment.spec if environment else "none",
+            "environment": env_spec.objective,
             "c2c_server": c2c_url,
             "blacklist_ips": ["172.17.0.0/16"],
         }

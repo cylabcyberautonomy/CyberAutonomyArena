@@ -43,6 +43,7 @@ from experiment_manager.attacker.plugins.base import AttackerPlugin
 from experiment_manager.defender.plugins.base import DefenderPlugin
 from experiment_manager.traffic.plugins.base import TrafficPlugin
 from experiment_manager.environment import DeployedEnvironment
+from experiment_manager.attacker.env_spec import AttackerEnvSpec
 from experiment_manager.experiment.models import ExperimentSpecs
 
 ENV_NAME = "equifax_small"
@@ -55,6 +56,8 @@ FAKE_ENV = DeployedEnvironment(
     ip="192.168.202.100",   # attacker (kali) IP in equifax_small
     spec=ENV_NAME,
 )
+# The attacker-facing spec the attacker actually consumes (adapted from FAKE_ENV).
+FAKE_ATTACKER_SPEC = AttackerEnvSpec.from_deployed(FAKE_ENV)
 
 
 def _mhbench_dir() -> Path | None:
@@ -119,10 +122,20 @@ def test_experimentspecs_without_traffic_still_valid():
 
 # ------------------------------------------------- attacker -> runner build_config contract
 
+def test_attacker_env_spec_adapter():
+    """The attacker consumes AttackerEnvSpec, not the raw DeployedEnvironment. The Stage-A
+    adapter must carry the objective (env label) and the entry (kali) IP through."""
+    spec = AttackerEnvSpec.from_deployed(FAKE_ENV)
+    assert spec.objective == ENV_NAME
+    assert str(spec.entry_ip) == "192.168.202.100"
+    # a None environment yields a usable, empty spec (no crash)
+    assert AttackerEnvSpec.from_deployed(None).objective == "none"
+
+
 def test_attacker_graphsearch_build_config_contract():
     """What the Incalmo runner subprocess reads out of build_config must stay stable."""
     atk = AttackerPlugin._registry["incalmo_strategy"].model_validate(ATTACKER)
-    built = atk.build_config("ci_exp", FAKE_ENV, "http://c2.example:8888")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "http://c2.example:8888")
     assert built["name"] == "ci_exp"
     assert built["strategy"]["name"] == "GraphSearch"
     assert built["environment"] == ENV_NAME
@@ -139,7 +152,7 @@ def test_attacker_never_blacklists_victim_ips(cfg):
     excluded 192.168.x.10 — webserver0, the DB key-holder — so every run exfiltrated 0 files.
     build_config must exclude ONLY Kali's docker bridge, never a victim subnet."""
     atk = AttackerPlugin._registry[cfg["type"]].model_validate(cfg)
-    built = atk.build_config("ci_exp", FAKE_ENV, "http://c2.example:8888")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "http://c2.example:8888")
     bl = built.get("blacklist_ips", [])
     assert bl == ["172.17.0.0/16"], f"unexpected blacklist: {bl}"
     assert not any(str(ip).startswith("192.168") for ip in bl), f"victim IP blacklisted: {bl}"

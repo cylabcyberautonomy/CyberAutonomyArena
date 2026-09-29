@@ -8,6 +8,7 @@ from pydantic_core import core_schema
 from ..config import ExperimentManagerConfig
 from ..environment import DeployedEnvironment
 from .plugins.base import AttackerPlugin, PreparedAttacker
+from .env_spec import AttackerEnvSpec
 from ..experiment_log import log, output_root
 from . import plugins  # noqa: F401 — triggers auto-discovery
 
@@ -50,7 +51,11 @@ async def run_attacker(
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    built = attacker.build_config(experiment_name, environment, c2c_server)
+    # The attacker consumes the attacker-facing env spec, not the raw MHBench DeployedEnvironment.
+    # Stage A: adapt it here from what the (MHBench) environment path produced. Stage B: the
+    # environment plugin will emit AttackerEnvSpec directly and this adapter goes away.
+    env_spec = AttackerEnvSpec.from_deployed(environment)
+    built = attacker.build_config(experiment_name, env_spec, c2c_server)
     # Target-side payloads (ExploitStruts, ssh/nc agent-spawn) make the VICTIM fetch the implant
     # from a C2 URL. Normally that's c2c_server, but under c2_on_kali c2c_server is a 127.0.0.1
     # ssh -L tunnel usable only by the strategy on beluga — victims must use the Kali in-tenant

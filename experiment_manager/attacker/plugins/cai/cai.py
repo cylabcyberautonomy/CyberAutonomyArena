@@ -10,7 +10,7 @@ from typing import Literal, Optional
 import yaml
 
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
+from ...env_spec import AttackerEnvSpec
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
@@ -43,7 +43,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             ],
         }
 
-    def build_config(self, experiment_name: str, environment: Optional[DeployedEnvironment], c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
         anthropic = "claude" in self.model or "anthropic" in self.model
         key = os.environ.get("ANTHROPIC_API_KEY" if anthropic else "OPENAI_API_KEY", "")
         return {
@@ -52,7 +52,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "api_base": self.api_base,
             "objective": _OBJECTIVE,
             "output_dir": f"{_REMOTE_DIR}/logs/{experiment_name}",
-            "kali_ip": environment.ip if environment else None,
+            "kali_ip": env_spec.entry_ip,
         }
 
     def _ssh_key(self, cfg: ExperimentManagerConfig) -> str:
