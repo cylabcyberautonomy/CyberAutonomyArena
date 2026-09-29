@@ -32,10 +32,12 @@ class DefenderHost(BaseModel):
 class DefenderBox(BaseModel):
     """The always-provisioned box the defender RUNS on, in an isolated ("super-secret") subnet: it can
     reach the victims + the telemetry relay but is hidden from the attacker. Agent-facing identity only
-    (the defender knows its own box); the harness reaches it via a SetupAccess entry of the same name."""
+    (the defender knows its own box); the harness reaches it via a SetupAccess entry of the same name.
+    `egress` records that the box has internet egress (outbound only — for the LLM API) but no ingress."""
     name: str = "defender_box"
     ip: Optional[str] = None       # the box's in-env address
     subnet: Optional[str] = None   # the isolated subnet it lives on
+    egress: bool = True            # internet egress (outbound-only); no inbound from the internet
 
 
 class DefenderEnvSpec(BaseModel):

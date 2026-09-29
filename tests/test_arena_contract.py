@@ -418,6 +418,16 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert all(a.ssh_key for a in dacc)
 
 
+def _deployed_for(plugin_name):
+    """A minimal DeployedEnvironment so attacker_spec can produce a foothold. mhbench derives the
+    foothold (kali) from the topology + kali IP; ludus's stub returns a mock regardless."""
+    if plugin_name == "mhbench":
+        md = _mhbench_dir()
+        topo = str(md / ENV_SPEC) if md else "/tmp/x.json"
+        return DeployedEnvironment(topology_spec=topo, ip="192.168.202.100", spec=ENV_STEM)
+    return None
+
+
 @pytest.mark.parametrize("plugin_name,spec_val", [
     ("mhbench", ENV_SPEC),
     ("ludus", "ranges/example.yaml"),
@@ -439,9 +449,12 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     for m in ("defender_box", "telemetry_ingest", "program_telemetry"):
         assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
 
-    # always-provisioned defender box, in an isolated subnet
+    # always-provisioned defender box, in an isolated subnet, with internet egress (outbound-only)
     box = env.defender_box(None, cfg)
-    assert isinstance(box, DefenderBox) and box.ip and box.subnet
+    assert isinstance(box, DefenderBox) and box.ip and box.subnet and box.egress is True
+
+    # the attacker box is guaranteed too — always SERVED via the attacker spec (footholds non-empty)
+    assert env.attacker_spec(_deployed_for(plugin_name), cfg).footholds
 
     # fixed telemetry-relay ingest (the bake target)
     ing = env.telemetry_ingest(None, cfg)

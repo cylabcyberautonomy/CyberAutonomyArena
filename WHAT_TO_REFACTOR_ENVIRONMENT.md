@@ -8,12 +8,23 @@ every other system reading MHBench `topology.json`.
 
 Worktree: `~/experiment_harness-arena-env`, branch `arena-refactor-env` (off `arena-refactor`).
 
-## The environment always provides a defender box (decided)
+## The environment always provides an attacker box AND a defender box (decided)
 
-Every topology includes a dedicated **defender box** in an isolated ("super-secret") subnet, injected
-by the environment plugin exactly like the management/bastion host is today. **The defender RUNS on
-that box** (the harness ships + launches it there, like the attacker runs on Kali) — NOT on the
-harness host (beluga). The box:
+Both agents run from an environment-provided box, and **the environment guarantees both boxes exist —
+neither is ever nonexistent** — with **internet EGRESS but no INGRESS** (outbound NAT/SNAT so each box
+can reach the internet / the LLM API; no inbound from the internet, so a box is never reachable from
+outside):
+
+- **Attacker box** (its foothold, e.g. Kali): location is FLEXIBLE ("wherever" — in-env or elsewhere),
+  but it MUST be provisioned and **served to the attacker through the specs** (`AttackerEnvSpec.footholds`
+  — always non-empty). Egress-only (its LLM/tools reach out; nothing reaches in). The attacker runs
+  its own prep on it (attacker owns foothold prep).
+- **Defender box**: a dedicated box in an isolated ("super-secret") subnet, hidden from the attacker.
+  Egress-only, same as the attacker box. Details below.
+
+Every topology includes a dedicated **defender box** in an isolated subnet, injected by the environment
+plugin exactly like the management/bastion host is today. **The defender RUNS on that box** (the harness
+ships + launches it there, like the attacker runs on Kali) — NOT on the harness host (beluga). The box:
 - reaches the victims (to act / install bespoke sensors with the host creds) and the per-experiment
   telemetry relay on the mgmt host (to consume telemetry);
 - is **hidden from the attacker** — isolated subnet, not in the attacker's topology
