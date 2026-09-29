@@ -105,6 +105,10 @@ class Experiment:
     environment_deploy_finished_at = _Field("environment", "deploy_finished_at")
     teardown_started_at = _Field("environment", "teardown_started_at")
     teardown_finished_at = _Field("environment", "teardown_finished_at")
+    # The environment system's OWN lifecycle signal (see environment/lifecycle.py): the plugin emits
+    # Deploying/Deployed/Configuring/Configured/TearingDown/TornDown/Failed and the arena records the
+    # latest here — distinct from the whole-experiment `status` above.
+    environment_status = _Field("environment", "lifecycle_status")
     # --- attacker ---
     attacker = _Field("attacker", "config")
     pid = _Field("attacker", "pid")
@@ -139,7 +143,7 @@ class Experiment:
                 "created_at": created_at, "updated_at": updated_at or created_at,
             },
             "environment": {
-                "spec": environment_spec, "deployed": None,
+                "spec": environment_spec, "deployed": None, "lifecycle_status": None,
                 "vcpus_reserved": None, "ram_mb_reserved": None,
                 "disk_gb_reserved": None, "vms_reserved": None,
                 "deploy_started_at": None, "deploy_finished_at": None,
@@ -158,6 +162,15 @@ class Experiment:
                 "config": traffic, "started_at": None, "finished_at": None,
             },
         }
+
+    @property
+    def environment(self):
+        """The environment PLUGIN for this experiment (the 4th selectable system), derived from
+        environment_spec. Stage 1a: environment_spec is still a bare name string → mhbench plugin;
+        Stage 1b makes it a selectable EnvironmentConfig. Derived (not stored) so the registry needs
+        no new persisted field and reload just re-derives it."""
+        from ..environment import build_environment
+        return build_environment(self.environment_spec)
 
     def flat(self) -> dict:
         """The old flat shape, for the REST API — keeps the PhDPT contract stable while state is grouped."""

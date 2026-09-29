@@ -15,15 +15,24 @@ from fastapi import FastAPI, HTTPException
 from .attacker import run_attacker
 from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerCommand
 from .defender import run_defender
-from .environment import DeployedEnvironment
-from .environment.capacity import CapacityTracker, count_vm_specs
-from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access
-from .environment.teardown import teardown_environment
-from .environment.collect import collect_environment
+from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal
+from .environment.capacity import CapacityTracker
+from .environment.deployer import attacker_env_spec, attacker_setup_access
 from .environment.rotate import rotate_environment
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
+
+
+def _env_lc(experiment) -> EnvironmentLifecycle:
+    """A fresh EnvironmentLifecycle whose on_emit persists the environment system's signal onto the
+    experiment (environment_status) and logs it — so DEPLOYING/DEPLOYED/CONFIGURING/CONFIGURED/
+    TEARING_DOWN/TORN_DOWN/FAILED are visible per phase, distinct from the whole-experiment status."""
+    def _on_emit(signal: EnvironmentSignal, error) -> None:
+        experiment.environment_status = signal.value
+        log(experiment.experiment_name,
+            f"environment: {signal.value}" + (f" ({error})" if error else ""))
+    return EnvironmentLifecycle(on_emit=_on_emit)
 
 logger = logging.getLogger(__name__)
 
@@ -531,7 +540,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # The lock is released before teardown so a wedged collect can't hold a slot past its own cap.
     try:
         async with _collect_lock:
-            await collect_environment(experiment, cfg)
+            await experiment.environment.collect(experiment, cfg)
     except Exception:
         get_logger(experiment.experiment_name).exception("Host-log collection failed for '%s'", experiment.experiment_name)
 
@@ -573,7 +582,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # instead of queueing behind provisions — deletion is far lighter than creation (no image pull/expand),
     # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
     try:
-        await teardown_environment(experiment, cfg)
+        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment))
         # This is what stops the experiment holding VMs in the CapacityTracker (see
         # capacity._holds_vms). On failure it stays unset on purpose: the VMs may well
         # still be on the cluster, so the experiment keeps holding its count until a
@@ -721,7 +730,7 @@ async def _cancel_and_remove(name: str) -> None:
         except Exception:
             logger.exception("Defender teardown failed for '%s'", name)
     try:
-        await teardown_environment(experiment, cfg)  # deletes all VMs/networks by project name
+        await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment))  # deletes all VMs/networks by project name
     except Exception:
         logger.exception("Failed to tear down environment for '%s'", name)
     # This path never sets teardown_finished_at, so it is the registry removal that stops
@@ -845,9 +854,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     mgmt_ip = None
     deploy_slot_held = False
     try:
-        topology_path = cfg.mhbench_dir / "environments" / f"{experiment.environment_spec}.json"
-        vm_specs = await count_vm_specs(topology_path, cfg.mhbench_dir,
-                                        flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
+        vm_specs = await experiment.environment.capacity(experiment, cfg)
         # Admission counts only the topology VMs (incl. the management host). VMs a plugin may
         # deploy later (e.g. defender decoys) are not pre-reserved.
 
@@ -880,7 +887,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
             # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
             try:
-                deployed, mgmt_ip = await provision_environment(experiment, None, cfg)
+                deployed, mgmt_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment))
                 experiment.deployed_environment = deployed
                 await registry.update(experiment)
             except NotImplementedError:
@@ -897,7 +904,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             deploy_slot_held = False
             experiment.status = ExperimentStatus.CONFIGURING
             await registry.update(experiment)
-            await configure_environment(experiment, mgmt_ip, None, cfg)
+            await experiment.environment.configure(experiment, mgmt_ip, None, cfg, lc=_env_lc(experiment))
             experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)

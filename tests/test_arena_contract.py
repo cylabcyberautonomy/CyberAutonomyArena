@@ -277,6 +277,57 @@ def test_capacity_counts_only_topology_vms():
         "reserve() must not carry extra_vms/extra_vcpus"
 
 
+def test_environment_is_a_plugin():
+    """Environment is now the 4th selectable plugin type, with mhbench registered."""
+    import experiment_manager.environment.plugins  # noqa: F401 — auto-discovery
+    from experiment_manager.environment.plugins.base import EnvironmentPlugin
+    assert "mhbench" in EnvironmentPlugin._registry
+    assert EnvironmentPlugin._registry["mhbench"].ui_schema()["config_type"] == "mhbench"
+
+
+def test_build_environment_coerces_bare_string():
+    """A bare environment-name string coerces to the mhbench plugin (back-compat), a dict validates
+    by type, and an unknown type raises."""
+    from experiment_manager.environment import build_environment
+    env = build_environment(ENV_NAME)
+    assert env.type == "mhbench" and env.spec == ENV_NAME
+    assert build_environment({"type": "mhbench", "spec": "x"}).spec == "x"
+    with pytest.raises(ValueError):
+        build_environment({"type": "nope"})
+
+
+def test_environment_plugin_lifecycle_and_signals():
+    """The plugin exposes the arena-driven lifecycle, and provision/configure/teardown accept the
+    lifecycle channel; EnvironmentLifecycle records the emitted signals."""
+    import inspect
+    from experiment_manager.environment.plugins.base import EnvironmentPlugin
+    from experiment_manager.environment import EnvironmentLifecycle, EnvironmentSignal
+    env = EnvironmentPlugin._registry["mhbench"].model_validate({"type": "mhbench", "spec": ENV_NAME})
+    for m in ("capacity", "provision", "configure", "collect", "teardown"):
+        assert callable(getattr(env, m)), f"environment plugin missing {m}()"
+    for m in ("provision", "configure", "teardown"):
+        assert "lc" in inspect.signature(getattr(env, m)).parameters, f"{m}() must accept lc"
+    # signal channel records status + history
+    seen = []
+    lc = EnvironmentLifecycle(on_emit=lambda sig, err: seen.append(sig))
+    lc.emit(EnvironmentSignal.DEPLOYING)
+    lc.emit(EnvironmentSignal.DEPLOYED)
+    assert lc.status == EnvironmentSignal.DEPLOYED
+    assert lc.history == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
+    assert seen == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
+    assert {"Deploying", "Deployed", "Configuring", "Configured", "TearingDown", "TornDown", "Failed"} \
+        == {s.value for s in EnvironmentSignal}
+
+
+def test_experiment_environment_property_returns_plugin():
+    """experiment.environment derives the plugin from environment_spec (Stage 1a: bare name → mhbench)."""
+    from experiment_manager.experiment.models import Experiment, ExperimentStatus
+    exp = Experiment("ci_env_prop", ExperimentStatus.QUEUED, ENV_NAME)
+    assert exp.environment.type == "mhbench"
+    assert exp.environment.spec == ENV_NAME
+    assert exp.environment_status is None  # its own lifecycle signal, distinct from status
+
+
 def test_environment_module_exposes_lifecycle():
     """The environment is not a plugin yet, but the arena drives it through these module
     functions. The refactor should turn these into a plugin with the same lifecycle."""
