@@ -38,14 +38,23 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
   agent's LLM). Kept SEPARATE from the agent-facing spec (do not merge).
 
 ### Boxes (both agents run on an env-provided box)
-- **[ENFORCED]** `defender_box()` → a `DefenderBox` in an isolated ("super-secret") subnet, hidden
-  from the attacker; the defender RUNS there. Also carried in `defender_spec().box` and reachable via
-  a `defender_setup_access()` entry of the same name.
+- **[VALIDATED 2026-09-29]** `defender_box()` → a `DefenderBox` in an isolated subnet, hidden from the
+  attacker; the defender RUNS there. Also carried in `defender_spec().box` and reachable via a
+  `defender_setup_access()` entry of the same name. MHBench now declares a `defender_subnet`
+  (192.168.250.0/24) + bare `defender` box in every instrumented topology; the box is classified by
+  subnet (out of the victim inventory) and the harness reaches it via the bastion. The environment
+  provisions ONLY the bare box + its network — the **defender** stands up its own ES / detection
+  pipeline on it (defender owns its detection instrumentation; the env never runs ES there). Live-
+  validated: chain_2hosts end-to-end + equifax_small multi-tier.
 - **[ENFORCED]** The **attacker box** always exists (never nonexistent) and is SERVED to the attacker
   via `attacker_spec().footholds` (non-empty). Location is flexible.
+- **[VALIDATED 2026-09-29]** Isolation (MHBench `network_deployer`, mirrors the attacker expansion):
+  every victim subnet auto-accepts ingress FROM the defender box (defender reaches all tiers, no per-
+  topology authoring); the box accepts only mgmt + its own subnet, so attacker AND victims cannot
+  initiate to it (no ES injection) and attacker↔defender is severed both ways.
 - **[DESIGN / DEFERRED]** Both boxes get internet **EGRESS (outbound-only)** — for the LLM API — and
   **NO ingress** from the internet. The environment provisions the egress path (NAT/SNAT). Attacker→
-  defender-box is blocked.
+  defender-box is blocked. (Defender-box egress live-validated; attacker-box egress is default-on.)
 - **[PINNED]** Scoping the LLM egress with a forward proxy + domain allowlist (IP rules can't pin
   CDN-hosted APIs) is **deferred** (user, 2026-09-29): plain egress via the router SNAT suffices for
   now. The interface makes no room for a proxy yet; revisit if egress needs to be locked down.
