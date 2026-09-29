@@ -3,11 +3,13 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..attacker import AttackerConfig
 from ..defender import DefenderConfig
 from ..traffic import TrafficConfig
+from ..environment import build_environment
+from ..environment.environment import EnvironmentConfig
 
 
 class ExperimentStatus(str, Enum):
@@ -26,7 +28,9 @@ class ExperimentStatus(str, Enum):
 
 class ExperimentSpecs(BaseModel):
     experiment_name: str
-    environment: str
+    # environment (the 4th selectable system): {environment_plugin: mhbench, environment_spec: ...},
+    # or a bare env-name string (→ mhbench). Explicit plugin+spec shape (environment only).
+    environment: EnvironmentConfig
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
     traffic: Optional[TrafficConfig] = None  # third plugin class: benign background traffic on victim hosts
@@ -36,6 +40,13 @@ class ExperimentSpecs(BaseModel):
     teardown: bool = True  # set False to leave the env + C2 standing (success AND failure) to run an exploit by hand
     overwrite: bool = False  # if an output folder with this name already exists: false (default) → reject the request (409); true → replace it
     priority: int = 0  # scheduling priority: higher = admitted from the queue sooner; 0 (default) = normal "whoever fits". Ties break FIFO.
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def _coerce_environment(cls, v):
+        # Accept the explicit {environment_plugin, environment_spec} shape, a bare env-name string, or
+        # the legacy {type, spec} dict — all coerce to EnvironmentConfig.
+        return EnvironmentConfig.coerce(v)
 
 
 def _json_default(o):
@@ -50,7 +61,7 @@ def _json_default(o):
 # (status + all timestamps + reservations/pid/c2c/deployed) and goes to experiment_result.json.
 _CONFIG_KEYS = {
     "experiment": ("name", "trial", "teardown", "priority"),
-    "environment": ("spec",),
+    "environment": ("config", "spec"),
     "attacker": ("config",),
     "defender": ("config",),
     "traffic": ("config",),
@@ -91,7 +102,8 @@ class Experiment:
     created_at = _Field("experiment", "created_at")
     updated_at = _Field("experiment", "updated_at")
     # --- environment ---
-    environment_spec = _Field("environment", "spec")
+    environment_config = _Field("environment", "config")  # EnvironmentConfig (environment_plugin + environment_spec)
+    environment_spec = _Field("environment", "spec")  # resolved env name, for the internal readers
     deployed_environment = _Field("environment", "deployed")
     vcpus_reserved = _Field("environment", "vcpus_reserved")
     ram_mb_reserved = _Field("environment", "ram_mb_reserved")
@@ -134,9 +146,12 @@ class Experiment:
     traffic_started_at = _Field("traffic", "started_at")
     traffic_finished_at = _Field("traffic", "finished_at")
 
-    def __init__(self, experiment_name, status, environment_spec, attacker=None, defender=None,
+    def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
                  traffic=None, trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
+        # `environment` is an EnvironmentConfig, a dict, or a bare env-name string; coerce to the config
+        # and derive the resolved name for the many internal readers of environment_spec.
+        env_config = EnvironmentConfig.coerce(environment)
         self.metadata = {
             "experiment": {
                 "name": experiment_name, "trial": trial, "status": status, "error": None,
@@ -144,7 +159,7 @@ class Experiment:
                 "created_at": created_at, "updated_at": updated_at or created_at,
             },
             "environment": {
-                "spec": environment_spec, "deployed": None,
+                "config": env_config, "spec": env_config.resolved_name, "deployed": None,
                 "lifecycle_status": None, "last_command": None,
                 "vcpus_reserved": None, "ram_mb_reserved": None,
                 "disk_gb_reserved": None, "vms_reserved": None,
@@ -167,12 +182,10 @@ class Experiment:
 
     @property
     def environment(self):
-        """The environment PLUGIN for this experiment (the 4th selectable system), derived from
-        environment_spec. Stage 1a: environment_spec is still a bare name string → mhbench plugin;
-        Stage 1b makes it a selectable EnvironmentConfig. Derived (not stored) so the registry needs
-        no new persisted field and reload just re-derives it."""
-        from ..environment import build_environment
-        return build_environment(self.environment_spec)
+        """The executable environment PLUGIN (built from the stored EnvironmentConfig) that the arena
+        drives — provision/configure/collect/teardown/capacity. Stored state is the config
+        (environment_plugin + environment_spec); the plugin is derived on access."""
+        return build_environment(self.environment_config)
 
     def flat(self) -> dict:
         """The old flat shape, for the REST API — keeps the PhDPT contract stable while state is grouped."""

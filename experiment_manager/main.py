@@ -1265,7 +1265,7 @@ async def add_experiment(data: ExperimentSpecs):
     experiment = Experiment(
         experiment_name=data.experiment_name,
         status=ExperimentStatus.QUEUED,
-        environment_spec=data.environment,
+        environment=data.environment,  # EnvironmentConfig-validated plugin (or bare env-name string)
         attacker=data.attacker,
         defender=data.defender,
         traffic=data.traffic,

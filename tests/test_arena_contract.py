@@ -104,12 +104,33 @@ def test_named_combo_experimentspecs_validates():
         defender=DEFENDER,
         traffic=TRAFFIC,
     )
-    assert specs.environment == ENV_NAME
+    # environment is a validated EnvironmentConfig (bare string → mhbench).
+    assert specs.environment.environment_plugin == "mhbench"
+    assert specs.environment.environment_spec == ENV_NAME
     dumped = specs.model_dump()
     # the sub-configs survive a dump/reload cycle (what the registry persists + replays)
+    assert dumped["environment"] == {"environment_plugin": "mhbench", "environment_spec": ENV_NAME}
     assert dumped["attacker"]["strategy"] == "GraphSearch"
     assert dumped["defender"]["strategy"] == "FalcoLLM"
     assert dumped["traffic"]["persona"] == "office_worker"
+
+
+def test_environmentconfig_selectable_and_backcompat():
+    """ExperimentSpecs.environment is a selectable config: accepts the explicit
+    {environment_plugin, environment_spec} shape, a bare env-name string, and the legacy {type, spec}
+    dict (all back-compat); each validates to the same EnvironmentConfig."""
+    explicit = ExperimentSpecs(experiment_name="ci_env_explicit",
+                               environment={"environment_plugin": "mhbench", "environment_spec": ENV_NAME},
+                               attacker=ATTACKER)
+    assert explicit.environment.environment_plugin == "mhbench"
+    assert explicit.environment.environment_spec == ENV_NAME
+    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_NAME, attacker=ATTACKER)
+    legacy = ExperimentSpecs(experiment_name="ci_env_legacy",
+                             environment={"type": "mhbench", "spec": ENV_NAME}, attacker=ATTACKER)
+    assert (explicit.model_dump()["environment"]
+            == bare.model_dump()["environment"]
+            == legacy.model_dump()["environment"]
+            == {"environment_plugin": "mhbench", "environment_spec": ENV_NAME})
 
 
 def test_experimentspecs_without_traffic_still_valid():
@@ -301,8 +322,8 @@ def test_environment_plugin_lifecycle_and_signals():
     lifecycle channel; EnvironmentLifecycle records the emitted signals."""
     import inspect
     from experiment_manager.environment.plugins.base import EnvironmentPlugin
-    from experiment_manager.environment import EnvironmentLifecycle, EnvironmentSignal
-    env = EnvironmentPlugin._registry["mhbench"].model_validate({"type": "mhbench", "spec": ENV_NAME})
+    from experiment_manager.environment import EnvironmentLifecycle, EnvironmentSignal, build_environment
+    env = build_environment(ENV_NAME)  # → MHBenchEnvironment
     for m in ("capacity", "provision", "configure", "collect", "teardown"):
         assert callable(getattr(env, m)), f"environment plugin missing {m}()"
     for m in ("provision", "configure", "teardown"):

@@ -1,8 +1,8 @@
 """MHBench environment plugin — a wrapper making MHBench compatible with the harness.
 
-Stage 1a: delegates to the existing (live-validated) environment functions, so behavior is
-identical. Later stages move the bodies in, emit the agent-facing DefenderEnvSpec / AttackerEnvSpec
-+ the SetupAccess list, provision the defender box, and stand up the per-experiment telemetry broker.
+The environment is identified by name (`environment_spec`), loaded from environments/<name>.json.
+Stage 1a delegation: lifecycle methods call the existing (live-validated) environment functions, which
+key off experiment.environment_spec (the name). Behavior is identical.
 """
 from __future__ import annotations
 
@@ -19,10 +19,15 @@ if TYPE_CHECKING:
 
 
 class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
-    """Deploys an MHBench topology by name (`spec`), via the MHBench CLI."""
+    """Deploys an MHBench topology by name (environments/<environment_spec>.json)."""
 
     type: Literal["mhbench"] = "mhbench"
-    spec: str  # MHBench environment name, e.g. "equifax_small_instrumented"
+    environment_spec: str  # env name, e.g. "equifax_small_instrumented"
+
+    @property
+    def spec(self) -> str:
+        """The env name the deployer keys off (environments/<name>.json)."""
+        return self.environment_spec
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -31,7 +36,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             "label": "MHBench",
             "cartesian_product": False,
             "fields": [
-                {"field_type": "text", "label": "Environment spec", "key": "spec"},
+                {"field_type": "text", "label": "Environment spec (name)", "key": "environment_spec"},
             ],
         }
 
