@@ -79,8 +79,30 @@ reach it), so hiding the IP in the spec was never the control; ingress isolation
 - Scope routing credentials: a jump credential in `ssh_common_args` forward-only
   (`restrict,command="…"`), the box key (`AttackerFoothold.ssh_key`) valid only for `user@host`.
 
-State this trust model and the required items explicitly in the environment plugin interface when
-the environment becomes a plugin.
+**Required: per-system scoped setup credentials (no god-key).** Today MHBench injects ONE keypair
+(`lakshmi-mhbench` / `~/.ssh/id_ed25519`) as root on every host — bastion, victims, Kali. That single
+key is the whole reason spec leakage is dangerous: if it reached the attacker LLM, the model could
+`ssh -i key root@<victim>` east-west and win without exploiting anything (bastion isolation does NOT
+cover east-west). The environment MUST instead issue **separate setup credentials per system**, each
+scoped to only that system's boxes:
+- **Attacker credential** — authorizes ONLY the attacker's foothold box(es). Never victims, the
+  defender box, the bastion, or the broker. (So even leaked into the attacker's view it grants nothing
+  beyond the box it already controls — the critical one.)
+- **Defender credential** — authorizes the defender box + the victims it is permitted to act on
+  (sensors / host-level responses). Reaching victims here is legitimate; it must not reach the attacker
+  box or other management infra.
+- **Environment/management credential** — the broad provisioning key; stays entirely harness-side and
+  is NEVER placed in any spec (agent-safe or harness-only).
+
+Invariant (stronger than "3 keys"): **no credential that can appear in a system's `SetupAccess` may
+grant that system access it could not legitimately earn by playing the game** — concretely, the
+attacker's key opens its own box and nothing else. Keypair injection must be per-system (attacker box
+gets the attacker pubkey; victims get env + defender pubkeys), not one keypair everywhere. This is what
+lets the harness-only `SetupAccess` carry a key safely even though the split already keeps it out of the
+LLM-facing `build_config`.
+
+State this trust model and the required items (incl. per-system scoped credentials) explicitly in the
+environment plugin interface when the environment becomes a plugin.
 
 ## Regression guard
 
