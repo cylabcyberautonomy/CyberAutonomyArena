@@ -15,18 +15,18 @@ by the environment plugin exactly like the management/bastion host is today. **T
 that box** (the harness ships + launches it there, like the attacker runs on Kali) — NOT on the
 harness host (beluga). The box:
 - reaches the victims (to act / install bespoke sensors with the host creds) and the per-experiment
-  broker (to consume telemetry);
+  telemetry relay on the mgmt host (to consume telemetry);
 - is **hidden from the attacker** — isolated subnet, not in the attacker's topology
   (attacker → defender box is blocked);
 - needs **egress to the LLM API** for LLM defenders (OpenRouter/Anthropic) while staying unreachable
-  from the attacker. So: attacker→box blocked; box→{victims, broker, LLM API} allowed. **Ownership
+  from the attacker. So: attacker→box blocked; box→{victims, relay, LLM API} allowed. **Ownership
   split**: the *environment* provisions the egress PATH — root on the box can't open a cloud-enforced
   route or punch a security group. The *defender* (root) does box-side setup (SDK, DNS, `HTTP_PROXY`).
   The API key is shipped to the box by the harness, not conjured by root. NAT egress is outbound-only,
   so internet egress never makes the box reachable from the attacker.
   - **Scoping egress to *just* the LLM API is done with a forward proxy, not IP rules.** LLM APIs live
     behind shared, rotating CDN IPs, so a cloud IP/CIDR allowlist can't isolate them (only fixed-IP
-    dests — broker, victims — allowlist cleanly by IP). Instead the environment runs a small
+    dests — relay, victims — allowlist cleanly by IP). Instead the environment runs a small
     **egress forward proxy** (Squid/Envoy, or GCP Secure Web Proxy) on the management plane with a
     **domain allowlist** (`api.anthropic.com`/`openrouter.ai`); cloud firewall lets the box reach only
     the proxy (box→internet denied). Root on the box can't bypass it (no route out except the proxy,
@@ -39,87 +39,64 @@ real control is the environment **isolating the management plane**, which the en
 which carries into the formal interface. `AttackerEnvSpec`/`DefenderEnvSpec` are consumed by the
 **trusted attacker/defender plugins, never the adversary**, so their contents are not a disclosure risk;
 the isolation is. Duties:
-- firewall the bastion / defender box / broker **off from the victims and the foothold**, except the
-  specific allowed paths (victims→broker forward-only; harness→box jump; box→victims for defender
+- firewall the bastion / defender box / relay **off from the victims and the foothold**, except the
+  specific allowed paths (victims→relay forward-only; harness→box jump; box→victims for defender
   actions);
 - **forward-only jump creds** (the bastion key jumps but is not reusable laterally);
 - **box-scoped keys, no global key left in-env** — including the LLM key on the defender box
   (scoped/rotated per run, not a reusable global cred);
 - the **scoped egress proxy** above for the defender box's LLM access.
 `DefenderEnvSpec` serves the box as the defender's home base (address + access creds + its reachability
-to victims/broker/ground-truth). For MHBench the wrapper deploys this extra box alongside the mgmt host.
+to victims/relay/ground-truth). For MHBench the wrapper deploys this extra box alongside the mgmt host.
 
-## Instrumentation ownership (decided): subscriber hybrid
+## Instrumentation ownership (decided): relay hybrid
 
 Per-run sensor install on every host is a large time cost that tests nothing about the defense, so
-the model is a **subscriber hybrid** — fairer AND faster than pure defender-installs:
+the model is a **relay hybrid** — fairer AND faster than pure defender-installs:
 
-- **Common telemetry streams to a broker (the NATS bus), NOT an ES database.** The
-  telemetry-instrumented images bake their sensors to ship to ONE fixed address — the broker — tagged
-  with the experiment id as the subject (e.g. `telem.<exp>.falco.<host>`). Baked once, never
-  re-pointed per run. **The broker is a per-experiment NATS box on the environment's
-  management/bastion host** — stood up by the environment plugin at provision/configure and torn down
-  with the env (no persistent shared infra, no ES shard cap, strong isolation: a whole separate broker
-  per run; core NATS stores nothing). Placement wins on **both reachability and latency**, because the defender now runs on an
-  environment-provided box in the *same* cloud (see above), so the broker is close to its actual
-  consumer:
-  - **Reachability**: the management host is on the victim-reachable management network on every backend
-    (it already carries ansible + the GCP `gcp_relay_ip` socat relay), so victims can forward to it on
-    GCP too, where cloud victims cannot reach on-prem beluga through their egress firewall.
-  - **Latency**: the defender box and the broker sit in the same cloud/region, so the telemetry hop to
-    the consumer is local (this is why the earlier "co-location is useless" reasoning — which assumed a
-    beluga defender — no longer holds).
-  The bastion/mgmt host is hidden from the attack surface (not in the attacker's topology); victims only
-  forward to it, and the defender box consumes via the arena's adapters.
-  **The defender never touches NATS.** It declares a telemetry requirement as
-  `(source_channel, dest, protocol)` — which common stream it wants (`source_channel`, e.g.
-  `telem.<exp>.falco.*`), where to deliver it (`dest`, its ES/HTTP/host:port), and how (`protocol`:
-  NATS push / HTTP POST / syslog / ES-bulk / …). **The ARENA parses that tuple and programs the
-  broker** to subscribe to `source_channel` and deliver to `dest` via `protocol` (using the arena's
-  protocol adapters). The defender gets no broker address/creds and runs no subscriber — it only needs
-  its `dest` reachable. This is the "TELEMETRY REQS (source channel, dest, protocol)" output on the
-  defender box in the design diagram. Redirection happens at the broker; nothing on the victims is
-  ever rewritten. Near-zero setup, identical common data for every defender (fair comparison).
-  **Last hop = arena protocol adapters.** NATS carries opaque payloads **byte-for-byte** (it never
-  parses/reshapes), and the arena's per-`protocol` adapters (NATS push / HTTP POST / syslog / ES-bulk)
-  forward those bytes to `dest` unchanged — so the arena satisfies "deliver, never change." An adapter
-  can be a tiny script or a small Vector instance; it is a *delivery* detail, never on the ingest path.
-
-  **Byte-for-byte (CHOSEN): a passthrough publisher, not falcosidekick.** NATS imposes NO format — a
-  message is `subject + headers + opaque payload`, so the only place bytes can change is the host-side
-  publisher (Falco has no native NATS output, so something must publish; true of any broker). To
-  guarantee raw byte-for-byte:
-  1. Falco emits its own raw output: `json_output: true` + `file_output` (`/var/log/falco/events.json`)
-     or `stdout` — that JSON line IS the canonical raw record.
-  2. Keep falcosidekick OFF the NATS path — it is the reshaper (parses + re-envelopes).
-  3. Bake a tiny **passthrough publisher** that forwards each raw line verbatim, never deserializing:
-     a ~20-line tail-and-publish NATS-client agent (`tail -F events.json` → `nats.publish(subject,
-     line_bytes)`, survives restarts/rotation), OR Falco `program_output` (keep_alive) piping each line
-     to a forwarder. NATS → arena adapters → defender `dest` are all opaque-byte passthrough.
-  4. sysflow: same — the passthrough agent forwards whatever `sf-processor` writes, verbatim.
-  Cost of byte-for-byte = exactly one small baked component (the passthrough agent) instead of reusing
-  falcosidekick. The manifest declares the true stream form (`falco: raw Falco JSON lines,
-  byte-for-byte`). **Fidelity check**: hash each source line vs the payload delivered at `dest` (add to
-  the canary / contract test) to *prove* nothing reshaped it.
-
-  **Streaming-only sensors (no file output).** The reshape risk is never the transport — it's whether
-  the RECEIVER parses. So the fixed bake target is really a set of **dumb protocol receiver shims on the
-  per-experiment broker box**, one per transport, each capturing the raw payload and republishing it to
-  NATS unchanged:
-  - HTTP-push (incl. Falco's own `http_output`) → a tiny HTTP server that reads the **raw request body**
-    and publishes those bytes (this is falcosidekick without the reshape — so even Falco can skip files:
-    `http_output → dumb HTTP shim → NATS`).
-  - syslog → a listener republishing each raw message; TCP/gRPC/Kafka → the matching dumb receiver
-    forwarding each frame/message verbatim.
-  Caveats to disclose in the manifest: **framing** (one event → one NATS message: per POST body / per
-  syslog datagram / per gRPC frame; batched senders yield batch payloads); **gRPC/protobuf** byte-for-byte
-  = the serialized message bytes (consumer needs the `.proto`); **TLS** push → the shim terminates TLS and
-  republishes the decrypted payload. **Exception — server-mediated agents (Velociraptor, Wazuh):** their
-  telemetry is the *server's*, not a tappable raw per-event stream, so they use the **bespoke path** (the
-  defender runs the tool's own server on its box), not the NATS common stream.
-  **This root-fixes the baked-falcosidekick-wrong-ES bug**: the bake target is constant (the broker),
-  so it can never point at the wrong place; per-defender routing is subjects/subscriptions/forwards.
-  (See the Arena Handshake design for the bus.)
+- **Common telemetry ships to ONE fixed bake target — a transparent forwarding RELAY on the mgmt host
+  — which redirects to the defender's endpoint. (Chosen over a NATS bus: simpler, no shims.)**
+  - **One fixed bake target.** The management host's internal IP is **constant across experiments**
+    (`management.host_ip = 10.0.1.10`), so the telemetry-instrumented images bake their sensors to
+    `10.0.1.10:<port>` once — never re-pointed per run. (This is exactly the existing GCP
+    `gcp_relay_ip` socat relay, generalized to every backend.)
+  - **The relay redirects, with no shim.** A plain TCP/HTTP forwarder (socat / HAProxy / nginx) on the
+    per-experiment mgmt host receives the sensor's *native* stream and forwards the bytes to the
+    defender's endpoint. Because it forwards the sensor's own protocol unchanged, it is byte-for-byte
+    with **no publisher and no translation** — as long as the defender consumes the sensors' native
+    protocol (it can). No NATS ⇒ no per-sensor publisher/shim (Falco/sf-processor have no NATS output,
+    which is the only reason a bus needs shims at all).
+  - **Per-experiment + hidden.** The relay runs on that experiment's own mgmt host (separate per
+    experiment ⇒ no cross-contamination), is on the victim-reachable management network on every backend
+    (works on GCP, where victims can't reach on-prem beluga through egress), and is hidden from the
+    attacker (not in the attacker's topology; victims only forward to it). Torn down with the env.
+  - **Driven by `(source_channel, dest, protocol)`** — the defender's "TELEMETRY REQS" output. The
+    defender never touches the relay: it declares which sensor stream it wants (`source_channel` = a
+    relay port), where (`dest`), and how (`protocol`); the ARENA writes the relay's per-experiment
+    forward rules. The defender only needs its `dest` reachable.
+  - **Multi-stream routing AND fan-out fall out of this.** The arena collects ALL consumers' tuples
+    (defender, and later a live dashboard/scorer/shadow defender) and groups them by `source_channel`,
+    so each source maps to a *list* of `(dest, protocol)`:
+    - different streams → different endpoints = different `source_channel`s with different dests (trivial;
+      even dumb socat, one forwarder per stream);
+    - same stream → multiple endpoints = one `source_channel` with several dests = **fan-out**, which a
+      1:1 socat can't do. Use a **fan-out-capable relay — Vector or Fluent Bit** (one source → N sinks,
+      config-driven; receives sensors' native protocols so still NO per-sensor publisher; bytes codec
+      keeps it byte-for-byte), or a ~30-line custom fan-out forwarder. This is Vector *as the relay
+      itself*, not as a NATS publisher.
+  - **This root-fixes the baked-falcosidekick-wrong-ES bug**: the bake target is a constant (the mgmt
+    relay), so it can never point at the wrong place; per-defender routing lives in the relay config.
+  - **Byte-for-byte:** keep falcosidekick (the reshaper) off the path — point Falco's own
+    `http_output`/`file_output` (raw JSON) at the relay, which forwards it verbatim. **Fidelity check**:
+    hash each source record vs what's delivered at `dest` (add to the canary/contract test).
+  - **Exception — server-mediated agents (Velociraptor, Wazuh):** their telemetry is the *server's*, not
+    a tappable raw stream, so they use the **bespoke path** (the defender runs the tool's own server on
+    its box), not the common relay.
+  - **NATS is a deferred, optional upgrade** — even multi-consumer fan-out is handled by the fan-out
+    relay above, so NATS earns its place ONLY for **dynamic pub/sub** (a consumer subscribes/unsubscribes
+    at runtime without the arena rewriting the relay config) or **replay/persistence**. In the arena the
+    arena controls all consumers, so it just programs the fan-out rules — no bus needed. Adopting NATS
+    later would reintroduce publishers/shims (sensors can't speak it) — the cost the relay avoids.
 - **The defender owns the CHOICE and owns bespoke installs.** In `setup()` it checks for what it
   needs; if the common telemetry is missing it logs `"couldn't find telemetry X — installing my own"`
   and installs it (the slow path, paid only when needed), using the host credentials in
@@ -127,17 +104,17 @@ the model is a **subscriber hybrid** — fairer AND faster than pure defender-in
 - **The fallback is measured, not hidden**: record used-common / had-to-install / install-seconds, so
   setup cost becomes a reported *deployability* axis instead of a silent per-run tax. (This gives two
   clean axes: efficacy on the shared common telemetry, and deployability/adaptation cost.)
-- **The bake target is the broker, fixed.** Instrumented-style pre-provisioning is KEPT as the fast
-  path; the images ship to the broker and the broker routes to each defender — so nothing is re-pointed
+- **The bake target is the mgmt relay, fixed.** Instrumented-style pre-provisioning is KEPT as the fast
+  path; the images ship to the relay and the relay routes to each defender — so nothing is re-pointed
   per defender, and the wrong-ES bug is designed out.
 - **Ground-truth logging (auditd/syslog/bash-history) stays environment-owned** regardless — the
   *scorer* uses it, so it must be independent of the defender (no tampering with its own evidence).
 
 The canary defender already built is the availability probe for this: its telemetry/canary_event
 checks are exactly "is the common telemetry present and flowing?" — a real defender's `setup()` runs
-the same check and branches to subscribe-vs-install.
+the same check and branches to consume-vs-install.
 
-`DefenderEnvSpec` therefore advertises: the available common telemetry + subscribe endpoint + creds,
+`DefenderEnvSpec` therefore advertises: the available common telemetry (source channels) + creds,
 PLUS host credentials so the defender can install bespoke sensors when it chooses.
 
 **Log rotation is an MHBench wrapper detail, not a lifecycle stage.** The `mhbench` plugin's
@@ -209,7 +186,7 @@ The environment mints, per experiment, specs separated by AUDIENCE — enforceab
   ProxyCommand in `ssh_common_args`. `name` is the inventory alias / multi-target key.
 - consumed symmetrically by plugin setup code: **attacker preps its OWN foothold** (SSH Kali → run its
   vendored ansible; the env does NOT run any attacker play — see below), defender setup (SSH the defender
-  box → launch the defender there; reach victims → install bespoke sensors; wire the broker adapter).
+  box → launch the defender there; reach victims → install bespoke sensors; set the relay's forward rule).
   Renames + generalizes the attacker branch's `FootholdAccess` to both sides (final shared name agreed
   with the attacker-interface session: `SetupAccess`).
 
@@ -258,10 +235,20 @@ Defenders/canary/attacker read the new specs instead of `environment.topology_sp
 - **Stage 1** — `EnvironmentPlugin` base + `mhbench` plugin wrapping the existing code; keep
   `DeployedEnvironment` as the defender handoff (mhbench plugin produces it) so defenders are
   untouched; `EnvironmentConfig` accepts a bare string. Behavior identical; contract test extended.
-- **Stage 2** — adopt the agent-facing specs + `SetupAccess` (after the attacker session's rename is
-  pushed), neutralize the defender handoff (`hosts: {name, ip, role}`, not a raw topology path), move
-  capacity + decoy estimate behind the plugins, add the env status stream, and remove
-  `run_attacker_setup_play` / `--attacker-play` from `deployer.py`.
+- **Stage 2**, roughly in order:
+  1. The env plugin PRODUCES the agent-facing specs for BOTH sides — `attacker_spec()` (AttackerEnvSpec)
+     and `defender_spec()` (DefenderEnvSpec) — plus `setup_access()` (the shared `SetupAccess` list, per
+     approved host). Attacker/defender read these FROM the plugin instead of importing `deployer`
+     helpers (`attacker_env_spec`/`attacker_setup_access`) or calling `_mhbench_ssh_key`. (The types
+     already exist — the attacker session built them; this makes the environment the producer.)
+  2. The always-provisioned **defender box** (isolated subnet) + management-plane isolation + scoped
+     egress proxy.
+  3. **Telemetry = a transparent fan-out relay on the mgmt host** (one fixed bake target that
+     redirects), driven by `(source_channel, dest, protocol)` — NOT a NATS bus (see the instrumentation
+     section). Point Falco's raw output at the relay; keep falcosidekick off the path.
+  4. Neutralize the defender handoff (`hosts: {name, ip, role}`, not a raw topology path); fold `rotate`
+     into `mhbench.configure`; remove `run_attacker_setup_play` / `--attacker-play` from `deployer.py`
+     (attacker owns prep); add anything still missing from the env status stream.
 
 ## Coordination (settled 2026-09-29)
 
