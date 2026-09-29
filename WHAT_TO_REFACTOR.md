@@ -51,6 +51,29 @@ and teardown, plus an output that produces the attacker's and the defender's spe
 MHBench coupling elsewhere exists because nothing gives the other systems a neutral
 description of the environment, so they read MHBench files directly.
 
+## Environment plugin responsibilities (write into the interface)
+
+The environment produces the attacker-facing `AttackerEnvSpec` and owns how the box is reached
+(`AttackerFoothold.ssh_common_args` — a ProxyCommand for a bastion/relay, an IAP tunnel, or empty
+for a directly-reachable box). Some routing carries reachability info (e.g. a bastion IP). That is
+**not** a secret the design relies on, so the environment MUST enforce, at the network/credential
+level, that the management plane cannot be used by the adversary:
+
+- **The management plane is unreachable from inside the environment.** Firewall the bastion/jump so
+  victims and the attacker foothold cannot open its SSH (or any management port); it accepts
+  management connections only from the harness. The adversary can discover the bastion by scanning
+  its own network regardless of what the spec says — hiding the IP is not a control; isolation is.
+- **Routing credentials are scoped and not usable for a shell.** A jump credential embedded in
+  `ssh_common_args` should be forward-only (`restrict,command="…"`); the box key
+  (`AttackerFoothold.ssh_key`) authenticates only to `user@host`. No management/global key is left
+  on any in-environment host.
+- **`AttackerEnvSpec` is for the trusted attacker *plugin* (setup code), not the adversary.** The
+  adversary under evaluation only ever gets the C2 + the landed foothold — never the spec. A plugin
+  is semi-trusted; the scoping above is the defense-in-depth for a malicious/buggy one.
+
+This is the environment's contract, not the attacker's — state it explicitly in the environment
+plugin interface when the environment becomes a plugin.
+
 ## Regression guard
 
 `tests/test_arena_contract.py` locks the cross-component contract in place so a refactor of one
