@@ -87,7 +87,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
@@ -217,6 +217,18 @@ def test_environment_produces_both_spec_and_access():
     from experiment_manager.environment import deployer
     assert callable(deployer.attacker_env_spec)
     assert callable(deployer.attacker_setup_access)
+
+
+def test_terminus_build_config_contract():
+    """Terminus-2 LLM shell attacker: build_config carries model/api routing + objective + the kali
+    box IP the runner drives; ui_schema is well-formed."""
+    atk = AttackerPlugin._registry["terminus_llm"].model_validate(
+        {"type": "terminus_llm", "model": "anthropic/claude-opus-4-1"})
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
+    assert built["model"] == "anthropic/claude-opus-4-1"
+    assert built["kali_ip"] == "192.168.202.100"
+    assert "objective" in built and "max_turns" in built
+    assert atk.ui_schema()["config_type"] == "terminus_llm"
 
 
 def test_attacker_graphsearch_build_config_contract():
