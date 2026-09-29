@@ -26,7 +26,6 @@ class PreparedAttacker:
 
 class AttackerPlugin(BaseModel):
     _registry: ClassVar[dict[str, type["AttackerPlugin"]]] = {}
-    setup_play: ClassVar[Optional[str]] = None  # kali runtime play the harness runs instead of the registry default; None = registry default
     requires_docker: ClassVar[bool] = False  # True if setup needs a local Docker daemon (e.g. a C2 container); gates an early preflight
 
     def __init_subclass__(cls, config_type: str = None, **kwargs):
@@ -75,11 +74,20 @@ class AttackerPlugin(BaseModel):
     async def stop_c2c(self, container_id: str) -> None:
         """Stop and remove the C2 server container."""
 
+    async def prepare_foothold(
+        self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str],
+        remote_url: Optional[str],
+    ) -> None:
+        """Attacker-owned prep of its own foothold box (default: nothing). The environment only
+        provides the box + access; the attacker does everything ON it here, over the bastion using
+        the AttackerEnvSpec credentials — NOT via MHBench. Runs after the C2 is up and before the
+        attacker channel/agent is awaited."""
+        return
+
     async def setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        """Attacker-specific setup on the ready (attacker-neutral) environment: bring up any C2, run the
-        attacker's setup_play on the kali host, and block until the attacker channel is ready. Transactional:
-        tears down its own partial C2 on failure."""
-        from ...environment.deployer import run_attacker_setup_play
+        """Attacker-specific setup on the ready (attacker-neutral) environment: bring up any C2, let
+        the attacker prep its own foothold, and block until the attacker channel is ready.
+        Transactional: tears down its own partial C2 on failure."""
         # kali_ip: the in-environment Kali VM's (internal) address, where the C2 runs when
         # c2_on_kali is set. deployed_environment.ip holds it; None for envs without one.
         kali_ip = experiment.deployed_environment.ip if experiment.deployed_environment else None
@@ -87,8 +95,7 @@ class AttackerPlugin(BaseModel):
         try:
             if local_url:
                 await self.wait_c2c_ready(local_url, experiment.experiment_name)
-            if self.setup_play:
-                await run_attacker_setup_play(experiment, mgmt_ip, self.setup_play, remote_url, cfg)
+            await self.prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
             if local_url:
                 await self.wait_c2c_agent(local_url, experiment.experiment_name)
         except Exception:

@@ -10,12 +10,38 @@ from typing import ClassVar, Literal, Optional
 
 from pydantic import field_validator
 
+import yaml
+
 from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
+from . import foothold
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
+
+
+def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
+    """The private key MHBench injected into the hosts — the attacker uses it to reach its own box
+    (Stage A: read from MHBench's config; Stage B: comes from the AttackerEnvSpec the env emits)."""
+    default = str(Path("~/.ssh/id_ed25519").expanduser())
+    try:
+        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
+        data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
+        backend = data.get("backend", "openstack")
+        block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
+        key = block.get("ssh_key_path") or data.get("ssh_key_path")
+        return os.path.expanduser(key) if key else default
+    except Exception:  # noqa: BLE001 — config drift must not break prep; fall back to the default key
+        return default
+
+
+def _attacker_env_spec(experiment, cfg: ExperimentManagerConfig, mgmt_ip) -> AttackerEnvSpec:
+    """Stage-A adapter: build the attacker's box-access spec from the deployed (MHBench) environment.
+    Stage B: the environment plugin emits this directly."""
+    return AttackerEnvSpec.from_deployed(
+        experiment.deployed_environment, bastion_ip=mgmt_ip, ssh_key=_mhbench_ssh_key(cfg),
+    )
 
 _LLM_GROUPS = [
     # LiteLLM deployments routed through the CMU AI gateway (single LITELLM_API_KEY).
@@ -136,7 +162,6 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
 class _IncalmoAttacker(AttackerPlugin):
     """Shared C2C lifecycle for all Incalmo-based attackers."""
 
-    setup_play: ClassVar[str] = "start_incalmo"
     requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
@@ -144,6 +169,12 @@ class _IncalmoAttacker(AttackerPlugin):
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
         _preflight_incalmo_host(cfg)
         return await super().setup(experiment, cfg, mgmt_ip)
+
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
+        # The attacker preps its OWN box: land the sandcat C2 agent over the bastion using the
+        # AttackerEnvSpec credentials — no MHBench cli, no environment.deployer.
+        env_spec = _attacker_env_spec(experiment, cfg, mgmt_ip)
+        await foothold.land_sandcat(env_spec, remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
@@ -182,13 +213,11 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             return value[0] if value else "GraphSearch"
         return value
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
-        prepared = await super().setup(experiment, cfg, mgmt_ip)
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
+        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
         # Only install msf for strategies that actually dispatch Metasploit ops.
         if self.strategy in _MSF_STRATEGIES:
-            from ....environment.deployer import run_attacker_setup_play
-            await run_attacker_setup_play(experiment, mgmt_ip, "install_metasploit", None, cfg)
-        return prepared
+            await foothold.install_metasploit(_attacker_env_spec(experiment, cfg, mgmt_ip), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -269,18 +298,13 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     execution_llm: str = ""
     abstraction: str = "incalmo"
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
-        prepared = await super().setup(experiment, cfg, mgmt_ip)
-        # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's
-        # Metasploit path (it's gated on context.llm_interface being set) -
-        # IncalmoStrategyAttacker never does, so it doesn't pay this install
-        # cost. msfrpcd has to run on the Kali host itself, not anywhere on the
-        # harness side - see MHBench's install_metasploit.yml and Incalmo's
-        # msf_rpc_client.py for why (msfrpcd binds 127.0.0.1, and this host has
-        # no floating IP for the harness to reach it directly).
-        from ....environment.deployer import run_attacker_setup_play
-        await run_attacker_setup_play(experiment, mgmt_ip, "install_metasploit", None, cfg)
-        return prepared
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
+        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
+        # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
+        # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
+        # run on the Kali box itself (it binds 127.0.0.1, and the box has no floating IP), which is
+        # exactly why the attacker installs it on its own foothold here.
+        await foothold.install_metasploit(_attacker_env_spec(experiment, cfg, mgmt_ip), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
