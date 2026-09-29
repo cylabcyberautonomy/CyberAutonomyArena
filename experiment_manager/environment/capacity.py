@@ -17,8 +17,6 @@ _flavor_cache: dict[str, tuple[int, int, int]] = {}
 # → "No valid host". The warning fires when harness-reserved disk exceeds total minus this.
 _DISK_HEADROOM_GB = 800
 
-# Decoys AIAttackerDetection stands up per Falco trigger - see estimate_decoy_vms().
-_AI_ATTACKER_DETECTION_DECOY_BURST = 5
 
 
 async def _get_flavor_specs(flavor: str) -> tuple[int, int, int]:
@@ -76,51 +74,6 @@ async def count_vm_specs(topology_path: Path, mhbench_dir: Path,
             for flavor, (vcpus, ram, disk) in zip(flavors, specs)
         ]
     return specs
-
-
-def _defended_host_count(topology: dict) -> int:
-    """Real hosts across the defended (non-attacker) subnets. Mirrors the defender
-    repo's Strategy._defended_host_count, which excludes the attacker's own segment.
-    The defender determines "attacker" from subnet_connections; here we approximate
-    it by subnet name (the attacker segment is conventionally named "*attacker*"),
-    which lands within ~1 host of exact — fine for a capacity estimate. Falls back to
-    all subnets if none look like the attacker's (matches the repo's `or all` fallback)."""
-    subnets = [s for net in topology.get("networks", []) for s in net.get("subnets", [])]
-    non_attacker = [s for s in subnets if "attacker" not in (s.get("name", "").lower())] or subnets
-    return sum(len(s.get("hosts", [])) for s in non_attacker)
-
-
-def estimate_decoy_vms(defender, topology_path: Path) -> int:
-    """Estimate how many decoy VMs the defender will stand up during arming, so they
-    can be included in the VM-count reservation (they are real VMs but are deployed by
-    the defender subprocess, outside count_vm_specs). The true count is decided in the
-    defender repo: arsenal['DeployDecoy'] if set, else default = round(defended/3)
-    (Strategy._default_decoy_count). We mirror that. Only deception/prompt_injection
-    deploy decoys via this path; a DoNothing strategy deploys none; llm_soc and others
-    deploy none. Honey credentials are NOT VMs, so they are ignored here.
-
-    AIAttackerDetection (prompt_injection's reactive strategy) is the one exception to
-    the mirror: it ignores both arsenal['DeployDecoy'] and the default, deploys 0 at arm
-    time, and then 5 per Falco trigger (dynamic_prompt_injection.py, `for i in range(5)`),
-    once per distinct tripped host. Nothing up-front can predict the trigger count, so we
-    reserve one burst - a far better estimate than round(defended/3), which relates to
-    nothing that strategy does."""
-    if defender is None:
-        return 0
-    if getattr(defender, "type", None) not in ("prompt_injection", "deception"):
-        return 0
-    if (getattr(defender, "strategy", "") or "") == "AIAttackerDetection":
-        return _AI_ATTACKER_DETECTION_DECOY_BURST
-    arsenal = getattr(defender, "arsenal", None) or {}
-    if "DeployDecoy" in arsenal:
-        try:
-            return max(0, int(arsenal["DeployDecoy"]))
-        except (TypeError, ValueError):
-            pass
-    if (getattr(defender, "strategy", "") or "") == "DoNothing":
-        return 0
-    hosts = _defended_host_count(json.loads(topology_path.read_text()))
-    return max(1, round(hosts / 3)) if hosts else 0
 
 
 async def _query_cluster_totals() -> tuple[int, int, int]:
@@ -298,26 +251,22 @@ class CapacityTracker:
             return True
 
     async def reserve(self, vm_specs: list[tuple[int, int, int]], experiment_name: str,
-                      extra_vms: int = 0, extra_vcpus: int = 0,
                       on_admit: Callable[[Reservation], None] | None = None,
                       priority: int = 0) -> Reservation:
         """Block until the VM-count cap AND (on GCP) the CPU budget allow this experiment.
 
-        extra_vms: the defender's decoy VMs - real VMs deployed later by the defender
-        subprocess, so not in vm_specs, but they count toward the cap.
-
-        extra_vcpus: the CPU cost of those decoys (GCP only; 0 on OpenStack). Folded into the
-        reservation's vcpus so the CPU budget accounts for decoys the same way n_vms accounts
-        for their count.
+        Admission counts ONLY the topology VMs in vm_specs (the environment's real footprint,
+        incl. the management host). VMs a plugin may deploy later (e.g. defender decoys) are NOT
+        pre-reserved here.
 
         on_admit(reservation) is invoked INSIDE the lock the moment admission is decided. The
         caller must use it to set vms_reserved / vcpus_reserved / ram_mb_reserved /
         disk_gb_reserved on the experiment, so that the registry already shows this experiment
         as holding VMs before any other reserve() can evaluate the count."""
-        total_vcpus = sum(v for v, _, _ in vm_specs) + max(0, extra_vcpus)
+        total_vcpus = sum(v for v, _, _ in vm_specs)
         total_ram = sum(r for _, r, _ in vm_specs)
         total_disk = sum(dk for _, _, dk in vm_specs)
-        n_vms = len(vm_specs) + max(0, extra_vms)
+        n_vms = len(vm_specs)
         async with self._condition:
             self._wait_seq += 1
             self._waiting[experiment_name] = (-priority, self._wait_seq, n_vms, total_vcpus)
@@ -353,9 +302,9 @@ class CapacityTracker:
                         on_admit(reservation)
                     self._condition.notify_all()  # let any waiters that yielded to us re-check now
                     logger.info(
-                        "[%s] Admitted: %d VMs (%d topology + %d decoy; %d vCPUs / %d MB RAM / %d GB disk); "
+                        "[%s] Admitted: %d topology VMs (%d vCPUs / %d MB RAM / %d GB disk); "
                         "active VMs now %d%s%s",
-                        experiment_name, n_vms, len(vm_specs), max(0, extra_vms),
+                        experiment_name, n_vms,
                         total_vcpus, total_ram, total_disk, self.active_vms, self._cap_str(),
                         (f"; active vCPUs now {self._reserved_totals()[0]}/{self._max_active_cpus}"
                          if self._max_active_cpus is not None else ""),

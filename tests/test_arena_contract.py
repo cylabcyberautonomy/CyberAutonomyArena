@@ -266,6 +266,17 @@ def test_traffic_lifecycle_methods_present():
         assert callable(getattr(trf, m)), f"traffic missing {m}()"
 
 
+def test_capacity_counts_only_topology_vms():
+    """Admission counts ONLY the topology VMs — no 'extra'/decoy pre-reservation. capacity must not
+    own a decoy estimate, and reserve() must not take extra_vms/extra_vcpus."""
+    import inspect
+    from experiment_manager.environment import capacity
+    assert not hasattr(capacity, "estimate_decoy_vms"), "capacity must not own a decoy estimate"
+    params = set(inspect.signature(capacity.CapacityTracker.reserve).parameters)
+    assert "extra_vms" not in params and "extra_vcpus" not in params, \
+        "reserve() must not carry extra_vms/extra_vcpus"
+
+
 def test_environment_module_exposes_lifecycle():
     """The environment is not a plugin yet, but the arena drives it through these module
     functions. The refactor should turn these into a plugin with the same lifecycle."""
