@@ -8,7 +8,7 @@ Two deliberately separate objects:
                      already knows about itself). NO keys, NO bastion, NO routing. This is what
                      build_config() consumes and what conceptually "the attacker gets".
 
-  FootholdAccess   — HARNESS-ONLY. How the trusted attacker *plugin* reaches a foothold to set it up
+  SetupAccess   — HARNESS-ONLY. How the trusted attacker *plugin* reaches a foothold to set it up
                      (ssh key + routing, e.g. a bastion ProxyCommand). Produced by the environment,
                      handed to the plugin's prepare_foothold(), and NEVER given to the adversary.
 
@@ -43,7 +43,7 @@ class AttackerEnvSpec(BaseModel):
         return self.footholds[0] if self.footholds else None
 
 
-class FootholdAccess(BaseModel):
+class SetupAccess(BaseModel):
     """Harness-only: how the trusted plugin reaches one foothold to prep it. Never given to the
     adversary. Routing (bastion/relay/direct/IAP) is opaque in ssh_common_args and owned by the
     environment; ssh_key should be scoped to user@host."""

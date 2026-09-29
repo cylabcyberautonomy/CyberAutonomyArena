@@ -77,11 +77,11 @@ def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
     )
 
 
-def attacker_foothold_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: MHBench serves up the HARNESS-ONLY FootholdAccess (how to reach the foothold
+def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Stage-A adapter: MHBench serves up the HARNESS-ONLY SetupAccess (how to reach the foothold
     to prep it — key + routing through the bastion). Never given to the adversary. MHBench uses one
     shared root key today; ssh_common_args routes through the bastion via ProxyCommand."""
-    from ..attacker.env_spec import FootholdAccess  # lazy: avoid import cycle
+    from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     if not kali_ip:
         return []
@@ -92,7 +92,7 @@ def attacker_foothold_access(deployed: Optional[DeployedEnvironment], mgmt_ip: O
             f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
             f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"'
         )
-    return [FootholdAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
+    return [SetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
 
 def _provision_sync(

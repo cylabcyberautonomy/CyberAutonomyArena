@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerComma
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
-from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_foothold_access
+from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access
 from .environment.teardown import teardown_environment
 from .environment.collect import collect_environment
 from .environment.rotate import rotate_environment
@@ -933,10 +933,10 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment._attacker_lifecycle = attacker_lc
     # The environment produces two things: the ADVERSARY-SAFE AttackerEnvSpec (objective + foothold
     # identity, consumed by build_config — could be handed to the adversary) and the HARNESS-ONLY
-    # FootholdAccess (keys + bastion routing, used only by the trusted plugin's prep, never given to
+    # SetupAccess (keys + bastion routing, used only by the trusted plugin's prep, never given to
     # the adversary). Stage A: MHBench serves both via these adapters. Stage B: the env plugin does.
     experiment._attacker_env_spec = attacker_env_spec(experiment.deployed_environment, cfg)
-    experiment._attacker_access = attacker_foothold_access(experiment.deployed_environment, mgmt_ip, cfg)
+    experiment._attacker_access = attacker_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
     try:
         # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
         # which has no floating IP — through the bastion to install docker, ship the image, and open

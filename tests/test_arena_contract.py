@@ -43,7 +43,7 @@ from experiment_manager.attacker.plugins.base import AttackerPlugin
 from experiment_manager.defender.plugins.base import DefenderPlugin
 from experiment_manager.traffic.plugins.base import TrafficPlugin
 from experiment_manager.environment import DeployedEnvironment
-from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, FootholdAccess
+from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAccess
 from experiment_manager.experiment.models import ExperimentSpecs
 
 ENV_NAME = "equifax_small"
@@ -127,7 +127,7 @@ def test_experimentspecs_without_traffic_still_valid():
 
 def test_attacker_env_spec_is_adversary_safe():
     """AttackerEnvSpec could be handed to the adversary and be fine: objective + foothold IDENTITY
-    only, no keys / bastion / routing. Those live in the harness-only FootholdAccess."""
+    only, no keys / bastion / routing. Those live in the harness-only SetupAccess."""
     spec_fields = set(AttackerEnvSpec.model_fields)
     assert spec_fields == {"objective", "footholds"}, f"spec leaks fields: {spec_fields}"
     foothold_fields = set(AttackerFoothold.model_fields)
@@ -138,8 +138,8 @@ def test_attacker_env_spec_is_adversary_safe():
 
 
 def test_foothold_access_is_harness_only_and_carries_routing():
-    """FootholdAccess is the harness-only side: keys + opaque routing for the trusted plugin's prep."""
-    fields = set(FootholdAccess.model_fields)
+    """SetupAccess is the harness-only side: keys + opaque routing for the trusted plugin's prep."""
+    fields = set(SetupAccess.model_fields)
     assert {"ssh_key", "ssh_common_args", "host", "user"} <= fields
 
 
@@ -181,7 +181,7 @@ def test_environment_produces_both_spec_and_access():
     hands each to the right place; the attacker never parses topology."""
     from experiment_manager.environment import deployer
     assert callable(deployer.attacker_env_spec)
-    assert callable(deployer.attacker_foothold_access)
+    assert callable(deployer.attacker_setup_access)
 
 
 def test_attacker_graphsearch_build_config_contract():

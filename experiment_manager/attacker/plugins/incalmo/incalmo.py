@@ -20,11 +20,11 @@ from ..base import AttackerPlugin
 
 
 def _foothold_access(experiment):
-    """The HARNESS-ONLY FootholdAccess list the arena attached (how to reach the footholds to prep
+    """The HARNESS-ONLY SetupAccess list the arena attached (how to reach the footholds to prep
     them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
     access = getattr(experiment, "_attacker_access", None)
     if not access:
-        raise RuntimeError("no FootholdAccess on the experiment — the arena must attach it before setup")
+        raise RuntimeError("no SetupAccess on the experiment — the arena must attach it before setup")
     return access
 
 _LLM_GROUPS = [
@@ -161,7 +161,7 @@ class _IncalmoAttacker(AttackerPlugin):
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
-        # FootholdAccess (key + routing) — no MHBench cli, no environment.deployer.
+        # SetupAccess (key + routing) — no MHBench cli, no environment.deployer.
         await foothold.land_sandcat(_foothold_access(experiment), remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(

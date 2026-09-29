@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import log, output_root
-from ...env_spec import FootholdAccess
+from ...env_spec import SetupAccess
 
 _AUX = Path(__file__).parent / "aux"
 
@@ -41,10 +41,10 @@ def _caldera_ip_port(remote_url: Optional[str]) -> tuple[Optional[str], Optional
     return u.hostname, (u.port or 80)
 
 
-def _write_inventory(access: list[FootholdAccess], tmp: Path) -> Path:
+def _write_inventory(access: list[SetupAccess], tmp: Path) -> Path:
     """One inventory over every foothold — ansible preps them all at once (multi-host)."""
     if not access:
-        raise RuntimeError("attacker foothold prep got no FootholdAccess entries")
+        raise RuntimeError("attacker foothold prep got no SetupAccess entries")
     base = (
         "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=10"
@@ -71,7 +71,7 @@ def _write_inventory(access: list[FootholdAccess], tmp: Path) -> Path:
 _GROUP = "attacker"  # inventory group holding every foothold; the vendored plays' `{{ host }}` targets it
 
 
-def _run_play_sync(play: str, access: list[FootholdAccess], extravars: dict,
+def _run_play_sync(play: str, access: list[SetupAccess], extravars: dict,
                    cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     play_path = _AUX / play
     if not play_path.exists():
@@ -106,7 +106,7 @@ def _run_play_sync(play: str, access: list[FootholdAccess], extravars: dict,
         raise RuntimeError(f"attacker foothold play '{play}' failed with exit {r.returncode} (see {log_path})")
 
 
-async def run_play(play: str, access: list[FootholdAccess], extravars: dict,
+async def run_play(play: str, access: list[SetupAccess], extravars: dict,
                    cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     import asyncio
     log(experiment_name, f"Attacker prepping its foothold(s): {play} on {[fa.host for fa in access]}")
@@ -115,7 +115,7 @@ async def run_play(play: str, access: list[FootholdAccess], extravars: dict,
     )
 
 
-async def land_sandcat(access: list[FootholdAccess], remote_url: Optional[str],
+async def land_sandcat(access: list[SetupAccess], remote_url: Optional[str],
                        cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     """Download + start the sandcat C2 agent on the attacker's foothold(s) (MHBench's start_incalmo)."""
     caldera_ip, caldera_port = _caldera_ip_port(remote_url)
@@ -125,6 +125,6 @@ async def land_sandcat(access: list[FootholdAccess], remote_url: Optional[str],
                    {"caldera_ip": caldera_ip, "caldera_port": caldera_port}, cfg, experiment_name)
 
 
-async def install_metasploit(access: list[FootholdAccess], cfg: ExperimentManagerConfig, experiment_name: str) -> None:
+async def install_metasploit(access: list[SetupAccess], cfg: ExperimentManagerConfig, experiment_name: str) -> None:
     """Install msfrpcd + pymetasploit3 on the attacker's foothold(s) (MHBench's install_metasploit)."""
     await run_play("install_metasploit.yml", access, {}, cfg, experiment_name)
