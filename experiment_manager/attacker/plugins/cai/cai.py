@@ -13,7 +13,6 @@ from ...env_spec import AttackerEnvSpec
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
-from ..access_ssh import persist_primary_access, load_primary_access, ssh_base
 
 _RUNNER = Path(__file__).parent / "cai_runner.py"
 _REMOTE_DIR = "/opt/cai"
@@ -56,7 +55,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
         }
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        base = ssh_base(persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
+        base = self.ssh_base(self.persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
         install = (
             "set -e; mkdir -p /opt/cai/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -75,7 +74,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     async def stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
         await super().stop(experiment, cfg)
         try:
-            base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
+            base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
             proc = await asyncio.create_subprocess_exec(
                 *base, "pkill -f cai_runner || true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -96,7 +95,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
                     agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
-        base = ssh_base(load_primary_access(experiment_name, cfg))
+        base = self.ssh_base(self.load_primary_access(experiment_name, cfg))
         await self._push(base, f"{_REMOTE_DIR}/cai_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
@@ -109,7 +108,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
         )
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
+        base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
         dest.mkdir(parents=True, exist_ok=True)
         proc = await asyncio.create_subprocess_exec(
             *base, f"tar czf - -C {_REMOTE_DIR}/logs {experiment.experiment_name} 2>/dev/null",

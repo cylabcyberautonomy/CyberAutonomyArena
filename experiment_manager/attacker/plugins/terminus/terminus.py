@@ -26,7 +26,6 @@ from ...env_spec import AttackerEnvSpec
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
-from ..access_ssh import persist_primary_access, load_primary_access, ssh_base
 
 _RUNNER = Path(__file__).parent / "terminus_runner.py"
 _REMOTE_DIR = "/opt/terminus"
@@ -85,7 +84,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
 
     # -- lifecycle (no C2; a pure shell agent, like CAI) -----------------------------------
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        ssh_base_cmd = ssh_base(persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
+        ssh_base_cmd = self.ssh_base(self.persist_primary_access(experiment, cfg))  # persist so start()/stop() recover it
         install = (
             "set -e; mkdir -p /opt/terminus/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -93,7 +92,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             "export PATH=$HOME/.local/bin:$PATH; "
             "test -d /opt/terminus/venv || uv venv /opt/terminus/venv --python 3.12; "
             "uv pip install --python /opt/terminus/venv/bin/python harbor; "
-            "command -v tmux >/dev/null 2>&1 && command -v asciinema >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux asciinema)"  # asciinema: terminus records the session
+            "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux)"  # recording is off in the runner (first cut), so no asciinema needed
         )
         proc = await asyncio.create_subprocess_exec(
             *ssh_base_cmd, install, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
@@ -105,7 +104,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
                     agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
-        base = ssh_base(load_primary_access(experiment_name, cfg))
+        base = self.ssh_base(self.load_primary_access(experiment_name, cfg))
         await self._push(base, f"{_REMOTE_DIR}/terminus_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
@@ -120,7 +119,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     async def stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
         await super().stop(experiment, cfg)
         try:
-            base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
+            base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
             proc = await asyncio.create_subprocess_exec(
                 *base, "pkill -f terminus_runner || true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -129,7 +128,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             pass
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        base = ssh_base(load_primary_access(experiment.experiment_name, cfg))
+        base = self.ssh_base(self.load_primary_access(experiment.experiment_name, cfg))
         dest.mkdir(parents=True, exist_ok=True)
         remote = f"{_REMOTE_DIR}/logs/{experiment.experiment_name}"
         proc = await asyncio.create_subprocess_exec(

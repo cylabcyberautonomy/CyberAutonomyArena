@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import shlex
 import signal
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -9,8 +11,9 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
-from ..env_spec import AttackerEnvSpec
+from ..env_spec import AttackerEnvSpec, SetupAccess
 from ..lifecycle import AttackerSignal
+from ...experiment_log import output_root
 from ...ui_schema import PluginUISchema
 
 if TYPE_CHECKING:
@@ -127,6 +130,57 @@ class AttackerPlugin(BaseModel):
 
     async def collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path) -> None:
         """Pull attacker-specific logs into dest. Default no-op — logs already local."""
+
+    # ------------------------------------------------------------------ foothold SSH transport
+    # Shared by the whole class (any attacker plugin that runs ON its foothold): reach the foothold
+    # via the env-produced SetupAccess the arena attached — host/user/port/key + opaque routing
+    # (bastion ProxyCommand / relay / direct in ssh_common_args) — NOT by assuming an MHBench Kali box.
+    # Plugins that do not run on a foothold (e.g. a purely local/containerised C2) simply never call
+    # these. setup() gets the full experiment; start()/stop()/collect_logs() get only experiment_name,
+    # so persist_primary_access() writes the access to disk for load_primary_access() to recover by name.
+    _ACCESS_FILE: ClassVar[str] = "setup_access.json"
+
+    @staticmethod
+    def primary_access(experiment: "Experiment") -> SetupAccess:
+        """The foothold the attacker operates from — the first SetupAccess the arena attached."""
+        access = getattr(experiment, "_attacker_access", None)
+        if not access:
+            raise RuntimeError("no SetupAccess on the experiment — the arena must attach it before setup")
+        return access[0]
+
+    @classmethod
+    def _access_path(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        return output_root(experiment_name, cfg) / experiment_name / "attacker" / cls._ACCESS_FILE
+
+    def persist_primary_access(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> SetupAccess:
+        """Write the foothold access to the attacker output dir so start()/stop()/collect_logs()
+        (which only receive experiment_name) can recover it by name. Call from setup()."""
+        fa = self.primary_access(experiment)
+        path = self._access_path(experiment.experiment_name, cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(fa.model_dump()))
+        return fa
+
+    def load_primary_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> SetupAccess:
+        """Recover the foothold access persisted by setup()."""
+        return SetupAccess.model_validate(json.loads(self._access_path(experiment_name, cfg).read_text()))
+
+    @staticmethod
+    def ssh_base(fa: SetupAccess) -> list[str]:
+        """An ssh command prefix that runs a remote command on the foothold `fa`, using its
+        env-provided routing (fa.ssh_common_args carries the ProxyCommand/relay opts; empty = direct)."""
+        cmd = ["ssh"]
+        if fa.ssh_key:
+            cmd += ["-i", os.path.expanduser(fa.ssh_key)]
+        cmd += [
+            "-p", str(fa.port),
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=10",
+        ]
+        if fa.ssh_common_args:
+            cmd += shlex.split(fa.ssh_common_args)  # env-owned routing (e.g. -o ProxyCommand="...")
+        cmd += [f"{fa.user}@{fa.host}"]
+        return cmd
 
     # ------------------------------------------------------------------ lifecycle handshake
     # Templates the arena drives (see lifecycle.py). They emit the attacker's signals around the
