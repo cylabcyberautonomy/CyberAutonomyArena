@@ -69,6 +69,11 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
 - **[DESIGN]** Firewall the bastion / defender box / relay OFF from the victims and the foothold except
   the specific allowed paths (victims→relay forward-only; harness→box jump; box→victims for defender
   actions). Forward-only jump creds. No global key left in-env. (Hiding IPs is NOT a control.)
+- **[FIXED 2026-09-29]** MHBench's `management_sg` previously allowed ingress `0.0.0.0/0` on ALL ports —
+  the bastion holds a floating IP, so the whole internet could reach the relay (inject telemetry) and
+  any control-plane port. Now scoped in `network_deployer`: egress open; ingress tcp/22 (SSH jump,
+  key-only) from anywhere; ingress tcp/9200 (relay) only from the victim subnets + mgmt CIDR.
+  Tightening 22 to a fixed operator CIDR is a further step (harness connects from varying hosts).
 
 ### Ground-truth logging (scorer independence)
 - **[DESIGN]** The environment owns ground-truth host logging (auditd/syslog) used by the scorer — it
