@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
-from .attacker.lifecycle import AttackerLifecycle, AttackerSignal
+from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerCommand
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
@@ -769,9 +769,9 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
 
 
 def _attacker_signal_persister(experiment: Experiment):
-    """Return an on_emit callback that records each attacker lifecycle signal onto the experiment
-    (status + the matching timestamp), so an observer sees which phase the attacker is in. Sync
-    (no I/O) — the arena calls registry.update() at phase boundaries to persist to disk."""
+    """Return an on_emit callback that records each attacker signal onto the experiment (status +
+    the matching timestamp), so an observer sees which phase the attacker is in. Sync (no I/O) — the
+    arena calls registry.update() at phase boundaries to persist to disk."""
     _ts_field = {
         AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
         AttackerSignal.READY: "attacker_ready_at",
@@ -787,6 +787,14 @@ def _attacker_signal_persister(experiment: Experiment):
             setattr(experiment, field, datetime.now(timezone.utc))
 
     return _on_emit
+
+
+def _attacker_command_recorder(experiment: Experiment):
+    """Return an on_command callback that records the last command the arena SENT to the attacker."""
+    def _on_command(command: AttackerCommand) -> None:
+        experiment.attacker_last_command = command.value
+
+    return _on_command
 
 
 async def _drive_attacker_setup(experiment: Experiment, cfg, mgmt_ip, lc: AttackerLifecycle):
@@ -918,7 +926,10 @@ async def _run_experiment(experiment: Experiment) -> None:
     # Lifecycle handshake (see attacker/lifecycle.py): the arena drives the attacker through
     # setup_started -> ready -> running -> (stopping ->) stopped, recording each signal on the
     # experiment. Attach the channel now so the attacker's run_setup/run_stop templates can emit.
-    attacker_lc = AttackerLifecycle(on_emit=_attacker_signal_persister(experiment))
+    attacker_lc = AttackerLifecycle(
+        on_emit=_attacker_signal_persister(experiment),
+        on_command=_attacker_command_recorder(experiment),
+    )
     experiment._attacker_lifecycle = attacker_lc
     # The environment produces two things: the ADVERSARY-SAFE AttackerEnvSpec (objective + foothold
     # identity, consumed by build_config — could be handed to the adversary) and the HARNESS-ONLY
@@ -933,6 +944,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # poll never connects. Gate it like configure so only a few run concurrently. Legacy
         # beluga-docker C2 setup is a local `docker run` (no bastion SSH) — run it ungated. Teardown on
         # failure is uncapped and never takes this lock, so _handle_failure below cannot deadlock.
+        await attacker_lc.send(AttackerCommand.START_SETUP)  # arena -> attacker: begin setup
         if getattr(experiment.attacker, "c2_on_kali", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
                 prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
@@ -1049,6 +1061,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
         attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
                                          or getattr(experiment.attacker, 'c2_on_kali', False)) else kali_c2c_url
+        await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
         process = await run_attacker(experiment.attacker, experiment, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
@@ -1081,8 +1094,9 @@ async def _run_experiment(experiment: Experiment) -> None:
             status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
         else:
             exp_log.info("[%s] Attacker exceeded %ss wall-clock cap — stopping", name, cfg.attacker_timeout_seconds)
-            # Handshake stop: send stop -> STOPPING -> STOPPED (run_stop emits both around the
-            # graceful SIGTERM). run_stop reads the lifecycle off the experiment.
+            # Handshake stop: arena SENDS Stop, attacker acks STOPPING -> STOPPED (run_stop emits
+            # both around the graceful SIGTERM). run_stop reads the lifecycle off the experiment.
+            await attacker_lc.send(AttackerCommand.STOP)  # arena -> attacker: stop the attack
             await experiment.attacker.run_stop(experiment, cfg)  # graceful SIGTERM + STOPPING/STOPPED
             try:
                 await asyncio.wait_for(process.wait(), 15)

@@ -22,13 +22,21 @@ from enum import Enum
 from typing import Callable, Optional
 
 
+class AttackerCommand(str, Enum):
+    """Arena -> attacker. The arena SENDS these to drive each phase."""
+    START_SETUP = "StartSetup"   # begin setup (bring up C2, prep foothold)
+    START_RUN = "StartRun"       # launch the attack now (setup is done + everything else is ready)
+    STOP = "Stop"                # stop the attack
+
+
 class AttackerSignal(str, Enum):
-    SETUP_STARTED = "SetupStarted"
-    READY = "Ready"
-    RUNNING = "Running"
-    STOPPING = "Stopping"
-    STOPPED = "Stopped"
-    FAILED = "Failed"
+    """Attacker -> arena. The attacker EMITS these; the arena waits on / records them."""
+    SETUP_STARTED = "SetupStarted"   # ack of START_SETUP
+    READY = "Ready"                  # setup finished, attack channel ready
+    RUNNING = "Running"              # ack of START_RUN — the attack process is up
+    STOPPING = "Stopping"           # ack of STOP
+    STOPPED = "Stopped"             # stop complete (or the attacker exited on its own)
+    FAILED = "Failed"               # a phase raised
 
 
 class AttackerLifecycleError(RuntimeError):
@@ -36,14 +44,31 @@ class AttackerLifecycleError(RuntimeError):
 
 
 class AttackerLifecycle:
-    def __init__(self, on_emit: Optional[Callable[[AttackerSignal, Optional[str]], None]] = None):
-        # on_emit lets the arena persist each signal (e.g. onto the Experiment record). Called
-        # synchronously inside emit(), before waiters are woken.
+    def __init__(self, on_emit: Optional[Callable[[AttackerSignal, Optional[str]], None]] = None,
+                 on_command: Optional[Callable[["AttackerCommand"], None]] = None):
+        # on_emit persists each attacker signal; on_command records each arena command. Both are
+        # called synchronously (before waiters are woken).
         self._on_emit = on_emit
+        self._on_command = on_command
         self._history: list[AttackerSignal] = []
+        self._commands: list[AttackerCommand] = []
         self._status: Optional[AttackerSignal] = None
         self._error: Optional[str] = None
         self._cond = asyncio.Condition()
+
+    @property
+    def commands(self) -> list["AttackerCommand"]:
+        return list(self._commands)
+
+    async def send(self, command: "AttackerCommand") -> None:
+        """Arena -> attacker: record + announce a command that drives the next phase. In-process the
+        arena then invokes the matching attacker template; the command is recorded so the full
+        command/ack trace is auditable (and a decoupled attacker could wait on it)."""
+        async with self._cond:
+            self._commands.append(command)
+            if self._on_command is not None:
+                self._on_command(command)
+            self._cond.notify_all()
 
     @property
     def status(self) -> Optional[AttackerSignal]:

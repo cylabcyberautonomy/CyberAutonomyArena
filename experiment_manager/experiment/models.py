@@ -115,6 +115,7 @@ class Experiment:
     # as it drives setup->ready->running->stopping->stopped, so an observer can see exactly which
     # phase the attacker is in (and a hang shows up as a stalled status, not a silent block).
     attacker_status = _Field("attacker", "lifecycle_status")
+    attacker_last_command = _Field("attacker", "last_command")  # last command the arena SENT (StartSetup/StartRun/Stop)
     attacker_setup_started_at = _Field("attacker", "setup_started_at")
     attacker_ready_at = _Field("attacker", "ready_at")
     attacker_stopping_at = _Field("attacker", "stopping_at")
@@ -147,8 +148,8 @@ class Experiment:
             "attacker": {
                 "config": attacker, "pid": None, "c2c_container_id": None,
                 "started_at": None, "finished_at": None,
-                "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
-                "stopping_at": None, "stopped_at": None,
+                "lifecycle_status": None, "last_command": None, "setup_started_at": None,
+                "ready_at": None, "stopping_at": None, "stopped_at": None,
             },
             "defender": {
                 "config": defender, "started_at": None, "finished_at": None,

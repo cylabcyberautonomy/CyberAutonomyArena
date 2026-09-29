@@ -10,6 +10,7 @@ from experiment_manager.attacker.lifecycle import (
     AttackerLifecycle,
     AttackerLifecycleError,
     AttackerSignal,
+    AttackerCommand,
 )
 from experiment_manager.attacker.plugins.base import AttackerPlugin, PreparedAttacker
 
@@ -50,34 +51,45 @@ def _record(seq):
 
 
 @pytest.mark.asyncio
-async def test_setup_run_stop_handshake_sequence():
-    seq = []
-    lc = AttackerLifecycle(on_emit=_record(seq))
+async def test_full_command_ack_handshake_sequence():
+    """The arena SENDS commands (START_SETUP/START_RUN/STOP); the attacker EMITS acks
+    (SETUP_STARTED/READY/RUNNING/STOPPING/STOPPED). Assert the full interleaved trace."""
+    trace = []  # both directions, in order
+    lc = AttackerLifecycle(
+        on_emit=lambda sig, err: trace.append(("ack", sig)),
+        on_command=lambda cmd: trace.append(("cmd", cmd)),
+    )
     exp = _Exp(lc)
     atk = _FakeAttacker(type="_fake_lifecycle_test")  # type: ignore[call-arg]
 
-    # send start_setup: run the template as a task, wait the ack, then wait ready
+    # arena -> START_SETUP; attacker acks SETUP_STARTED then READY
+    await lc.send(AttackerCommand.START_SETUP)
     task = asyncio.create_task(atk.run_setup(exp, cfg=None, mgmt_ip=None))
     await lc.wait(AttackerSignal.SETUP_STARTED, timeout=5)
     prepared = await task
     await lc.wait(AttackerSignal.READY, timeout=5)
     assert isinstance(prepared, PreparedAttacker)
 
-    # RUNNING is emitted by the ATTACKER (run_start, when its process is up); the arena waits for it.
+    # arena -> START_RUN; attacker acks RUNNING (from run_start)
+    await lc.send(AttackerCommand.START_RUN)
     proc = await atk.run_start(exp, prepared, config_path=None, cfg=None, c2c_url=None)
     await lc.wait(AttackerSignal.RUNNING, timeout=5)
     assert proc is not None
 
-    # send stop: STOPPING then STOPPED
+    # arena -> STOP; attacker acks STOPPING then STOPPED
+    await lc.send(AttackerCommand.STOP)
     await atk.run_stop(exp, cfg=None)
     await lc.wait(AttackerSignal.STOPPED, timeout=5)
 
-    assert seq == [
-        AttackerSignal.SETUP_STARTED,
-        AttackerSignal.READY,
-        AttackerSignal.RUNNING,
-        AttackerSignal.STOPPING,
-        AttackerSignal.STOPPED,
+    assert trace == [
+        ("cmd", AttackerCommand.START_SETUP),
+        ("ack", AttackerSignal.SETUP_STARTED),
+        ("ack", AttackerSignal.READY),
+        ("cmd", AttackerCommand.START_RUN),
+        ("ack", AttackerSignal.RUNNING),
+        ("cmd", AttackerCommand.STOP),
+        ("ack", AttackerSignal.STOPPING),
+        ("ack", AttackerSignal.STOPPED),
     ]
 
 
