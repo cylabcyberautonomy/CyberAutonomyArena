@@ -75,9 +75,10 @@ class LudusEnvironment(EnvironmentPlugin, config_type="ludus"):
 
     def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
         from ...attacker.env_spec import SetupAccess
-        # Ludus reaches range hosts via its own mgmt path (opaque ssh_common_args); a per-range key.
+        # Ludus reaches range hosts via its own mgmt path (opaque ssh_common_args); the env issues a
+        # per-SYSTEM key (attacker key scoped to the foothold only).
         return [SetupAccess(name="kali", host=_LUDUS_KALI_IP, user="root",
-                            ssh_key="~/.ludus/range_id_ed25519", ssh_common_args="")]
+                            ssh_key=self.attacker_credential(deployed, cfg), ssh_common_args="")]
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
         from ...defender.env_spec import DefenderEnvSpec, DefenderHost
@@ -90,12 +91,19 @@ class LudusEnvironment(EnvironmentPlugin, config_type="ludus"):
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
         from ...attacker.env_spec import SetupAccess
-        key = "~/.ludus/range_id_ed25519"
+        key = self.defender_credential(deployed, cfg)  # scoped to the defender box + victims, not the foothold
         return [
             SetupAccess(name="webserver0", host="10.99.1.10", user="root", ssh_key=key),
             SetupAccess(name="database0", host="10.99.2.10", user="root", ssh_key=key),
             SetupAccess(name="defender_box", host=_LUDUS_DEFENDER_IP, user="root", ssh_key=key),
         ]
+
+    # -- per-system credential issuance (Ludus mock: distinct per-range keys) ---------------------
+    def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return "~/.ludus/attacker_key"
+
+    def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return "~/.ludus/defender_key"
 
     # -- generic infra guarantees (defender box + telemetry relay) --------------------------------
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):

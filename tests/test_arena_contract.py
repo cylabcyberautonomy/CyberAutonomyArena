@@ -449,9 +449,10 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     for m in ("defender_box", "telemetry_ingest", "program_telemetry"):
         assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
 
-    # always-provisioned defender box, in an isolated subnet, with internet egress (outbound-only)
+    # always-provisioned defender box, in an isolated subnet (egress/ingress is a design requirement the
+    # arena may verify later, not a self-reported field — see ARENA_PLUGIN_REQUIREMENTS.md)
     box = env.defender_box(None, cfg)
-    assert isinstance(box, DefenderBox) and box.ip and box.subnet and box.egress is True
+    assert isinstance(box, DefenderBox) and box.ip and box.subnet
 
     # the attacker box is guaranteed too — always SERVED via the attacker spec (footholds non-empty)
     assert env.attacker_spec(_deployed_for(plugin_name), cfg).footholds
@@ -473,6 +474,37 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     routes = [TelemetryRoute(source_channel="falco", dest="10.0.0.9:5000", protocol="tcp"),
               TelemetryRoute(source_channel="falco", dest="10.0.0.9:9200", protocol="es-bulk")]
     asyncio.run(env.program_telemetry(None, cfg, routes))
+
+
+@pytest.mark.parametrize("plugin_name,spec_val", [
+    ("mhbench", ENV_SPEC),
+    ("ludus", "ranges/example.yaml"),
+])
+def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
+    """The environment issues SEPARATE per-system credentials (no single god-key): the attacker key is
+    scoped to its foothold only, the defender key to the defender box + victims (not the foothold).
+    INVARIANT: no credential in a system's SetupAccess grants access that system couldn't legitimately
+    earn — attacker key opens its box and nothing else."""
+    from experiment_manager.environment import build_environment
+    env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
+    cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"),
+                          mhbench_config=None)
+    deployed = _deployed_for(plugin_name)
+
+    acred = env.attacker_credential(deployed, cfg)
+    dcred = env.defender_credential(deployed, cfg)
+    assert acred and dcred and acred != dcred  # per-system, not one god-key
+
+    # attacker SetupAccess: all use the attacker cred; hosts are the foothold(s) ONLY
+    aacc = env.attacker_setup_access(deployed, "1.2.3.4", cfg)
+    assert aacc and all(a.ssh_key == acred for a in aacc)
+    foothold_hosts = {f.host for f in env.attacker_spec(deployed, cfg).footholds}
+    assert {a.host for a in aacc} <= foothold_hosts
+
+    # defender SetupAccess: all use the defender cred; the attacker foothold is NOT reachable with it
+    dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
+    assert dacc and all(a.ssh_key == dcred for a in dacc)
+    assert foothold_hosts.isdisjoint({a.host for a in dacc})
 
 
 def test_environment_module_exposes_lifecycle():

@@ -109,7 +109,10 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
         from ..deployer import attacker_setup_access
-        return attacker_setup_access(deployed, mgmt_ip, cfg)
+        # The env ISSUES the attacker's scoped credential (foothold-only), stamped over MHBench's routing.
+        cred = self.attacker_credential(deployed, cfg)
+        return [a.model_copy(update={"ssh_key": cred})
+                for a in attacker_setup_access(deployed, mgmt_ip, cfg)]
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
         from ..deployer import defender_env_spec
@@ -118,17 +121,30 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return spec
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_setup_access, _mhbench_ssh_key
+        from ..deployer import defender_setup_access
         from ...attacker.env_spec import SetupAccess
-        access = defender_setup_access(deployed, mgmt_ip, cfg)
+        cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
+        access = [a.model_copy(update={"ssh_key": cred})
+                  for a in defender_setup_access(deployed, mgmt_ip, cfg)]
         # ...plus how the harness reaches the defender box to launch the defender there. Today the box
         # is reached directly on the mgmt FIP (a dedicated isolated box is the not-yet-provisioned item);
         # no ProxyCommand needed.
         box = self.defender_box(deployed, cfg)
         if mgmt_ip:
             access.append(SetupAccess(name=box.name, host=mgmt_ip, user="root",
-                                      ssh_key=_mhbench_ssh_key(cfg), ssh_common_args=""))
+                                      ssh_key=cred, ssh_common_args=""))
         return access
+
+    # -- per-system credential issuance -----------------------------------------------------------
+    # DEFERRED live-injection: MHBench today injects ONE god-key everywhere; issuing SEPARATE per-system
+    # keypairs (attacker key on the foothold only, defender key on the box+victims only, management key
+    # harness-side) is an MHBench-wrapper provisioning item. Distinct paths here encode the intent; the
+    # keygen+injection is the live piece (see ARENA_PLUGIN_REQUIREMENTS.md).
+    def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return str(Path(cfg.mhbench_dir) / "keys" / "attacker_key")
+
+    def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return str(Path(cfg.mhbench_dir) / "keys" / "defender_key")
 
     # -- generic infra guarantees (defender box + telemetry relay) --------------------------------
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:

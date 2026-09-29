@@ -103,6 +103,25 @@ class EnvironmentPlugin(BaseModel):
         (key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
 
+    # -- per-system credential issuance (the environment's job) ----------------------------------
+    # MHBench today injects ONE keypair as root on EVERY host — a god-key. Leaked to the attacker it is
+    # `ssh root@victim` east-west, winning without exploitation (bastion isolation doesn't cover
+    # east-west). So the environment MUST issue SEPARATE per-system credentials, each scoped to its own
+    # boxes. INVARIANT: no credential in a system's SetupAccess may grant access that system couldn't
+    # legitimately earn by playing the game (attacker key opens its foothold and nothing else).
+    def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        """The credential issued for the attacker — scoped to the attacker's foothold box(es) ONLY
+        (never victims/defender/bastion/relay). Stamped into attacker SetupAccess."""
+        raise NotImplementedError(f"{type(self).__name__} must implement attacker_credential()")
+
+    def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        """The credential issued for the defender — scoped to the defender box + the victims it may act
+        on (legit); NOT the attacker box. Stamped into defender SetupAccess."""
+        raise NotImplementedError(f"{type(self).__name__} must implement defender_credential()")
+
+    # The management/provisioning credential (broad) is harness-side, used to deploy/configure, and is
+    # NEVER placed in any spec — so it has no accessor here (it stays internal to the plugin's deploy path).
+
     # -- generic infra guarantees every environment provides (backend-agnostic) ------------------
     # These make "always-provisioned defender box" and "relay telemetry" part of the ENVIRONMENT
     # interface, not an MHBench-specific hack — a second plugin (ludus) must implement them too.
