@@ -112,6 +112,41 @@ def test_named_combo_experimentspecs_validates():
     assert dumped["traffic"]["persona"] == "office_worker"
 
 
+def test_attacker_plugin_plus_spec_file(tmp_path):
+    """New shape: attacker_plugin selects the implementation; attacker_spec is a PATH to a file
+    holding the plugin's bespoke spec. It resolves to the same plugin instance as the embedded form."""
+    spec_file = tmp_path / "atk_spec.json"
+    spec_file.write_text(json.dumps({"strategy": "GraphSearch", "c2_on_kali": True}))
+    specs = ExperimentSpecs(
+        experiment_name="ci_plugin_spec",
+        environment=ENV_NAME,
+        attacker_plugin="incalmo_strategy",
+        attacker_spec=str(spec_file),
+        defender=DEFENDER,
+    )
+    # resolved into .attacker as the real plugin instance
+    assert specs.attacker.type == "incalmo_strategy"
+    assert specs.attacker.strategy == "GraphSearch"
+    assert specs.attacker.c2_on_kali is True
+    # a YAML spec works too, and an absent spec file means plugin defaults
+    yspec = tmp_path / "atk.yaml"
+    yspec.write_text("strategy: Darkside\n")
+    s2 = ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
+                         attacker_plugin="incalmo_strategy", attacker_spec=str(yspec))
+    assert s2.attacker.strategy == "Darkside"
+
+
+def test_attacker_plugin_and_embedded_are_mutually_exclusive():
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
+                        attacker_plugin="incalmo_strategy", attacker=ATTACKER)
+
+
+def test_attacker_plugin_unknown_name_rejected():
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment=ENV_NAME, attacker_plugin="no_such_plugin")
+
+
 def test_experimentspecs_without_traffic_still_valid():
     """Traffic is optional: a plain attacker-vs-defender run must not require it."""
     specs = ExperimentSpecs(

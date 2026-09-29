@@ -1265,6 +1265,10 @@ async def add_experiment(data: ExperimentSpecs):
         updated_at=now,
         priority=max(0, min(1000, int(data.priority))),  # clamp to a sane band so gate ordering can't be abused
     )
+    # Record the (plugin, spec-file) provenance when the pair form was used (data.attacker is the
+    # resolved instance either way).
+    experiment.attacker_plugin = data.attacker_plugin
+    experiment.attacker_spec = data.attacker_spec
 
     try:
         await registry.add(experiment)
