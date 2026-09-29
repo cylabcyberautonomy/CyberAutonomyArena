@@ -16,6 +16,7 @@ import os
 import re
 import signal
 import subprocess
+import shlex
 import sys
 import time
 import urllib.request
@@ -25,8 +26,6 @@ from pathlib import Path
 CONFIG = json.loads(Path(sys.argv[1]).read_text())
 EXP = CONFIG["experiment_name"]
 CHECKS = CONFIG.get("checks") or ["ssh", "resolve", "telemetry", "canary_event"]
-SSH_KEY = os.path.expanduser(CONFIG["ssh_key"])
-BASTION = CONFIG.get("bastion_ip")
 ES_HOST = CONFIG.get("management_ip")
 ES_PORT = int(CONFIG.get("telemetry_port", 9200))
 TELEMETRY_TIMEOUT = float(CONFIG.get("telemetry_timeout_s", 60.0))
@@ -34,27 +33,14 @@ FAIL_CLOSED = bool(CONFIG.get("fail_closed", False))
 LOG_DIR = Path(CONFIG["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# The environment-produced host access: one entry per victim, {name, host, user, port, ssh_key,
+# ssh_common_args (the bastion ProxyCommand etc.)}. The canary no longer parses the topology or
+# resolves an MHBench key itself.
+ACCESS = CONFIG.get("defender_setup_access", [])
+
 
 def _log(msg: str) -> None:
     print(f"[{EXP}] canary: {msg}", flush=True)
-
-
-# --------------------------------------------------------------------------- topology
-def _victims(topology_spec: str | None) -> list[tuple[str, str]]:
-    """[(model_name, internal_ip)] for every non-attacker host."""
-    if not topology_spec or not Path(topology_spec).exists():
-        return []
-    topo = json.loads(Path(topology_spec).read_text())
-    out = []
-    for net in topo.get("networks", []):
-        for sub in net.get("subnets", []):
-            for h in sub.get("hosts", []):
-                if h.get("vm_type") == "kali_running":
-                    continue
-                ip = h.get("ip_address")
-                if ip:
-                    out.append((h["name"], str(ip)))
-    return out
 
 
 def _sanitize(name: str) -> str:
@@ -64,25 +50,18 @@ def _sanitize(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- ssh
-def _proxy(bastion: str) -> str:
-    return (
-        f"ssh -W %h:%p -i {SSH_KEY} -o BatchMode=yes -o PasswordAuthentication=no "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{bastion}"
-    )
-
-
-def _ssh_victim(ip: str, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
-    """Run remote_cmd on a victim through the bastion. Returns (ok, output-or-error)."""
-    if not BASTION:
-        return False, "no bastion_ip"
+def _ssh(access: dict, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
+    """Run remote_cmd on a victim using its SetupAccess entry (key + routing). Returns (ok, out/err)."""
+    key = os.path.expanduser(access.get("ssh_key") or "~/.ssh/id_ed25519")
     cmd = [
-        "ssh", "-i", SSH_KEY,
+        "ssh", "-i", key,
         "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no",
         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", f"ConnectTimeout={min(timeout, 20)}",
-        "-o", f"ProxyCommand={_proxy(BASTION)}",
-        f"root@{ip}", remote_cmd,
+        "-p", str(access.get("port", 22)),
     ]
+    cmd += shlex.split(access.get("ssh_common_args") or "")  # bastion ProxyCommand, etc.
+    cmd += [f"{access.get('user', 'root')}@{access['host']}", remote_cmd]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -109,35 +88,36 @@ def _es_count(index: str) -> int | None:
 
 
 # --------------------------------------------------------------------------- checks
-def check_ssh(victims):
+def check_ssh(access_list):
     results = {}
     ok_any = False
-    for name, ip in victims:
-        ok, out = _ssh_victim(ip, "hostname")
-        results[name] = {"ip": ip, "ok": ok, "detail": out}
+    for a in access_list:
+        ok, out = _ssh(a, "hostname")
+        results[a["name"]] = {"ip": a["host"], "ok": ok, "detail": out}
         ok_any = ok_any or ok
     return {
-        "ok": ok_any and all(v["ok"] for v in results.values()) if victims else False,
+        "ok": ok_any and all(v["ok"] for v in results.values()) if access_list else False,
         "reachable": sum(1 for v in results.values() if v["ok"]),
-        "total": len(victims),
+        "total": len(access_list),
         "hosts": results,
     }
 
 
-def check_resolve(victims, ssh_results):
-    """Compare topology model-name to the victim's real OS hostname."""
+def check_resolve(access_list, ssh_results):
+    """Compare each host's DefenderEnvSpec model-name to its real OS hostname."""
     rows = {}
     matches = 0
-    for name, ip in victims:
+    for a in access_list:
+        name = a["name"]
         got = (ssh_results.get("hosts", {}).get(name) or {})
         os_host = got.get("detail") if got.get("ok") else None
         match = bool(os_host) and (os_host == name)
         matches += 1 if match else 0
-        rows[name] = {"ip": ip, "os_hostname": os_host, "matches_model_name": match}
+        rows[name] = {"ip": a["host"], "os_hostname": os_host, "matches_model_name": match}
     return {
-        "ok": bool(victims) and matches == len(victims),
+        "ok": bool(access_list) and matches == len(access_list),
         "matching": matches,
-        "total": len(victims),
+        "total": len(access_list),
         "note": "mismatches are the FalcoLLM hostname-resolution trap (model name != OS hostname)",
         "hosts": rows,
     }
@@ -161,22 +141,22 @@ def check_telemetry():
     }
 
 
-def check_canary_event(victims, want_host):
+def check_canary_event(access_list, want_host):
     """Read /etc/shadow on one victim, then confirm the falco index grows (data actually
     flows victim -> sensor -> store)."""
-    if not victims:
+    if not access_list:
         return {"ok": False, "detail": "no victims"}
     target = None
-    for name, ip in victims:
-        if want_host and (name == want_host or want_host in name):
-            target = (name, ip)
+    for a in access_list:
+        if want_host and (a["name"] == want_host or want_host in a["name"]):
+            target = a
             break
-    target = target or victims[0]
-    name, ip = target
+    target = target or access_list[0]
+    name = target["name"]
     falco = f"falco-{_sanitize(EXP)}"
 
     before = _es_count(falco)
-    ok_read, out = _ssh_victim(ip, "for i in 1 2 3; do cat /etc/shadow >/dev/null 2>&1; done; echo triggered")
+    ok_read, out = _ssh(target, "for i in 1 2 3; do cat /etc/shadow >/dev/null 2>&1; done; echo triggered")
     if not ok_read:
         return {"ok": False, "host": name, "detail": f"could not trigger read: {out}"}
 
@@ -202,7 +182,7 @@ def check_canary_event(victims, want_host):
 
 # --------------------------------------------------------------------------- main
 def main() -> None:
-    victims = _victims(CONFIG.get("topology_spec"))
+    victims = ACCESS
     report = {"experiment": EXP, "checks_requested": CHECKS, "victims": len(victims), "results": {}}
     _log(f"{len(victims)} victim(s); running checks: {CHECKS}")
 

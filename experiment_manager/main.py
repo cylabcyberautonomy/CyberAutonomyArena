@@ -986,12 +986,18 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # Drop any marker left by a previous run of this experiment name
                 # (overwrite=true reuses the output dir) before the gate below.
                 experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
+                # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
+                # setup access (key + bastion routing), symmetric with the attacker.
+                _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
+                _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,
                     experiment.experiment_name,
                     cfg,
                     mgmt_ip,
+                    defender_env_spec=_dfn_env_spec,
+                    defender_access=_dfn_access,
                 )
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)

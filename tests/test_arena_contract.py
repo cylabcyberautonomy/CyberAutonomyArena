@@ -248,13 +248,15 @@ def test_defender_llm_soc_build_config_contract():
 
 def test_defender_canary_build_config_contract():
     """The canary (connectivity diagnostic) defender: no decoys, no LLM, stdlib runner.
-    Its build_config carries the topology + the connectivity knobs the runner needs."""
+    Stage 2b: build_config carries only the connectivity knobs; hosts + per-host SSH access come from
+    the arena-injected defender_env_spec / defender_setup_access, NOT from build_config (no ssh_key,
+    no topology_spec — that coupling is gone)."""
     dfn = DefenderPlugin._registry["canary"].model_validate({"type": "canary"})
     built = dfn.build_config("ci_exp", FAKE_ENV)
     assert built["experiment_name"] == "ci_exp"
-    assert built["topology_spec"] == FAKE_ENV.topology_spec
     assert set(built["checks"]) <= {"ssh", "resolve", "telemetry", "canary_event"}
-    assert "fail_closed" in built and "ssh_key" in built
+    assert "fail_closed" in built
+    assert "ssh_key" not in built and "topology_spec" not in built  # migrated to injected specs
 
 
 def test_defender_velociraptor_build_config_contract():

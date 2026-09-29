@@ -46,11 +46,19 @@ async def run_defender(
     experiment_name: str,
     cfg: ExperimentManagerConfig,
     mgmt_ip: Optional[str] = None,
+    defender_env_spec=None,
+    defender_access=None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     await defender.setup(experiment_name, environment, cfg, mgmt_ip)
     built = defender.build_config(experiment_name, environment)
+    # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
+    # routing per victim), both produced by the environment plugin. A migrated defender reads these
+    # instead of computing its own SSH key / parsing the topology.
+    if defender_env_spec is not None:
+        built["defender_env_spec"] = defender_env_spec.model_dump()
+    built["defender_setup_access"] = [a.model_dump() for a in (defender_access or [])]
     built["deception_dir"] = str(cfg.deception_dir)
     # "management_ip" here is the harness's own fixed host (Elasticsearch's address -
     # see host_ip in config.yaml). Deliberately NOT the same thing as `mgmt_ip`/
