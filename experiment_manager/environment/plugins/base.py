@@ -99,5 +99,26 @@ class EnvironmentPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement defender_spec()")
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        """HARNESS-ONLY list[SetupAccess] for the victims the defender may reach (key + routing)."""
+        """HARNESS-ONLY list[SetupAccess] for the victims (+ the defender box) the defender may reach
+        (key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
+
+    # -- generic infra guarantees every environment provides (backend-agnostic) ------------------
+    # These make "always-provisioned defender box" and "relay telemetry" part of the ENVIRONMENT
+    # interface, not an MHBench-specific hack — a second plugin (ludus) must implement them too.
+    def defender_box(self, deployed, cfg: ExperimentManagerConfig):
+        """The always-provisioned DefenderBox (isolated subnet) the defender runs on. Every environment
+        MUST provide one; it is reachable via the defender_setup_access entry of the same name, and is
+        hidden from the attacker (management-plane isolation is the environment's responsibility)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement defender_box()")
+
+    def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
+        """The fixed TelemetryIngest target (the relay's ingest endpoint) sensors bake to — constant
+        across runs for this backend so it can be baked into the sensor images."""
+        raise NotImplementedError(f"{type(self).__name__} must implement telemetry_ingest()")
+
+    async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
+        """Program the relay to deliver each source stream to the consumers' endpoints (routes =
+        list[TelemetryRoute], grouped by source_channel → multi-stream routing + same-stream fan-out).
+        Default no-op so a backend with no relay yet is still valid."""
+        return None

@@ -29,8 +29,18 @@ class DefenderHost(BaseModel):
     role: Optional[str] = None   # e.g. "webserver", "database" (derived from the host name)
 
 
+class DefenderBox(BaseModel):
+    """The always-provisioned box the defender RUNS on, in an isolated ("super-secret") subnet: it can
+    reach the victims + the telemetry relay but is hidden from the attacker. Agent-facing identity only
+    (the defender knows its own box); the harness reaches it via a SetupAccess entry of the same name."""
+    name: str = "defender_box"
+    ip: Optional[str] = None       # the box's in-env address
+    subnet: Optional[str] = None   # the isolated subnet it lives on
+
+
 class DefenderEnvSpec(BaseModel):
-    """Agent-facing. objective + host inventory; no creds/routing."""
+    """Agent-facing. objective + host inventory + the defender's own box; no creds/routing."""
     objective: str = "none"
     hosts: list[DefenderHost] = Field(default_factory=list)
+    box: Optional[DefenderBox] = None    # the always-provisioned defender box (env guarantees one)
     topology_spec: Optional[str] = None  # Stage-2a back-compat: path the existing runners still read

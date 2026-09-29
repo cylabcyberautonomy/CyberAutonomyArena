@@ -411,10 +411,55 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert names and "attacker" not in names  # kali excluded
     assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
     assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
-    # defender: setup access = one SetupAccess per victim, with creds
+    # defender: setup access = one SetupAccess per victim (+ the defender box), with creds
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
-    assert {a.name for a in dacc} == names
+    acc_names = {a.name for a in dacc}
+    assert names <= acc_names and "defender_box" in acc_names
     assert all(a.ssh_key for a in dacc)
+
+
+@pytest.mark.parametrize("plugin_name,spec_val", [
+    ("mhbench", ENV_SPEC),
+    ("ludus", "ranges/example.yaml"),
+])
+def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
+    """The always-provisioned defender box + the telemetry-relay ingest are GENERIC environment
+    guarantees — a second, non-MHBench backend (ludus) implements the same interface. Proving these
+    aren't MHBench-shaped hacks."""
+    from experiment_manager.environment import build_environment
+    from experiment_manager.environment.telemetry import TelemetryIngest, TelemetryRoute
+    from experiment_manager.defender.env_spec import DefenderBox, DefenderEnvSpec
+    from experiment_manager.attacker.env_spec import AttackerEnvSpec
+    import asyncio
+
+    env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
+    cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"))
+
+    # the generic infra methods are on the base contract
+    for m in ("defender_box", "telemetry_ingest", "program_telemetry"):
+        assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
+
+    # always-provisioned defender box, in an isolated subnet
+    box = env.defender_box(None, cfg)
+    assert isinstance(box, DefenderBox) and box.ip and box.subnet
+
+    # fixed telemetry-relay ingest (the bake target)
+    ing = env.telemetry_ingest(None, cfg)
+    assert isinstance(ing, TelemetryIngest) and ing.host and ing.port
+
+    # agent-facing specs are the right types; the defender spec carries the box
+    assert isinstance(env.attacker_spec(None, cfg), AttackerEnvSpec)
+    dspec = env.defender_spec(None, cfg)
+    assert isinstance(dspec, DefenderEnvSpec) and dspec.box is not None and dspec.box.name == box.name
+
+    # the defender's setup access includes an entry to reach the box
+    dacc = env.defender_setup_access(None, "1.2.3.4", cfg)
+    assert any(a.name == box.name for a in dacc)
+
+    # relay programming accepts routes (multi-stream + fan-out expressed as a route list)
+    routes = [TelemetryRoute(source_channel="falco", dest="10.0.0.9:5000", protocol="tcp"),
+              TelemetryRoute(source_channel="falco", dest="10.0.0.9:9200", protocol="es-bulk")]
+    asyncio.run(env.program_telemetry(None, cfg, routes))
 
 
 def test_environment_module_exposes_lifecycle():

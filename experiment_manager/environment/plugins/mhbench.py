@@ -113,11 +113,48 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
         from ..deployer import defender_env_spec
-        return defender_env_spec(deployed, cfg)
+        spec = defender_env_spec(deployed, cfg)
+        spec.box = self.defender_box(deployed, cfg)  # every env provides the defender box
+        return spec
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_setup_access
-        return defender_setup_access(deployed, mgmt_ip, cfg)
+        from ..deployer import defender_setup_access, _mhbench_ssh_key
+        from ...attacker.env_spec import SetupAccess
+        access = defender_setup_access(deployed, mgmt_ip, cfg)
+        # ...plus how the harness reaches the defender box to launch the defender there. Today the box
+        # is reached directly on the mgmt FIP (a dedicated isolated box is the not-yet-provisioned item);
+        # no ProxyCommand needed.
+        box = self.defender_box(deployed, cfg)
+        if mgmt_ip:
+            access.append(SetupAccess(name=box.name, host=mgmt_ip, user="root",
+                                      ssh_key=_mhbench_ssh_key(cfg), ssh_common_args=""))
+        return access
+
+    # -- generic infra guarantees (defender box + telemetry relay) --------------------------------
+    def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
+        # The management host's internal IP is constant across runs (management.host_ip); reuse the
+        # gcp_relay_ip default which already names it. This is the fixed relay/bake address.
+        return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
+
+    def defender_box(self, deployed, cfg: ExperimentManagerConfig):
+        from ...defender.env_spec import DefenderBox
+        # PLACEHOLDER until MHBench provisions a dedicated box in an isolated subnet: co-locate on the
+        # (attacker-hidden) management host. The interface is what's being exercised here.
+        return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
+
+    def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
+        from ..telemetry import TelemetryIngest
+        # Fixed bake target = the relay on the mgmt host, constant across runs.
+        return TelemetryIngest(host=self._mgmt_internal_ip(cfg), port=9200, scheme="tcp")
+
+    async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
+        # The socat/Vector fan-out relay on the mgmt host is the not-yet-provisioned item; for now
+        # record the intended routes so the wiring is observable. (Grouping by source_channel gives
+        # multi-stream routing + same-stream fan-out.)
+        from ...experiment_log import log
+        for r in (routes or []):
+            log(getattr(deployed, "spec", "env") or "env",
+                f"telemetry route: {r.source_channel} -> {r.dest} ({r.protocol})")
 
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
