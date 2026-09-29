@@ -933,7 +933,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # poll never connects. Gate it like configure so only a few run concurrently. Legacy
         # beluga-docker C2 setup is a local `docker run` (no bastion SSH) — run it ungated. Teardown on
         # failure is uncapped and never takes this lock, so _handle_failure below cannot deadlock.
-        if getattr(cfg, "c2_on_kali", False):
+        if getattr(experiment.attacker, "c2_on_kali", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
                 prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
         else:
@@ -1048,7 +1048,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # Same when c2_on_kali: the C2 is on the Kali VM's in-tenant IP (kali_c2c_url), which beluga
         # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
         attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
-                                         or getattr(cfg, 'c2_on_kali', False)) else kali_c2c_url
+                                         or getattr(experiment.attacker, 'c2_on_kali', False)) else kali_c2c_url
         process = await run_attacker(experiment.attacker, experiment._attacker_env_spec, experiment.experiment_name, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)

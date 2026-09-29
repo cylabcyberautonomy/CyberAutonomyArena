@@ -45,7 +45,7 @@ async def _ensure_image_built(experiment_name: str, cfg: ExperimentManagerConfig
     log(experiment_name, f"Built '{_C2C_IMAGE}' successfully.")
 
 
-async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, kali_ip: str | None = None) -> tuple[str, str, str]:
+async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, kali_ip: str | None = None, c2_on_kali: bool = False) -> tuple[str, str, str]:
     """
     Launch the Incalmo C2 Docker container and return immediately.
     Returns (container_id, kali_url, local_url) — container may not be ready yet.
@@ -66,7 +66,7 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, m
         # polls + attacker LLM) = external. GCP Cloud NAT can't hairpin a VM to a same-VPC external IP,
         # so agents MUST use the internal IP.
         return f"gcp-c2:{experiment_name}", internal_url, external_url
-    if getattr(cfg, "c2_on_kali", False) and getattr(cfg, "cloud_backend", "openstack") == "openstack":
+    if c2_on_kali and getattr(cfg, "cloud_backend", "openstack") == "openstack":
         # Opt-in: run the C2 on the in-environment Kali VM instead of a beluga docker container.
         # remote_url (agents/setup play) = Kali's in-tenant IP:8888 — so a defender's BlockIP hits
         # only attacker infra, not beluga's shared ES/telemetry IP. local_url (beluga: readiness +

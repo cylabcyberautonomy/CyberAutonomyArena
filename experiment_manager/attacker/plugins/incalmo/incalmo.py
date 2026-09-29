@@ -147,6 +147,11 @@ class _IncalmoAttacker(AttackerPlugin):
     """Shared C2C lifecycle for all Incalmo-based attackers."""
 
     requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
+    # Opt-in (OpenStack only): run the Incalmo C2 on the in-environment Kali VM instead of a beluga
+    # Docker container, so victims beacon to Kali's in-tenant IP (a defender can BlockIP the whole C2
+    # IP without hitting shared beluga services). Incalmo-specific, so it lives here on the attacker
+    # config — not a harness-global flag. Default False = beluga-docker C2.
+    c2_on_kali: bool = False
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
@@ -163,7 +168,7 @@ class _IncalmoAttacker(AttackerPlugin):
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
         kali_ip: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip, c2_on_kali=self.c2_on_kali)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)

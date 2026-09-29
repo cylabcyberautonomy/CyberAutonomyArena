@@ -179,11 +179,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             str(Path(__file__).parent / "runner.py"),
             str(config_path),
             cwd=str(cfg.deception_dir),
-            # MHB_C2_ON_KALI lets the runner refuse to arm FalcoLLMC2Block unless the C2 runs on
-            # its own in-env IP (c2_on_kali) — a whole-IP block on the legacy beluga-shared C2 IP
-            # would cut the defender's own ES/telemetry. See runner.py's safety gate.
-            env={**os.environ, "PYTHONPATH": pythonpath,
-                 "MHB_C2_ON_KALI": "1" if getattr(cfg, "c2_on_kali", False) else "0"},
+            env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )

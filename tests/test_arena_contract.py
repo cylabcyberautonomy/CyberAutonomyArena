@@ -143,6 +143,39 @@ def test_foothold_access_is_harness_only_and_carries_routing():
     assert {"ssh_key", "ssh_common_args", "host", "user"} <= fields
 
 
+def test_defender_self_protection_never_blocks_own_ip():
+    """The defender must never block its own telemetry/mgmt IP, with no knowledge of the attacker's
+    C2 (that replaced the MHB_C2_ON_KALI attacker-coupled gate). SelfProtectingOrchestrator drops a
+    BlockIP aimed at a protected IP and passes everything else through."""
+    from experiment_manager.defender.plugins.self_protect import SelfProtectingOrchestrator
+
+    class _Block:
+        def __init__(self, ip): self.ip_to_block = ip
+    class _Other:  # a non-block action (no ip_to_block)
+        pass
+    class _Inner:
+        def __init__(self): self.ran = None
+        def run(self, actions): self.ran = actions; return "ok"
+
+    inner = _Inner()
+    skipped = []
+    orch = SelfProtectingOrchestrator(inner, {"10.81.1.20", "192.168.1.5"}, on_skip=skipped.append)
+
+    # block on own ES IP is dropped; block on a victim + a non-block action pass through
+    result = orch.run([_Block("10.81.1.20"), _Block("192.168.200.10"), _Other()])
+    passed = inner.ran
+    assert skipped == ["10.81.1.20"]
+    assert len(passed) == 2 and passed[0].ip_to_block == "192.168.200.10"
+    assert result == "ok"
+
+    # if EVERY action was self-directed, nothing reaches the inner orchestrator
+    inner2 = _Inner()
+    orch2 = SelfProtectingOrchestrator(inner2, {"10.81.1.20"})
+    assert orch2.run([_Block("10.81.1.20")]) is None and inner2.ran is None
+    # non-block methods delegate straight through
+    assert orch2.protected_ips == {"10.81.1.20"}
+
+
 def test_environment_produces_both_spec_and_access():
     """The environment serves up the adversary-safe spec AND the harness-only access — the arena
     hands each to the right place; the attacker never parses topology."""

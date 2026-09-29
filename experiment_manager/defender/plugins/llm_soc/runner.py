@@ -207,21 +207,11 @@ if strategy_cls is None:
     )
     sys.exit(1)
 
-# Safety gate: FalcoLLMC2Block blocks the WHOLE C2 IP (falco_llm_c2_block.py). That is only
-# safe when the C2 runs on its own dedicated in-env IP (c2_on_kali) — otherwise the C2 IP is
-# beluga's shared ES/telemetry IP (host_ip), and a whole-IP block would sever the defender's
-# own telemetry feed. The harness sets MHB_C2_ON_KALI from cfg.c2_on_kali; fail CLOSED (refuse
-# to arm) unless it is explicitly enabled. (Live once the manager has been restarted with the
-# llm_soc plugin change that sets this env — see llm_soc.py run().)
-if config["strategy"] == "FalcoLLMC2Block" and cloud_backend != "gcp" and os.environ.get("MHB_C2_ON_KALI") != "1":
-    print(
-        f"[{experiment_name}] REFUSING to arm FalcoLLMC2Block: c2_on_kali is not enabled. "
-        f"It blocks the WHOLE C2 IP, which is only safe when the C2 has its own in-env IP. "
-        f"Set c2_on_kali: true in config.yaml and restart the manager; otherwise the C2 IP is "
-        f"beluga's shared ES/telemetry IP and the block would cut the defender's own telemetry.",
-        flush=True,
-    )
-    sys.exit(1)
+# Self-protection: a defender must never block its OWN telemetry/management infrastructure (see
+# self_protect.py). Defender-local invariant — no attacker knowledge needed; replaces the old
+# MHB_C2_ON_KALI gate that coupled the defender to an attacker config flag.
+from self_protect import SelfProtectingOrchestrator  # noqa: E402 — runner adds deception_dir dirs to path above
+_PROTECTED_IPS = {ip for ip in (management_ip, config.get("bastion_ip"), config.get("falco_relay_ip")) if ip}
 
 arsenal = CountArsenal(config.get("arsenal", {}))
 telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
@@ -251,6 +241,12 @@ else:
         network=network,
         action_logger=action_logger,
     )
+
+# Self-protection wrapper: any block aimed at the defender's own ES/mgmt IP is dropped, whatever the
+# strategy or the attacker's C2 placement. Applied once here so both the strategy and the Defender
+# (below) share the guarded orchestrator.
+orchestrator = _SelfProtectingOrchestrator(orchestrator, _PROTECTED_IPS)
+print(f"[{experiment_name}] Self-protecting orchestrator active; protected IPs: {sorted(_PROTECTED_IPS)}", flush=True)
 
 strategy = strategy_cls(
     arsenal=arsenal,

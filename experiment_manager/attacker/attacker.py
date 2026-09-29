@@ -59,7 +59,7 @@ async def run_attacker(
     # URL (prepared.remote_url). Record it separately so low-level download actions use the
     # victim-reachable address without changing the strategy's own C2 API URL. Other backends:
     # agent_c2c == c2c_server, so their payloads are unchanged.
-    agent_c2c = prepared.remote_url if (getattr(cfg, "c2_on_kali", False) and prepared.remote_url) else c2c_server
+    agent_c2c = prepared.remote_url if (getattr(attacker, "c2_on_kali", False) and prepared.remote_url) else c2c_server
     if agent_c2c:
         built["agent_c2c_server"] = agent_c2c
     config_path.write_text(json.dumps(built, indent=2))

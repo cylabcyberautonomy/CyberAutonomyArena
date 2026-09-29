@@ -1,4 +1,4 @@
-"""Run the Incalmo C2 stack on the in-environment Kali VM (OpenStack, opt-in via cfg.c2_on_kali).
+"""Run the Incalmo C2 stack on the in-environment Kali VM (OpenStack, opt-in via the Incalmo attacker config c2_on_kali).
 
 On OpenStack the C2 is normally a local Docker container on the harness host (beluga), and the
 victims beacon to beluga's host_ip — an IP shared with Elasticsearch/telemetry, so a defender
