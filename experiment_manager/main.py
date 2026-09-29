@@ -18,7 +18,6 @@ from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
 from .environment.deployer import resolve_topology_path
-from .environment.rotate import rotate_environment
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -1051,13 +1050,8 @@ async def _run_experiment(experiment: Experiment) -> None:
             await _handle_failure(experiment, f"Background-traffic install failed — {e}")
             return
 
-    # Reset host logs at the deploy->attack boundary so collected logs are attack-phase-only. Blocking
-    # by construction (awaited before run_attacker). Best-effort: a rotation failure must not waste a
-    # full deploy — that host just falls back to needing a timestamp trim at analysis time.
-    try:
-        await rotate_environment(experiment, cfg)
-    except Exception:
-        exp_log.exception("Pre-attack log rotation failed for '%s' — proceeding (logs may include pre-attack noise)", experiment.experiment_name)
+    # Host-log rotation is now an MHBench wrapper detail run inside mhbench.configure() (right after
+    # configuring), NOT an arena step — so there is no rotate call here.
 
     # START background traffic AFTER rotation so its benign activity is captured in the same
     # attack-phase telemetry the defender is scored on. Best-effort: noise failing to start must not

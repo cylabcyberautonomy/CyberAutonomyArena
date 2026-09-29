@@ -216,7 +216,6 @@ def _configure_sync(
     mgmt_ip: Optional[str],
     c2c_url: Optional[str],
     cfg: ExperimentManagerConfig,
-    setup_play: Optional[str] = None,
 ) -> None:
     if mgmt_ip is None:
         return
@@ -234,8 +233,6 @@ def _configure_sync(
     ]
     if c2c_url:
         cmd += ["--c2c-url", c2c_url]
-    if setup_play:
-        cmd += ["--attacker-play", setup_play]
 
     mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
     ansible_log_dir = output_root(experiment_name, cfg) / experiment_name / cfg.ansible_log_dir
@@ -266,58 +263,12 @@ async def configure_environment(
     mgmt_ip: Optional[str],
     c2c_url: Optional[str],
     cfg: ExperimentManagerConfig,
-    setup_play: Optional[str] = None,
 ) -> None:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, _configure_sync, experiment.experiment_name, experiment.environment_spec, mgmt_ip, c2c_url, cfg, setup_play
+        None, _configure_sync, experiment.experiment_name, experiment.environment_spec, mgmt_ip, c2c_url, cfg
     )
 
-
-def _attacker_play_sync(
-    experiment_name: str,
-    environment_spec: str,
-    mgmt_ip: Optional[str],
-    play: str,
-    c2c_url: Optional[str],
-    cfg: ExperimentManagerConfig,
-) -> None:
-    if mgmt_ip is None:
-        raise RuntimeError("Cannot run attacker setup play without a management IP.")
-    mhbench_dir = cfg.mhbench_dir
-    topology_path = resolve_topology_path(environment_spec, cfg)
-    python = mhbench_dir / ".venv" / "bin" / "python"
-    cli = mhbench_dir / "cli.py"
-    cmd = [
-        str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
-        "configure", str(topology_path),
-        "--project-name", experiment_name,
-        "--mgmt-ip", mgmt_ip,
-        "--attacker-play", play,
-        "--attacker-only",
-    ]
-    if c2c_url:
-        cmd += ["--c2c-url", c2c_url]
-
-    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
-    ansible_log_dir = output_root(experiment_name, cfg) / experiment_name / cfg.ansible_log_dir
-    ansible_log_dir.mkdir(parents=True, exist_ok=True)
-    log(experiment_name, f"Running attacker setup play '{play}' on the kali host...")
-    with open(mhbench_log, "a") as lf:
-        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "MHBENCH_ANSIBLE_LOG_DIR": str(ansible_log_dir)})
-    if result.returncode != 0:
-        raise _mhbench_error(f"attacker setup play '{play}'", result.returncode, mhbench_log)
-
-
-async def run_attacker_setup_play(
-    experiment: Experiment,
-    mgmt_ip: Optional[str],
-    play: str,
-    c2c_url: Optional[str],
-    cfg: ExperimentManagerConfig,
-) -> None:
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, _attacker_play_sync, experiment.experiment_name, experiment.environment_spec, mgmt_ip, play, c2c_url, cfg
-    )
+# NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its
+# own foothold prep (attacker plugin's prepare_foothold, via SetupAccess), so the environment never
+# runs an attacker play. (User-adjudicated; see WHAT_TO_REFACTOR_ENVIRONMENT.md.)

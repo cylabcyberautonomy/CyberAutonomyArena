@@ -75,18 +75,26 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         mgmt_ip: Optional[str],
         c2c_url: Optional[str],
         cfg: ExperimentManagerConfig,
-        setup_play: Optional[str] = None,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
         from ..deployer import configure_environment
+        from ..rotate import rotate_environment
         if lc:
             lc.emit(EnvironmentSignal.CONFIGURING)
         try:
-            await configure_environment(experiment, mgmt_ip, c2c_url, cfg, setup_play=setup_play)
+            await configure_environment(experiment, mgmt_ip, c2c_url, cfg)
         except Exception as e:  # noqa: BLE001
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
             raise
+        # MHBench wrapper detail: rotate the host logs right after configuring so setup activity is
+        # cleared before the attack (a clean ground-truth baseline). Internal to this plugin — NOT on
+        # the base interface, and the arena never calls it. Best-effort: a rotation failure never fails
+        # configure.
+        try:
+            await rotate_environment(experiment, cfg)
+        except Exception:  # noqa: BLE001
+            pass
         if lc:
             lc.emit(EnvironmentSignal.CONFIGURED)
 

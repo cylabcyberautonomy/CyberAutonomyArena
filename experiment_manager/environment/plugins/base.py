@@ -9,7 +9,7 @@ bodies in, split the agent-facing specs out, and remove the direct MHBench coupl
 Lifecycle the arena drives (see main.py):
     capacity(experiment, cfg)                 -> [(vcpus, ram_mb, disk_gb), ...]  # admission sizing
     provision(experiment, c2c_url, cfg)       -> (DeployedEnvironment, mgmt_ip)
-    configure(experiment, mgmt_ip, c2c_url, cfg, setup_play=None) -> None
+    configure(experiment, mgmt_ip, c2c_url, cfg)              -> None   # + internal rotate (mhbench)
     collect(experiment, cfg)                  -> None   # pull host logs before teardown
     teardown(experiment, cfg)                 -> None
 
@@ -67,10 +67,10 @@ class EnvironmentPlugin(BaseModel):
         mgmt_ip: Optional[str],
         c2c_url: Optional[str],
         cfg: ExperimentManagerConfig,
-        setup_play: Optional[str] = None,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        """Emits CONFIGURING -> CONFIGURED (or FAILED) on `lc`."""
+        """Emits CONFIGURING -> CONFIGURED (or FAILED) on `lc`. Any environment-specific
+        post-configure step (e.g. MHBench log rotation) is internal to the plugin."""
         raise NotImplementedError(f"{type(self).__name__} must implement configure()")
 
     async def collect(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
