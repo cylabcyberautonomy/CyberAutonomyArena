@@ -21,8 +21,16 @@ from pydantic import BaseModel
 
 
 class AttackerJump(BaseModel):
-    """How to route to the box when it isn't directly reachable (e.g. a bastion). Its credential
-    should be scoped to forwarding only — not a key that grants a shell on the jump host."""
+    """SSH ProxyJump routing to the box when it isn't directly reachable. An SSH jump inherently
+    needs *some* credential to open the forward (the box auth is still end-to-end over it), so this
+    credential should be scoped to forwarding only — a forced-command / restricted key that can't get
+    a shell on the jump — not a management key.
+
+    PREFERRED ALTERNATIVE — no jump auth at all: have the environment expose the box through a dumb
+    L4 relay (socat / iptables DNAT / a pre-opened tunnel) so the attacker connects to a forwarded
+    endpoint and authenticates ONLY to the box, end-to-end. In that case leave `jump` None and point
+    `entry_ip`/`entry_port` at the forwarded endpoint. Use AttackerJump only when the box is reachable
+    solely via an SSH bastion."""
     host: str
     user: str = "root"
     ssh_key: Optional[str] = None
