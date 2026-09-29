@@ -73,12 +73,21 @@ class ExperimentSpecs(BaseModel):
     def _resolve_attacker_plugin_spec(self):
         """attacker_plugin + attacker_spec (file) -> the validated attacker plugin instance in
         `self.attacker`, so everything downstream (Experiment.attacker, build_config, ...) is
-        unchanged. Give the pair OR the embedded form, not both."""
+        unchanged. Give the pair OR the embedded form, not both.
+
+        The experiment base is environment + attacker: both are required. defender and traffic are
+        optional (None = the experiment simply runs without that system)."""
         if self.attacker_plugin:
             if self.attacker is not None:
                 raise ValueError("provide attacker_plugin (+attacker_spec) OR the embedded 'attacker', not both")
             from ..attacker.plugins.base import AttackerPlugin
             self.attacker = _resolve_plugin(AttackerPlugin, self.attacker_plugin, self.attacker_spec)
+        if self.attacker is None:
+            raise ValueError(
+                "an experiment requires an attacker: provide attacker_plugin (+attacker_spec) or an "
+                "embedded 'attacker'. (environment + attacker are the required base; defender and "
+                "traffic are optional.)"
+            )
         return self
 
 

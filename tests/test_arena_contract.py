@@ -158,6 +158,31 @@ def test_experimentspecs_without_traffic_still_valid():
     assert specs.traffic is None
 
 
+def test_experiment_base_is_environment_plus_attacker():
+    """The experiment base is environment + attacker; defender and traffic are optional. A spec with
+    only environment + attacker (no defender, no traffic) must validate, with both left None."""
+    specs = ExperimentSpecs(
+        experiment_name="ci_base_only",
+        environment=ENV_NAME,
+        attacker=ATTACKER,
+    )
+    assert specs.defender is None
+    assert specs.traffic is None
+
+
+def test_experimentspecs_requires_an_attacker():
+    """environment + attacker are the required base: a spec with no attacker (neither the plugin pair
+    nor the embedded form) must be rejected, not fail later mid-run."""
+    with pytest.raises(Exception, match="requires an attacker"):
+        ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV_NAME)
+
+
+def test_experimentspecs_requires_an_environment():
+    """environment is required (the other half of the base)."""
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="ci_no_env", attacker=ATTACKER)
+
+
 # ------------------------------------------------- attacker -> runner build_config contract
 
 def test_attacker_env_spec_is_adversary_safe():
