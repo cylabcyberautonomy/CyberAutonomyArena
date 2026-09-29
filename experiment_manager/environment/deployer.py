@@ -104,15 +104,50 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
     return [SetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
 
+_ATTACKER_SUBNET = "attacker_subnet"
+_DEFENDER_SUBNET = "defender_subnet"
+
+
 def _iter_victims(topology_path: Path):
-    """Yield each non-attacker host dict from the topology JSON."""
+    """Yield each VICTIM host dict — every host that is neither the attacker foothold nor the defender
+    box. Both are identified by their subnet (attacker_subnet / defender_subnet), mirroring how the
+    environment provisions them; the kali vm_type check is a belt-and-suspenders fallback. The defender
+    box is NOT a victim (the defender doesn't defend its own box) — it surfaces as DefenderEnvSpec.box."""
     topo = json.loads(Path(topology_path).read_text())
     for net in topo.get("networks", []):
         for sub in net.get("subnets", []):
+            if sub.get("name") in (_ATTACKER_SUBNET, _DEFENDER_SUBNET):
+                continue
             for h in sub.get("hosts", []):
                 if h.get("vm_type") == "kali_running":
                     continue
                 yield h
+
+
+def _defender_box_host(topology_path: Path) -> Optional[dict]:
+    """Return the defender box host dict (the single host in defender_subnet), or None if the topology
+    doesn't declare one (older topologies without an isolated defender box)."""
+    topo = json.loads(Path(topology_path).read_text())
+    for net in topo.get("networks", []):
+        for sub in net.get("subnets", []):
+            if sub.get("name") == _DEFENDER_SUBNET:
+                hosts = sub.get("hosts", [])
+                return hosts[0] if hosts else None
+    return None
+
+
+def defender_box_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
+    """The agent-facing DefenderBox derived from the topology's defender_subnet, or None if absent.
+    Single source of truth for both defender_env_spec().box and the plugin's defender_box()."""
+    from ..defender.env_spec import DefenderBox  # lazy: avoid import cycle
+    topo = deployed.topology_spec if deployed else None
+    if not (topo and Path(topo).exists()):
+        return None
+    bh = _defender_box_host(topo)
+    if not bh:
+        return None
+    ip = bh.get("ip_address")
+    return DefenderBox(name=bh["name"], ip=str(ip) if ip else None, subnet=_DEFENDER_SUBNET)
 
 
 def _role_from_name(name: str) -> Optional[str]:
@@ -144,6 +179,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
     return DefenderEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
         hosts=hosts,
+        box=defender_box_spec(deployed, cfg),
         topology_spec=topo,
     )
 
@@ -164,6 +200,12 @@ def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
         if ip:
             out.append(SetupAccess(name=h["name"], host=str(ip), user="root",
                                    ssh_key=key, ssh_common_args=proxy))
+    # ...plus the defender box itself: the harness reaches it via the bastion (same jump as victims) to
+    # launch the defender there. Reached at its in-env IP, NOT the mgmt host — it's a real isolated box.
+    box = _defender_box_host(topo)
+    if box and box.get("ip_address"):
+        out.append(SetupAccess(name=box["name"], host=str(box["ip_address"]), user="root",
+                               ssh_key=key, ssh_common_args=proxy))
     return out
 
 

@@ -121,16 +121,18 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return spec
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_setup_access
+        from ..deployer import defender_setup_access, _defender_box_host
         from ...attacker.env_spec import SetupAccess
         cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
         access = [a.model_copy(update={"ssh_key": cred})
                   for a in defender_setup_access(deployed, mgmt_ip, cfg)]
-        # ...plus how the harness reaches the defender box to launch the defender there. Today the box
-        # is reached directly on the mgmt FIP (a dedicated isolated box is the not-yet-provisioned item);
-        # no ProxyCommand needed.
-        box = self.defender_box(deployed, cfg)
-        if mgmt_ip:
+        # When the topology declares a defender_subnet, the deployer already added the REAL box entry
+        # (reached via the bastion, like the victims). Only fall back to the mgmt-host placeholder for
+        # older topologies without an isolated box, so the defender always has somewhere to run.
+        topo = deployed.topology_spec if deployed else None
+        has_real_box = bool(topo and Path(topo).exists() and _defender_box_host(topo))
+        if not has_real_box and mgmt_ip:
+            box = self.defender_box(deployed, cfg)
             access.append(SetupAccess(name=box.name, host=mgmt_ip, user="root",
                                       ssh_key=cred, ssh_common_args=""))
         return access
@@ -153,9 +155,13 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
+        from ..deployer import defender_box_spec
         from ...defender.env_spec import DefenderBox
-        # PLACEHOLDER until MHBench provisions a dedicated box in an isolated subnet: co-locate on the
-        # (attacker-hidden) management host. The interface is what's being exercised here.
+        # Real, isolated box from the topology's defender_subnet (provisioned by MHBench, live-validated).
+        box = defender_box_spec(deployed, cfg)
+        if box:
+            return box
+        # Fallback for topologies without a defender_subnet: co-locate on the (attacker-hidden) mgmt host.
         return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
 
     def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
