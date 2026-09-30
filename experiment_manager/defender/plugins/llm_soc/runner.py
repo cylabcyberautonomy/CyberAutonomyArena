@@ -111,8 +111,18 @@ management_ip = config["management_ip"]
 # xpack.security.enabled=false. Connecting with https raised
 # "TlsError: WRONG_VERSION_NUMBER" on the very first indices.exists() call in
 # TelemetryAnalysis.__init__, killing this runner before it ever armed.
-es_url = f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+# BOX MODE: when the environment provides a defender box, the plugin installed ES on it and
+# opened an ssh -L tunnel; it wrote es_url (http://127.0.0.1:<port>) + plain index names into the
+# config. Read the box's OWN per-experiment ES over the tunnel. Sensors already ship there via the
+# env relay (victim -> relay -> box:9200), so this run needs NO InstallFalco / sysflow-repoint.
+# No box (older env) -> legacy path: the shared harness ES at management_ip.
+box_mode = bool(config.get("es_url"))
+es_url = config["es_url"] if box_mode else f"http://{management_ip}:{perry_cfg.elastic_config.port}"
 es_conn = Elasticsearch(es_url)
+# In box mode the box holds plain per-experiment indices (isolation is by-box, so no falco-<exp>
+# suffix); otherwise fall back to Perry's scoped index names.
+falco_index = config.get("falco_index", "falco") if box_mode else perry_cfg.falco_index
+sysflow_index = config.get("sysflow_index", "sysflow") if box_mode else perry_cfg.sysflow_index
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -149,7 +159,13 @@ if topology_spec:
     # Kali attacker has no telemetry stack, so it is excluded.
     telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
 
-if network is not None:
+if network is not None and box_mode:
+    # Box mode: the environment owns sensor shipping (falcosidekick + sf-processor -> relay ->
+    # box:9200), so the defender does NOT install Falco or repoint sysflow. Telemetry is already
+    # flowing to the box ES this runner reads over the tunnel. Nothing to do here.
+    print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
+          f"skipping InstallFalco / sysflow-repoint.", flush=True)
+elif network is not None:
     # es_url above already uses this experiment's actual management_ip rather
     # than whatever's baked into config/config.json on disk - keep InstallFalco
     # (which reads config.external_ip internally) consistent with that.
@@ -226,7 +242,7 @@ _PROTECTED_IPS = {ip for ip in (management_ip, config.get("bastion_ip"), config.
 
 arsenal = CountArsenal(config.get("arsenal", {}))
 telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
-    es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+    es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
 if cloud_backend == "gcp":

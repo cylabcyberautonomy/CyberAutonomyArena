@@ -156,6 +156,8 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         # but this plugin shares Defense-MHBench-compatible's Network/Subnet/Host
         # machinery with deception/prompt_injection - see DefenderPlugin._teardown_decoys.
         await self._teardown_decoys(experiment_name, cfg)
+        # Kill the beluga->box ES ssh -L tunnel (no-op if this run used the legacy path).
+        self._teardown_box_es_tunnel(experiment_name, cfg)
 
     async def run(
         self,
@@ -174,6 +176,11 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
         pythonpath = os.pathsep.join(pythonpath_parts)
+        # If the environment provides a defender box, stand up ES on it and tunnel to it, so this
+        # run reads its OWN per-experiment ES (fixes shared-ES contamination + shard-cap). Blocking
+        # (SSH install + wait), so run it off the event loop. No box -> None -> legacy beluga+shared-ES.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.prepare_box_es, config_path, experiment_name, cfg)
         return await asyncio.create_subprocess_exec(
             python,
             str(Path(__file__).parent / "runner.py"),
