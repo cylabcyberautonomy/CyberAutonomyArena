@@ -152,8 +152,17 @@ es_conn = Elasticsearch(es_url)
 # address). AnsibleRunner needs the bastion specifically: its inventory's
 # ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
 # experiment's internal 192.168.x.x hosts at all.
+# SCOPED defender key from the harness-injected SetupAccess (defender_setup_access): fail closed,
+# never fall back to perry_cfg's management (god) key on disk. AnsibleRunner uses this key for both
+# its bastion `-W` jump and the victim hop; the forward-only jump creds make that safe.
+def _scoped_ssh_key(cfg_dict):
+    for a in cfg_dict.get("defender_setup_access", []):
+        if a.get("ssh_key"):
+            return os.path.expanduser(a["ssh_key"])
+    raise RuntimeError("no scoped ssh_key in defender_setup_access; refusing to use the management key")
+
 ansible_runner = AnsibleRunner(
-    ssh_key_path=(perry_cfg.gcp_config.ssh_key_path if cloud_backend == "gcp" else perry_cfg.openstack_config.ssh_key_path),
+    ssh_key_path=_scoped_ssh_key(config),
     management_ip=config["bastion_ip"],
     ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
     log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it

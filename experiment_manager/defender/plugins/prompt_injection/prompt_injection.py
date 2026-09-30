@@ -106,6 +106,10 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
             ],
         }
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        # AIAttackerDetection reads the box ES telemetry; static payload strategies ignore it.
+        return {"telemetry": [9200]}
+
     def build_config(
         self,
         experiment_name: str,

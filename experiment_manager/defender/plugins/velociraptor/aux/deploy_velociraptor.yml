@@ -1,14 +1,14 @@
 ---
-# Velociraptor EDR deployment. Server on the bastion, clients on the victims.
+# Velociraptor EDR deployment. Server on the DEFENDER BOX, clients on the victims.
 # velo_action selects the phase: install | stop.
 #
-# Server block runs on the bastion (velo_server group), reached directly on its FIP.
+# Server block runs on the defender box (velo_server group), reached via the bastion ProxyCommand.
 # Client block runs on the victims (velo_clients group), reached via the bastion
 # ProxyCommand. The binary is shipped from the harness (velo_binary) — no apt/download
 # on the range. The API user is created BEFORE the frontend starts, because a running
 # frontend caches users in memory and won't pick up a later `user add`.
 
-- name: Velociraptor server (bastion)
+- name: Velociraptor server (defender box)
   hosts: velo_server
   gather_facts: false
   become: true

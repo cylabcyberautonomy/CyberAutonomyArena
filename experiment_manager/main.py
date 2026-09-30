@@ -14,6 +14,25 @@ from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
 from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerCommand
+from .defender.lifecycle import (
+    DefenderLifecycle, DefenderSignal, DefenderCommand, signal_persister as _defender_signal_persister,
+)
+
+
+async def _stop_defender_process(experiment, process) -> None:
+    """Terminate the defender subprocess and record the STOPPING/STOPPED lifecycle signals (unless the
+    defender already reached a terminal FAILED). Used everywhere the arena tears the defender down, so
+    the defender's lifecycle mirrors the attacker's regardless of which path stops it."""
+    lc = getattr(experiment, "_defender_lifecycle", None)
+    if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
+        await lc.emit(DefenderSignal.STOPPING)
+    try:
+        process.terminate()
+        await process.wait()
+    except Exception:
+        pass
+    if lc is not None and lc.status != DefenderSignal.FAILED:
+        await lc.emit(DefenderSignal.STOPPED)
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
@@ -1002,6 +1021,13 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # Drop any marker left by a previous run of this experiment name
                 # (overwrite=true reuses the output dir) before the gate below.
                 experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
+                # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
+                # arena records each phase so an observer sees where the defender is and a hang shows
+                # as a stalled status, not one opaque "failed to arm".
+                defender_lc = DefenderLifecycle(on_emit=_defender_signal_persister(experiment))
+                experiment._defender_lifecycle = defender_lc
+                await defender_lc.send(DefenderCommand.START_SETUP)
+                await defender_lc.emit(DefenderSignal.SETUP_STARTED)
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
                 # setup access (key + bastion routing), symmetric with the attacker.
                 _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
@@ -1031,6 +1057,9 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # would produce a "defender vs attacker" result with no defender ever having
                 # run, and nothing in the recorded outcome to say so.
                 exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+                _lc = getattr(experiment, "_defender_lifecycle", None)
+                if _lc is not None:
+                    await _lc.emit(DefenderSignal.FAILED, str(e))
                 await _handle_failure(experiment, f"Failed to start defender — {e}")
                 return
 
@@ -1046,13 +1075,17 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await experiment.defender.wait_until_ready(
                     experiment.experiment_name, cfg, defender_process, log
                 )
+                # Armed: the detection loop is up and reading telemetry. A passive detector is live
+                # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
+                # is gated on READY above; RUNNING marks "defender actively defending").
+                await defender_lc.emit(DefenderSignal.READY)
+                await defender_lc.send(DefenderCommand.START)
+                await defender_lc.emit(DefenderSignal.RUNNING)
+                await registry.update(experiment)
             except Exception as e:
                 exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
-                try:
-                    defender_process.terminate()
-                    await defender_process.wait()
-                except Exception:
-                    pass
+                await defender_lc.emit(DefenderSignal.FAILED, str(e))
+                await _stop_defender_process(experiment, defender_process)
                 await _handle_failure(experiment, f"Defender failed to arm — {e}")
                 return
 
@@ -1067,11 +1100,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         except Exception as e:
             exp_log.exception("Background-traffic install failed for '%s'", experiment.experiment_name)
             if defender_process:
-                try:
-                    defender_process.terminate()
-                    await defender_process.wait()
-                except Exception:
-                    pass
+                await _stop_defender_process(experiment, defender_process)
             await _handle_failure(experiment, f"Background-traffic install failed — {e}")
             return
 
@@ -1101,11 +1130,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
-            try:
-                defender_process.terminate()
-                await defender_process.wait()
-            except Exception:
-                pass
+            await _stop_defender_process(experiment, defender_process)
         await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
@@ -1154,8 +1179,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     finally:
         if defender_process:
             try:
-                defender_process.terminate()
-                await defender_process.wait()
+                await _stop_defender_process(experiment, defender_process)
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)

@@ -37,14 +37,10 @@ _PATTERNS = [
 # Baseline of currently-known reads, keyed by plugin-relative path. Shrink as fixes merge.
 # Value = one-line reason so a reviewer knows why it's still here and when it goes away.
 _BASELINE = {
-    # Attacker plugins — fixed on arena-refactor (kali_c2/cai consume SetupAccess there); drop on merge.
-    "attacker/plugins/cai/cai.py": "fixed on arena-refactor (consumes SetupAccess); remove after merge",
-    "attacker/plugins/incalmo/kali_c2.py": "fixed on arena-refactor (consumes SetupAccess); remove after merge",
-    # Defender runners — fixed on arena-refactor-defender (consume defender_setup_access); drop on merge.
-    "defender/plugins/canary/runner.py": "fixed on arena-refactor-defender (dropped the fallback); remove after merge",
-    "defender/plugins/deception/runner.py": "fixed on arena-refactor-defender; remove after merge",
-    "defender/plugins/llm_soc/runner.py": "fixed on arena-refactor-defender; remove after merge",
-    "defender/plugins/prompt_injection/runner.py": "fixed on arena-refactor-defender; remove after merge",
+    # Attacker plugins (cai, kali_c2) and defender runners (canary/deception/llm_soc/prompt_injection)
+    # were fixed on arena-refactor / arena-refactor-defender and their fixes are now MERGED here — they
+    # consume the injected scoped SetupAccess and no longer read the god key, so they are OUT of the
+    # baseline (the guard is strict for them now).
     # Velociraptor — DEFERRED: its server runs on the bastion (can't be reached by a scoped key); the
     # fix is moving the server onto the defender box, then it consumes SetupAccess. Remove after that.
     "defender/plugins/velociraptor/velociraptor.py": "deferred: server-on-bastion, pending bastion->box migration",

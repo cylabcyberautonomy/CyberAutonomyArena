@@ -72,6 +72,12 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
             ],
         }
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        # Only the telemetry/canary_event checks touch the box ES; ssh/resolve-only opens nothing.
+        if any(c in self.checks for c in ("telemetry", "canary_event")):
+            return {"telemetry": [9200]}
+        return {}
+
     def build_config(
         self,
         experiment_name: str,
