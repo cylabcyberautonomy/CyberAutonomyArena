@@ -164,6 +164,84 @@ def _bastion_proxy_args(mgmt_ip: Optional[str], key: str) -> str:
     )
 
 
+# --- per-system key issuance (no god-key) -------------------------------------------------------------
+# MHBench injects ONE broad keypair (the OpenStack keypair) as root on every VM. That MANAGEMENT key is
+# the harness's provisioning credential — it stays harness-side and NEVER goes into a spec. On top of it
+# the environment ISSUES two SCOPED keys and injects each only where that system may legitimately reach:
+#   attacker_key -> the foothold (kali) ONLY   (the attacker must EARN victim access, not get it free)
+#   defender_key -> the defender box + victims (the defender legitimately administers what it defends)
+# The scoped PRIVATE keys are what SetupAccess hands the agents; the management private key never leaves
+# the harness, so leaking a spec grants only that system's own scope (kills the east-west god-key cheat).
+
+def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path]:
+    """Generate (idempotently) the attacker_key + defender_key keypairs the env issues, at the paths
+    attacker_credential()/defender_credential() point to. Reused across experiments; pubkeys are
+    injected per-deploy by inject_scoped_keys()."""
+    keydir = Path(cfg.mhbench_dir) / "keys"
+    keydir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in ("attacker_key", "defender_key"):
+        p = keydir / name
+        if not p.exists():
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(p), "-N", "", "-q",
+                            "-C", f"arena-{name}"], check=True)
+            p.chmod(0o600)
+        out.append(p)
+    return out[0], out[1]
+
+
+def _inject_pubkey(pubkey: str, host_ip: str, mgmt_ip: str, mgmt_key: str) -> bool:
+    """Append pubkey to root's authorized_keys on host_ip (reached via the bastion with the broad
+    management key). Idempotent per host."""
+    proxy = (f"ssh -W %h:%p -i {mgmt_key} -o BatchMode=yes -o StrictHostKeyChecking=no "
+             f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 root@{mgmt_ip}")
+    remote = ("install -d -m700 ~/.ssh && touch ~/.ssh/authorized_keys && "
+              f"grep -qxF {pubkey!r} ~/.ssh/authorized_keys || echo {pubkey!r} >> ~/.ssh/authorized_keys")
+    r = subprocess.run(
+        ["ssh", "-i", mgmt_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
+         "-o", f"ProxyCommand={proxy}", f"root@{host_ip}", remote],
+        capture_output=True, text=True, timeout=60,
+    )
+    return r.returncode == 0
+
+
+def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
+    """Issue + inject the per-system scoped pubkeys: attacker_key on the foothold ONLY, defender_key on
+    the defender box + victims. Best-effort per host (logged); the management key still reaches every
+    host for provisioning regardless."""
+    name = experiment.experiment_name
+    if not mgmt_ip:
+        log(name, "inject_scoped_keys: no mgmt_ip; skipping per-system key injection.")
+        return
+    topo = resolve_topology_path(experiment.environment_spec, cfg)
+    ak, dk = issue_scoped_keys(cfg)
+    ak_pub = Path(str(ak) + ".pub").read_text().strip()
+    dk_pub = Path(str(dk) + ".pub").read_text().strip()
+    mgmt_key = _mhbench_ssh_key(cfg)
+
+    kali_ip = _kali_ip_from_spec(topo)
+    if kali_ip:
+        ok = _inject_pubkey(ak_pub, kali_ip, mgmt_ip, mgmt_key)
+        log(name, f"per-system key: attacker_key -> foothold {kali_ip}: {'ok' if ok else 'FAILED'}")
+
+    targets: list[tuple[str, str]] = []
+    box = _defender_box_host(topo)
+    if box and box.get("ip_address"):
+        targets.append((box["name"], str(box["ip_address"])))
+    for h in _iter_victims(topo):
+        if h.get("ip_address"):
+            targets.append((h["name"], str(h["ip_address"])))
+    for hname, hip in targets:
+        ok = _inject_pubkey(dk_pub, hip, mgmt_ip, mgmt_key)
+        log(name, f"per-system key: defender_key -> {hname} {hip}: {'ok' if ok else 'FAILED'}")
+
+
+async def inject_scoped_keys_env(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, inject_scoped_keys, experiment, mgmt_ip, cfg)
+
+
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
     """Stage-A adapter: MHBench serves up the AGENT-FACING DefenderEnvSpec (objective + host inventory
     at the defender's knowledge level — no creds/routing). Carries topology_spec for the not-yet-migrated
