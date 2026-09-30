@@ -72,13 +72,18 @@ def logline(msg: str) -> None:
 
 
 def vql(query: str, timeout: float = 90) -> list[dict]:
-    """Run VQL on the bastion server via SSH; return parsed rows ([] on error)."""
+    """Run VQL on the box velo server via SSH; return parsed rows ([] on error)."""
+    # ssh concatenates the trailing argv into ONE string and runs it through the remote shell, so the
+    # VQL (parens, spaces, quotes) MUST be a single shell-quoted token or the remote bash mis-parses it
+    # ("syntax error near ..."). Build the whole remote command as one quoted string.
+    remote = (f"{shlex.quote(VELO)} --api_config {shlex.quote(API_CONFIG)} "
+              f"query --format json {shlex.quote(query)}")
     cmd = [
         "ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         *shlex.split(SERVER_PROXY),           # bastion ProxyCommand -> reach the box (server host)
         f"root@{SERVER_IP}",                  # server runs on the box, not the bastion
-        VELO, "--api_config", API_CONFIG, "query", "--format", "json", query,
+        remote,
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
