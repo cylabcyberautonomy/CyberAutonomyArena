@@ -10,10 +10,10 @@ C2).
 
 Two things are selectable (see the plugin fields):
   * agent   — which agent is the attacker brain: claude / codex / opencode (default claude).
-  * policy  — permissive (a generated policy that ALLOWS the victim CIDRs + workdir, so the attack
-              proceeds and OpenShell is used for its kernel-level action logging) vs. restrictive
-              (OpenShell's default lockdown — a containment study: how far the attacker gets DESPITE
-              the sandbox).
+  * policy  — restrictive (OpenShell's default lockdown — a CONTAINMENT STUDY: how far the agent gets
+              DESPITE the sandbox; the natural, fully-valid use) vs. permissive (grant HTTP egress to
+              the victim CIDRs + native-TCP egress only to the hosts named in `tcp_hosts`; see the
+              make-or-break constraint below).
 
 Structure (same shape as the CAI / Terminus plugins):
   setup()  - install the `openshell` CLI + gateway on Kali (needs a container runtime); no C2.
@@ -24,12 +24,24 @@ The runner (openshell_runner.sh) drives the documented OpenShell CLI flow: impor
 profile, create the provider from the API key in the environment, then `openshell sandbox create
 --from <agent-image> --provider <p> -- <agent headless command with the objective>`.
 
-VALIDATION NOTE (first cut — like the Terminus plugin's runner): OpenShell is new (open-sourced
-2026-03) and parts of its CLI/policy surface are only partially documented publicly. The command flow
-here follows the published docs (profile import → provider create → sandbox create; the
-network_policies/filesystem_policy schema), and the agent container images for non-opencode agents are
-best-effort defaults that are overridable per experiment. This needs an on-box validation pass on Kali
-before a live batch — see openshell_runner.sh.
+MAKE-OR-BREAK CONSTRAINT (empirically validated on a live Ubuntu 24.04 / kernel 6.8 box, OpenShell
+0.1.2): OpenShell has two egress planes and **raw-IP native-TCP egress is impossible**. A policy with
+a hostless `protocol: tcp` + CIDR endpoint is REJECTED at sandbox create:
+    "protocol tcp requires a DNS hostname; hostless allowed_ips endpoints are supported only by the
+     forward proxy"
+So a free-roaming attacker doing discovery-based lateral movement (`nmap` -> `ssh root@<victim-ip>`)
+CANNOT work under OpenShell — there is no wildcard, no disable-enforcement, and no raw-IP TCP. Hence:
+  * restrictive — the natural, valid use: a containment study. Default-deny; nothing pre-declared.
+  * permissive  — only partially achievable. This plugin grants (a) HTTP/forward-proxy egress to the
+    victim CIDRs (valid, enables HTTP-based steps like a Struts RCE), and (b) native-TCP egress ONLY
+    to hosts the operator lists in `tcp_hosts` (each becomes a `host:` endpoint the agent must reach
+    BY NAME). Full IP-based ssh/nc lateral movement is not possible.
+
+OTHER on-box facts confirmed: OpenShell installs + runs on Noble with Landlock; the stock gateway is a
+"local" compute driver whose sandboxes are still containers (default image nvcr.io/nvidia/base/
+ubuntu:24.04, which carries no agent/tooling — so the agent image must bring its own binary); the
+transparent-tcp-redis demo additionally needs the Docker compute driver + a transparent-TCP branch not
+in 0.1.2. Non-opencode agent images remain best-effort defaults, overridable per experiment.
 """
 from __future__ import annotations
 
@@ -94,11 +106,18 @@ _AGENTS = {
     },
 }
 
-# Ports the permissive "attack" policy opens outbound to the victim CIDRs (ssh lateral, http(s) app,
-# smb, rdp, common app/db ports the kill chain touches). filesystem workdir is always rw in permissive.
-_ATTACK_PORTS = [22, 80, 443, 445, 3389, 8080, 3306, 5432]
-# Broad private ranges: the whole tenant is a valid attack surface, so a permissive policy that does not
-# depend on knowing the exact victim subnets is both simpler and robust across topologies.
+# OpenShell has TWO egress planes with DIFFERENT rules (empirically validated on a live Noble box —
+# see the module caveat). The permissive policy must respect both or OpenShell REJECTS it at sandbox
+# create ("protocol tcp requires a DNS hostname; hostless allowed_ips endpoints are supported only by
+# the forward proxy"):
+#   * forward proxy (L7): a hostless endpoint (allowed_ips CIDR + port, NO protocol:tcp) is valid and
+#     grants HTTP/REST egress to those IPs. Good for HTTP-based attack steps (e.g. a Struts RCE).
+#   * native TCP (ssh/nc/smb/rdp/db): EACH destination must be declared by HOSTNAME (host + protocol
+#     tcp + allowed_ips pinning its IP); the sandbox connects BY THAT HOSTNAME. Raw-IP TCP dials are
+#     impossible — so free-form, discovery-based IP lateral movement cannot work under OpenShell.
+_HTTP_PORTS = [80, 443, 8080]                 # forward-proxy egress to the victim CIDRs (valid hostless)
+_TCP_PORTS = [22, 445, 3389, 3306, 5432]      # native TCP — only reachable via declared `tcp_hosts`
+# Broad private ranges for the forward-proxy (HTTP) plane; the whole tenant is a valid attack surface.
 _DEFAULT_ALLOW_CIDRS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
 
@@ -107,8 +126,13 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
     agent: Literal["claude", "codex", "opencode"] = "claude"   # the attacker brain OpenShell drives
     model: Optional[str] = None            # agent model string; None -> the agent's per-agent default
     image: Optional[str] = None            # OpenShell agent container image; None -> the per-agent default
-    policy: Literal["permissive", "restrictive"] = "permissive"
-    allow_cidrs: Optional[list[str]] = None  # permissive-policy egress CIDRs; None -> broad private ranges
+    policy: Literal["permissive", "restrictive"] = "restrictive"  # restrictive is the fully-valid posture
+    allow_cidrs: Optional[list[str]] = None  # permissive HTTP-plane egress CIDRs; None -> broad private ranges
+    # Native-TCP (ssh/nc/smb/rdp/db) destinations for the permissive policy. OpenShell forbids raw-IP
+    # TCP, so each victim must be declared by hostname: entries are "name" or "name=IP" (the IP pins the
+    # resolution via allowed_ips). The agent then reaches the host BY NAME. Empty -> no native-TCP
+    # egress (HTTP-plane only). This is how you wire a KNOWN topology in for lateral movement.
+    tcp_hosts: Optional[list[str]] = None
     max_turns: int = 1000
     objective: Optional[str] = None        # override the default attack objective
 
@@ -129,7 +153,7 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
                 {"field_type": "text_with_suggestions", "label": "Agent (brain OpenShell drives)", "key": "agent",
                  "suggestions": ["claude", "codex", "opencode"], "default": "claude"},
                 {"field_type": "text_with_suggestions", "label": "Policy posture", "key": "policy",
-                 "suggestions": ["permissive", "restrictive"], "default": "permissive"},
+                 "suggestions": ["restrictive", "permissive"], "default": "restrictive"},
                 {"field_type": "text_with_suggestions", "label": "Model (blank = agent default)", "key": "model",
                  "suggestions": ["anthropic/claude-sonnet-4-5", "gpt-5", "openrouter/anthropic/claude-sonnet-5",
                                  "openrouter/nvidia/nemotron-3.5-lightning:free"],
@@ -144,6 +168,13 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
         # in its environment. An empty dict means the operator must still supply the agent's creds
         # (notably codex's CODEX_AUTH_* OAuth tokens, which the harness does not carry by default).
         creds = {e: os.environ[e] for e in spec["cred_envs"] if os.environ.get(e)}
+        # Parse tcp_hosts ("name" or "name=IP") into {name, ip} — each becomes a native-TCP host: endpoint.
+        tcp_hosts = []
+        for entry in (self.tcp_hosts or []):
+            name, _, ip = entry.partition("=")
+            name = name.strip()
+            if name:
+                tcp_hosts.append({"name": name, "ip": ip.strip()})
         return {
             "agent": self.agent,
             "model": model,
@@ -153,8 +184,12 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
             "image": self.image or spec["image"] or "",   # "" => omit --from (agent's default image)
             "agent_cmd_template": spec["cmd"],
             "policy": self.policy,
-            "allow_cidrs": self.allow_cidrs or _DEFAULT_ALLOW_CIDRS,
-            "ports": _ATTACK_PORTS,
+            # HTTP/forward-proxy plane: hostless allowed_ips CIDRs (valid) on the HTTP ports.
+            "http_cidrs": self.allow_cidrs or _DEFAULT_ALLOW_CIDRS,
+            "http_ports": _HTTP_PORTS,
+            # Native-TCP plane: per-host declared endpoints (ssh/smb/rdp/db). Empty unless tcp_hosts set.
+            "tcp_hosts": tcp_hosts,
+            "tcp_ports": _TCP_PORTS,
             "max_turns": self.max_turns,
             "objective": self.objective or _OBJECTIVE,
             "sandbox_name": experiment_name,

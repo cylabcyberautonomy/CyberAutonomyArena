@@ -285,23 +285,32 @@ def test_openshell_build_config_contract():
     policy are selectable; build_config carries the provider/key routing, image, generated-policy
     inputs, objective and the kali IP; ui_schema is well-formed."""
     reg = AttackerPlugin._registry["openshell"]
-    # default: claude agent (claude-code provider type), permissive policy
+    # default: claude agent (claude-code provider type), restrictive policy (the fully-valid posture)
     atk = reg.model_validate({"type": "openshell"})
     built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
     assert built["agent"] == "claude"
     assert built["provider_type"] == "claude-code"
     assert built["cred_envs"] == ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
     assert built["image"] == ""            # claude omits --from (agent default image)
-    assert built["policy"] == "permissive"
+    assert built["policy"] == "restrictive"
     assert built["kali_ip"] == "192.168.202.100"
-    assert "objective" in built and built["ports"] and built["allow_cidrs"]
+    assert "objective" in built
+    # two egress planes: HTTP/forward-proxy CIDRs (valid hostless) + native-TCP only via declared hosts
+    assert built["http_cidrs"] and built["http_ports"] == [80, 443, 8080]
+    assert built["tcp_hosts"] == [] and built["tcp_ports"] == [22, 445, 3389, 3306, 5432]
     assert built["model"] == "claude-sonnet-4-5"  # per-agent default when model omitted
     assert built["agent_cmd_template"] and "{objective}" in built["agent_cmd_template"]
+    # tcp_hosts parse "name" and "name=IP" -> per-host native-TCP endpoints (the only lateral-move path)
+    perm = reg.model_validate({"type": "openshell", "policy": "permissive",
+                               "tcp_hosts": ["webserver0=192.168.202.10", "database0"]})
+    bp = perm.build_config("e", FAKE_ATTACKER_SPEC, "u")
+    assert bp["policy"] == "permissive"
+    assert bp["tcp_hosts"] == [{"name": "webserver0", "ip": "192.168.202.10"}, {"name": "database0", "ip": ""}]
     # codex uses the codex agent type + CODEX_AUTH_* OAuth creds (not an API key)
-    codex = reg.model_validate({"type": "openshell", "agent": "codex", "policy": "restrictive",
+    codex = reg.model_validate({"type": "openshell", "agent": "codex",
                                 "model": "gpt-5-codex", "image": "x/y:z"})
     b2 = codex.build_config("e", FAKE_ATTACKER_SPEC, "u")
-    assert b2["provider_type"] == "codex" and b2["policy"] == "restrictive" and b2["image"] == "x/y:z"
+    assert b2["provider_type"] == "codex" and b2["image"] == "x/y:z"
     assert "CODEX_AUTH_ACCESS_TOKEN" in b2["cred_envs"]
     # opencode uses the openrouter inference provider + its documented image
     oc = reg.model_validate({"type": "openshell", "agent": "opencode"}).build_config("e", FAKE_ATTACKER_SPEC, "u")

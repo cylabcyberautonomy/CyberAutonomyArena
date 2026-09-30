@@ -4,7 +4,8 @@
 #
 # Reads attacker_config.json (path = $1), produced by OpenShellAttacker.build_config(), with keys:
 #   agent, model, provider_type, cred_envs[], creds{env:val}, image, agent_cmd_template,
-#   policy ("permissive"|"restrictive"), allow_cidrs[], ports[], objective, sandbox_name, output_dir.
+#   policy ("permissive"|"restrictive"), http_cidrs[], http_ports[], tcp_hosts[{name,ip}], tcp_ports[],
+#   objective, sandbox_name, output_dir.
 #
 # Flow (verified against the NVIDIA/OpenShell repo — providers/*.yaml + examples/agent-driven-policy-
 # management/demo.sh, which is the authoritative real invocation):
@@ -58,7 +59,9 @@ openshell status || { echo "[openshell-runner] gateway not reachable"; exit 1; }
 openshell provider delete "$PROVIDER_TYPE" >/dev/null 2>&1 || true
 openshell provider create --name "$PROVIDER_TYPE" --type "$PROVIDER_TYPE" "${CRED_ARGS[@]}" || true
 
-# 2: permissive policy — allow the victim CIDRs on the attack ports for all binaries, + rw workdir.
+# 2: permissive policy — two egress planes (OpenShell REJECTS hostless protocol:tcp, so we split them):
+#      http_egress: hostless allowed_ips CIDRs on the HTTP ports (forward proxy, L7) — valid.
+#      tcp_egress:  ONE host: endpoint per tcp_hosts entry (native TCP by hostname). Omitted if none.
 #    Also flip the sandbox to auto-approval so any runtime proposals are granted without a human.
 POLICY_ARGS=()
 if [ "$POLICY" = "permissive" ]; then
@@ -71,22 +74,40 @@ if [ "$POLICY" = "permissive" ]; then
     echo "landlock:"
     echo "  compatibility: best_effort"
     echo "network_policies:"
-    echo "  attack_egress:"
-    echo "    name: attack_egress"
+    # -- HTTP/forward-proxy plane: hostless allowed_ips CIDRs (valid) on the HTTP ports --
+    echo "  http_egress:"
+    echo "    name: http_egress"
     echo "    endpoints:"
     while IFS= read -r cidr; do
       [ -z "$cidr" ] && continue
       while IFS= read -r port; do
         [ -z "$port" ] && continue
-        echo "      - allowed_ips: [\"$cidr\"]"
-        echo "        port: $port"
-        echo "        protocol: tcp"
-      done < <(cfg_list ports)
-    done < <(cfg_list allow_cidrs)
-    # Glob: the kill chain drives many binaries (ssh/scp/nc/curl/python/msf...), so allow all of them
-    # to reach the allowed_ips above. This is the permissive "attack" posture, not least-privilege.
+        echo "      - { allowed_ips: [\"$cidr\"], port: $port }"
+      done < <(cfg_list http_ports)
+    done < <(cfg_list http_cidrs)
     echo "    binaries:"
     echo "      - { path: \"/**\" }"
+    # -- Native-TCP plane: one host: endpoint per declared tcp_hosts entry, on the TCP ports.
+    #    OpenShell forbids raw-IP TCP, so lateral movement is ONLY to these named hosts. --
+    n_tcp=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("tcp_hosts",[])))' "$CONFIG")
+    if [ "$n_tcp" -gt 0 ]; then
+      echo "  tcp_egress:"
+      echo "    name: tcp_egress"
+      echo "    endpoints:"
+      python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1])); ports=d.get("tcp_ports",[]); q=chr(34)
+for h in d.get("tcp_hosts",[]):
+    ip=h.get("ip") or ""
+    pin=", allowed_ips: ["+q+ip+"/32"+q+"]" if ip else ""
+    for p in ports:
+        print("      - { host: "+h["name"]+", port: "+str(p)+", protocol: tcp"+pin+" }")' "$CONFIG"
+      echo "    binaries:"
+      echo "      - { path: \"/**\" }"
+    else
+      echo "[openshell-runner] NOTE: no tcp_hosts declared — native-TCP lateral movement (ssh/nc) is"
+      echo "                   NOT possible under OpenShell without hostname endpoints; HTTP egress only." >&2
+    fi
   } > "$POLICY_FILE"
   echo "[openshell-runner] wrote permissive policy:"; sed 's/^/    /' "$POLICY_FILE"
   POLICY_ARGS=(--policy "$POLICY_FILE" --approval-mode auto)
