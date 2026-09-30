@@ -45,26 +45,18 @@ async def run_attacker(
     experiment,
     cfg: ExperimentManagerConfig,
     prepared: PreparedAttacker,
-    c2c_server: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
     experiment_name = experiment.experiment_name
     env_spec = experiment._attacker_env_spec  # adversary-safe spec the arena attached (env-produced)
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    # The attacker consumes the attacker-facing env spec the environment produced (passed in by the
-    # arena) — it never parses raw environment/topology internals.
-    built = attacker.build_config(experiment_name, env_spec, c2c_server)
-    # Target-side payloads (ExploitStruts, ssh/nc agent-spawn) make the VICTIM fetch the implant
-    # from a C2 URL. The C2 runs on the attacker's in-env foothold, so victims must use its in-env
-    # address (prepared.remote_url) — c2c_server is the 127.0.0.1 ssh -L tunnel usable only by the
-    # strategy on the harness host. Record it separately so low-level download actions use the
-    # victim-reachable address without changing the strategy's own C2 API URL.
-    agent_c2c = prepared.remote_url or c2c_server
-    if agent_c2c:
-        built["agent_c2c_server"] = agent_c2c
+    # The attacker consumes the attacker-facing env spec + its OWN opaque setup handle (`prepared`).
+    # The arena never inspects `prepared`: a C2 attacker reads its own C2 URLs off it inside
+    # build_config()/run(); a shell agent ignores it. No C2 plumbing threads through the arena.
+    built = attacker.build_config(experiment_name, env_spec, prepared)
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
     # run_start launches the process AND emits RUNNING (attacker-emitted; the arena waits for it).
-    process = await attacker.run_start(experiment, prepared, config_path, cfg, c2c_server, agent_c2c_url=agent_c2c)
+    process = await attacker.run_start(experiment, prepared, config_path, cfg)
     log(experiment_name, f"Attacker process started (pid={process.pid})")
     return process

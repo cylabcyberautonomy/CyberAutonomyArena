@@ -502,11 +502,10 @@ async def _clean_slate() -> None:
                 await experiment.attacker.stop(experiment, cfg)
             except Exception:
                 logger.exception("Failed to stop attacker process for '%s'", experiment.experiment_name)
-        if experiment.attacker and experiment.c2c_container_id:
             try:
-                await experiment.attacker.stop_c2c(experiment.c2c_container_id)
+                await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
             except Exception:
-                logger.exception("Failed to stop C2 container for '%s'", experiment.experiment_name)
+                logger.exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
     await _openstack_clean_slate()
 
@@ -536,28 +535,14 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     experiment.teardown_started_at = datetime.now(timezone.utc)
     await registry.update(experiment)
 
-    if experiment.attacker and experiment.c2c_container_id:
+    # Tear down the C2 (a no-op for an attacker that has none), unless we're preserving it for
+    # hands-on inspection (delete_c2=False). The C2 runs on the foothold now, so the plugin owns
+    # teardown, keyed by experiment_name — the arena no longer tracks a container id.
+    if experiment.attacker and delete_c2:
         try:
-            c2c_log_path = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "attacker" / "c2c_server.log"
-            c2c_log_path.parent.mkdir(parents=True, exist_ok=True)
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "logs", experiment.c2c_container_id,
-                stdout=open(c2c_log_path, "w"), stderr=asyncio.subprocess.STDOUT,
-            )
-            await proc.wait()
+            await experiment.attacker.stop_c2c(experiment.experiment_name)
         except Exception:
-            get_logger(experiment.experiment_name).exception("Failed to save C2 container logs for '%s'", experiment.experiment_name)
-        if delete_c2:
-            try:
-                await experiment.attacker.stop_c2c(experiment.c2c_container_id)
-            except Exception:
-                get_logger(experiment.experiment_name).exception("Failed to stop C2 container for '%s'", experiment.experiment_name)
-        else:
-            get_logger(experiment.experiment_name).info(
-                "Preserving C2 container %s for '%s' (delete_c2=False)",
-                experiment.c2c_container_id,
-                experiment.experiment_name,
-            )
+            get_logger(experiment.experiment_name).exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
     # Pull ground-truth host logs while the range is still up. Best-effort: a collection failure
     # must never block teardown (leaking VMs is worse than losing logs). It takes no OpenStack
@@ -627,44 +612,6 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     return tore_down
 
 
-async def _teardown_stale_c2_before_launch(experiment: Experiment) -> None:
-    """Stop stale C2 containers before launching a new C2 for this experiment."""
-    if not experiment.attacker:
-        return
-
-    for previous in registry.load():
-        if not previous.c2c_container_id:
-            continue
-
-        # Keep currently active experiments untouched. Clean up stale/finished ones,
-        # and always clean up leftovers with the same experiment name.
-        should_stop = (
-            previous.experiment_name == experiment.experiment_name
-            or previous.status not in _ACTIVE_STATUSES
-        )
-        if not should_stop:
-            continue
-
-        stopper = previous.attacker or experiment.attacker
-        if not stopper:
-            continue
-
-        try:
-            await stopper.stop_c2c(previous.c2c_container_id)
-            get_logger(experiment.experiment_name).info(
-                "Stopped stale C2 container %s from '%s'",
-                previous.c2c_container_id,
-                previous.experiment_name,
-            )
-            previous.c2c_container_id = None
-            await registry.update(previous)
-        except Exception:
-            get_logger(experiment.experiment_name).exception(
-                "Failed to stop stale C2 container %s from '%s'",
-                previous.c2c_container_id,
-                previous.experiment_name,
-            )
-
 def _write_result(experiment: Experiment) -> None:
     """Runtime record (status + all timestamps, grouped) → experiment/experiment_result.json."""
     p = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "experiment_result.json"
@@ -697,7 +644,7 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         experiment.retry_count += 1
         experiment.status = ExperimentStatus.RETRYING
         experiment.error = None  # fresh attempt — clear the prior failure reason
-        experiment.deployed_environment = experiment.c2c_container_id = experiment.pid = None
+        experiment.deployed_environment = experiment.pid = None
         # Clearing vms_reserved is what un-holds the failed attempt's VMs in the
         # CapacityTracker: teardown_finished_at is reset to None just below, so without
         # this the old attempt would count again alongside the retry's reservation.
@@ -746,11 +693,10 @@ async def _cancel_and_remove(name: str) -> None:
             await experiment.attacker.stop(experiment, cfg)
         except Exception:
             logger.exception("Failed to stop attacker process for '%s'", name)
-    if experiment.attacker and experiment.c2c_container_id:
         try:
-            await experiment.attacker.stop_c2c(experiment.c2c_container_id)
+            await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
         except Exception:
-            logger.exception("Failed to stop C2 container for '%s'", name)
+            logger.exception("Failed to stop C2 for '%s'", name)
     if experiment.defender:
         try:  # see the matching call in the normal-finish path above for why this must run first
             await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
@@ -870,7 +816,6 @@ async def _run_experiment(experiment: Experiment) -> None:
             _write_result(experiment)
             return
 
-    local_c2c_url = None
     prepared = None
 
     experiment.deployed_environment = DeployedEnvironment(
@@ -995,10 +940,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         else:
             prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
         await registry.update(experiment)   # persist the setup_started/ready signals
-        local_c2c_url = prepared.local_url
-        if prepared.container_id:
-            experiment.c2c_container_id = prepared.container_id
-            await registry.update(experiment)
+        # `prepared` is the attacker's opaque setup handle — the arena passes it straight to
+        # run_attacker without inspecting it. A C2 attacker reads its own URLs off it; teardown is
+        # keyed by experiment_name, so the arena tracks no C2 handle here.
     except Exception as e:
         exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
         await _handle_failure(experiment, f"Attacker setup failed — {e}")
@@ -1118,12 +1062,8 @@ async def _run_experiment(experiment: Experiment) -> None:
             exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
     try:
-        # The C2 runs on the attacker's in-env foothold; the attacker LLM (on the harness host, which
-        # has no in-env address) reaches it through the ssh -L tunnel (local_c2c_url). The foothold's
-        # in-env address that the sandcat agents beacon to is not reachable from the harness host.
-        attacker_c2c = local_c2c_url
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
-        process = await run_attacker(experiment.attacker, experiment, cfg, prepared, c2c_server=attacker_c2c)
+        process = await run_attacker(experiment.attacker, experiment, cfg, prepared)
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:

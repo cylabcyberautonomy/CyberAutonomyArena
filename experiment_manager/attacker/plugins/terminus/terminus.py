@@ -60,7 +60,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             ],
         }
 
-    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
         anthropic = "claude" in self.model or "anthropic" in self.model
         key = os.environ.get("ANTHROPIC_API_KEY" if anthropic else "OPENAI_API_KEY", "")
         return {
@@ -102,8 +102,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
         return PreparedAttacker()
 
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
-                    cfg: ExperimentManagerConfig, c2c_url: Optional[str],
-                    agent_c2c_url: Optional[str] = None, access=None) -> asyncio.subprocess.Process:
+                    cfg: ExperimentManagerConfig, access=None) -> asyncio.subprocess.Process:
         base = access.ssh_base()
         await self._push(base, f"{_REMOTE_DIR}/terminus_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())

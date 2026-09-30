@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal, Optional
 
@@ -155,6 +156,14 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
         pass
 
 
+@dataclass
+class IncalmoPreparedC2(PreparedAttacker):
+    """Incalmo's setup() output: the C2's URLs, carried on the opaque baton for Incalmo's OWN
+    build_config()/run() to read. The arena never inspects these — it just passes the baton through."""
+    remote_url: Optional[str] = None   # the foothold's in-env address victims / sandcat agents beacon to
+    local_url: Optional[str] = None    # 127.0.0.1 ssh -L tunnel the attacker LLM reaches the C2 through
+
+
 class _IncalmoAttacker(AttackerPlugin):
     """Shared C2 lifecycle for all Incalmo-based attackers."""
 
@@ -170,7 +179,7 @@ class _IncalmoAttacker(AttackerPlugin):
         foothold_access = self.primary_access(access) if access else None
         if foothold_access is None:
             raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no SetupAccess")
-        container_id, remote_url, local_url = await self.launch_c2c(
+        _sentinel, remote_url, local_url = await self.launch_c2c(
             experiment.experiment_name, cfg, mgmt_ip, foothold_access=foothold_access)
         try:
             if local_url:
@@ -179,10 +188,9 @@ class _IncalmoAttacker(AttackerPlugin):
             if local_url:
                 await self.wait_c2c_agent(local_url, experiment.experiment_name)
         except Exception:
-            if container_id:
-                await self.stop_c2c(container_id)
+            await self.stop_c2c(experiment.experiment_name)  # tear down a partial C2 (keyed by name)
             raise
-        return PreparedAttacker(container_id, remote_url, local_url)
+        return IncalmoPreparedC2(remote_url=remote_url, local_url=local_url)
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
@@ -201,8 +209,8 @@ class _IncalmoAttacker(AttackerPlugin):
     async def wait_c2c_agent(self, local_url: str, experiment_name: str) -> None:
         await wait_for_agent(local_url, experiment_name)
 
-    async def stop_c2c(self, container_id: str) -> None:
-        await stop_c2c_server(container_id)
+    async def stop_c2c(self, experiment_name: str) -> None:
+        await stop_c2c_server(experiment_name)
 
 
 # Hardcoded strategies that drive Metasploit directly (via MsfRpcCommand) need
@@ -262,7 +270,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             ],
         }
 
-    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
         strategy = {"name": self.strategy}
         if self.script_path:
             strategy["script_path"] = self.script_path
@@ -270,11 +278,14 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             "name": experiment_name,
             "strategy": strategy,
             "environment": env_spec.objective,
-            "c2c_server": c2c_url,
+            # C2 URLs come from Incalmo's OWN setup handle: c2c_server = the LLM's tunnel to the C2,
+            # agent_c2c_server = the foothold's in-env address victims fetch the implant from.
+            "c2c_server": prepared.local_url,
+            "agent_c2c_server": prepared.remote_url,
             "blacklist_ips": ["172.17.0.0/16"],
         }
 
-    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str, agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
+    async def run(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> asyncio.subprocess.Process:
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
@@ -284,12 +295,12 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             cwd=str(cfg.incalmo_dir),
             env={
                 **os.environ,
-                "C2C_SERVER": c2c_url,
+                "C2C_SERVER": prepared.local_url,
                 # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
                 # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
                 # fall back to C2C_SERVER, which is the 127.0.0.1 ssh -L tunnel a victim can't reach.
                 # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
-                "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
+                "C2C_SERVER_AGENTS": prepared.remote_url or prepared.local_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
@@ -362,7 +373,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             ],
         }
 
-    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
         return {
             "name": experiment_name,
             "strategy": {
@@ -373,11 +384,13 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                 "abstraction": self.abstraction,
             },
             "environment": env_spec.objective,
-            "c2c_server": c2c_url,
+            # C2 URLs from Incalmo's OWN setup handle (see the strategy attacker's build_config).
+            "c2c_server": prepared.local_url,
+            "agent_c2c_server": prepared.remote_url,
             "blacklist_ips": ["172.17.0.0/16"],
         }
 
-    async def run(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig, c2c_url: str, agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
+    async def run(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> asyncio.subprocess.Process:
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
@@ -387,12 +400,12 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
             cwd=str(cfg.incalmo_dir),
             env={
                 **os.environ,
-                "C2C_SERVER": c2c_url,
+                "C2C_SERVER": prepared.local_url,
                 # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
                 # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
                 # fall back to C2C_SERVER, which is the 127.0.0.1 ssh -L tunnel a victim can't reach.
                 # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
-                "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
+                "C2C_SERVER_AGENTS": prepared.remote_url or prepared.local_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
             },

@@ -20,7 +20,7 @@ class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
     templates without a C2 or a cloud."""
     fail_setup: bool = False
 
-    def build_config(self, experiment_name, env_spec, c2c_url):  # unused here
+    def build_config(self, experiment_name, env_spec, prepared):  # unused here
         return {}
 
     async def setup(self, experiment, cfg, mgmt_ip, access=None):
@@ -29,7 +29,7 @@ class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
             raise RuntimeError("boom in setup")
         return PreparedAttacker()
 
-    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None, access=None):
+    async def start(self, prepared, config_path, experiment_name, cfg, access=None):
         await asyncio.sleep(0)
         return object()  # stand-in for the spawned process
 
@@ -72,7 +72,7 @@ async def test_full_command_ack_handshake_sequence():
 
     # arena -> START_RUN; attacker acks RUNNING (from run_start)
     await lc.send(AttackerCommand.START_RUN)
-    proc = await atk.run_start(exp, prepared, config_path=None, cfg=None, c2c_url=None)
+    proc = await atk.run_start(exp, prepared, config_path=None, cfg=None)
     await lc.wait(AttackerSignal.RUNNING, timeout=5)
     assert proc is not None
 

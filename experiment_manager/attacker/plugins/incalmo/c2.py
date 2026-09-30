@@ -139,7 +139,7 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None
     only via the env-provided SetupAccess (scoped key + bastion routing) — never a management key off
     disk. `mgmt_ip` is accepted for log messages only; the routing is opaque in access.ssh_common_args.
     Returns (sentinel, remote_url, local_url):
-      sentinel  = "foothold-c2:<exp>"       (stored as c2c_container_id; routes teardown here)
+      sentinel  = "foothold-c2:<exp>"       (legacy handle; teardown is keyed by experiment_name)
       remote_url= http://<foothold>:8888    (in-env address sandcat agents / the setup play beacon to)
       local_url = http://127.0.0.1:<port>   (harness host: readiness polls + attacker LLM, via ssh -L)
     """
@@ -390,7 +390,7 @@ async def start_c2c_server(
     SetupAccess); the attacker holds no backend/topology knowledge.
 
     Returns (sentinel, remote_url, local_url):
-      sentinel   — stored as the C2 container id; routes teardown back to teardown_c2.
+      sentinel   — legacy handle (teardown is keyed by experiment_name, not this).
       remote_url — the foothold's in-env address the sandcat agents / setup play beacon to.
       local_url  — the 127.0.0.1 ssh -L tunnel the attacker LLM (on the harness host) uses.
     """
@@ -406,12 +406,12 @@ async def start_c2c_server(
     return sentinel, remote_url, local_url
 
 
-async def stop_c2c_server(container_id: str) -> None:
-    """Tear down the foothold C2 (kill the tunnel + remove the remote container). Never raises."""
-    if not container_id:
+async def stop_c2c_server(experiment_name: str) -> None:
+    """Tear down the foothold C2 for an experiment (kill the tunnel + remove the remote container),
+    keyed by experiment_name via the on-disk statefile. Never raises; a no-op if no C2 was stood up."""
+    if not experiment_name:
         return
-    exp = container_id.split(":", 1)[1] if ":" in container_id else container_id
-    await asyncio.get_event_loop().run_in_executor(None, teardown_c2, exp, None)
+    await asyncio.get_event_loop().run_in_executor(None, teardown_c2, experiment_name, None)
 
 
 async def wait_for_c2c_ready(c2c_url: str, experiment_name: str) -> None:

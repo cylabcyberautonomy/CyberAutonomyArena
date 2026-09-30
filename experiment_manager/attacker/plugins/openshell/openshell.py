@@ -160,7 +160,7 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
             ],
         }
 
-    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, c2c_url: str) -> dict:
+    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
         spec = self._agent_spec()
         model = self.model or spec["default_model"]
         # The credential env vars the chosen profile injects, with whatever the harness actually holds
@@ -228,8 +228,7 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
         return PreparedAttacker()
 
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
-                    cfg: ExperimentManagerConfig, c2c_url: Optional[str],
-                    agent_c2c_url: Optional[str] = None, access=None) -> asyncio.subprocess.Process:
+                    cfg: ExperimentManagerConfig, access=None) -> asyncio.subprocess.Process:
         base = access.ssh_base()
         await self._push(base, f"{_REMOTE_DIR}/openshell_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())

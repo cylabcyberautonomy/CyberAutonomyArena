@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 
 @dataclass
 class PreparedAttacker:
-    container_id: Optional[str] = None
-    remote_url: Optional[str] = None
-    local_url: Optional[str] = None
+    """Opaque handoff from setup() to start(): a marker that setup succeeded, passed setup() -> start()
+    without the arena inspecting it. A plugin that must carry setup outputs (e.g. a C2's URLs) subclasses
+    this and reads its own fields off it in its own build_config()/run(); the arena never does."""
 
 
 class AttackerPlugin(BaseModel):
@@ -43,16 +43,19 @@ class AttackerPlugin(BaseModel):
         self,
         experiment_name: str,
         env_spec: AttackerEnvSpec,
-        c2c_url: str,
-    ) -> dict: ...
+        prepared: "PreparedAttacker",
+    ) -> dict:
+        """The run config the agent process reads. env_spec is the adversary-safe spec; `prepared` is
+        this plugin's own opaque setup handle — ignore it unless setup() produced state the config
+        needs (e.g. a C2's URLs, which the plugin reads off its own PreparedAttacker subclass)."""
+        ...
 
     async def run(
         self,
+        prepared: "PreparedAttacker",
         config_path: Path,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
-        c2c_url: str,
-        agent_c2c_url: Optional[str] = None,
     ) -> asyncio.subprocess.Process:
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
@@ -74,13 +77,11 @@ class AttackerPlugin(BaseModel):
         config_path: Path,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
-        c2c_url: Optional[str],
-        agent_c2c_url: Optional[str] = None,
         access: Optional[SetupAccess] = None,
     ) -> asyncio.subprocess.Process:
         """Launch the attacker process (exit code = verdict). Channel readiness was established in
         setup(). `access` is the scoped foothold SetupAccess, loaded and passed by run_start()."""
-        return await self.run(config_path, experiment_name, cfg, c2c_url, agent_c2c_url)
+        return await self.run(prepared, config_path, experiment_name, cfg)
 
     async def stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig,
                    access: Optional[SetupAccess] = None) -> None:
@@ -91,6 +92,13 @@ class AttackerPlugin(BaseModel):
                 os.kill(experiment.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+    async def stop_c2c(self, experiment_name: str) -> None:
+        """Tear down any C2 this attacker stood up, keyed by experiment_name (the plugin persists its
+        own teardown state). Default no-op: an attacker with no C2 has nothing to tear down. The arena
+        calls this unconditionally in its teardown/clean-slate paths, so it must be safe when no C2
+        exists and must never raise."""
+        return None
 
     async def collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path,
                            access: Optional[SetupAccess] = None) -> None:
@@ -159,13 +167,11 @@ class AttackerPlugin(BaseModel):
         return prepared
 
     async def run_start(self, experiment: "Experiment", prepared: PreparedAttacker, config_path: Path,
-                        cfg: ExperimentManagerConfig, c2c_url: Optional[str],
-                        agent_c2c_url: Optional[str] = None) -> "asyncio.subprocess.Process":
+                        cfg: ExperimentManagerConfig) -> "asyncio.subprocess.Process":
         """Launch the attack process, then emit RUNNING — the attacker telling the arena its process
         is up. The arena waits for RUNNING (it does not emit it), same as READY."""
         access = self._load_access(experiment.experiment_name, cfg)
-        process = await self.start(prepared, config_path, experiment.experiment_name, cfg, c2c_url,
-                                   agent_c2c_url, access=access)
+        process = await self.start(prepared, config_path, experiment.experiment_name, cfg, access=access)
         lc = self._lifecycle(experiment)
         if lc is not None:
             await lc.emit(AttackerSignal.RUNNING)

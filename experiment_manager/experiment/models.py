@@ -178,7 +178,6 @@ class Experiment:
     attacker_plugin = _Field("attacker", "plugin")     # provenance: the plugin name the user selected
     attacker_spec = _Field("attacker", "spec_path")    # provenance: path to the spec file (if the pair form was used)
     pid = _Field("attacker", "pid")
-    c2c_container_id = _Field("attacker", "c2c_container_id")
     attacker_started_at = _Field("attacker", "started_at")
     attacker_finished_at = _Field("attacker", "finished_at")
     # Lifecycle handshake (see attacker/lifecycle.py): the arena records each attacker signal here
@@ -229,7 +228,7 @@ class Experiment:
                 "teardown_started_at": None, "teardown_finished_at": None,
             },
             "attacker": {
-                "config": attacker, "plugin": None, "spec_path": None, "pid": None, "c2c_container_id": None,
+                "config": attacker, "plugin": None, "spec_path": None, "pid": None,
                 "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "last_command": None, "setup_started_at": None,
                 "ready_at": None, "stopping_at": None, "stopped_at": None,

@@ -40,7 +40,8 @@ import pytest
 import experiment_manager.attacker.plugins  # noqa: F401
 import experiment_manager.defender.plugins  # noqa: F401
 import experiment_manager.traffic.plugins   # noqa: F401
-from experiment_manager.attacker.plugins.base import AttackerPlugin
+from experiment_manager.attacker.plugins.base import AttackerPlugin, PreparedAttacker
+from experiment_manager.attacker.plugins.incalmo.incalmo import IncalmoPreparedC2
 from experiment_manager.defender.plugins.base import DefenderPlugin
 from experiment_manager.traffic.plugins.base import TrafficPlugin
 from experiment_manager.environment import DeployedEnvironment
@@ -279,7 +280,7 @@ def test_terminus_build_config_contract():
     box IP the runner drives; ui_schema is well-formed."""
     atk = AttackerPlugin._registry["terminus_llm"].model_validate(
         {"type": "terminus_llm", "model": "anthropic/claude-opus-4-1"})
-    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, PreparedAttacker())
     assert built["model"] == "anthropic/claude-opus-4-1"
     assert built["foothold_ip"] == "192.168.202.100"
     assert "objective" in built and "max_turns" in built
@@ -293,7 +294,7 @@ def test_openshell_build_config_contract():
     reg = AttackerPlugin._registry["openshell"]
     # default: claude agent (claude-code provider type), restrictive policy (the fully-valid posture)
     atk = reg.model_validate({"type": "openshell"})
-    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, PreparedAttacker())
     assert built["agent"] == "claude"
     assert built["provider_type"] == "claude-code"
     assert built["cred_envs"] == ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
@@ -309,17 +310,17 @@ def test_openshell_build_config_contract():
     # tcp_hosts parse "name" and "name=IP" -> per-host native-TCP endpoints (the only lateral-move path)
     perm = reg.model_validate({"type": "openshell", "policy": "permissive",
                                "tcp_hosts": ["webserver0=192.168.202.10", "database0"]})
-    bp = perm.build_config("e", FAKE_ATTACKER_SPEC, "u")
+    bp = perm.build_config("e", FAKE_ATTACKER_SPEC, PreparedAttacker())
     assert bp["policy"] == "permissive"
     assert bp["tcp_hosts"] == [{"name": "webserver0", "ip": "192.168.202.10"}, {"name": "database0", "ip": ""}]
     # codex uses the codex agent type + CODEX_AUTH_* OAuth creds (not an API key)
     codex = reg.model_validate({"type": "openshell", "agent": "codex",
                                 "model": "gpt-5-codex", "image": "x/y:z"})
-    b2 = codex.build_config("e", FAKE_ATTACKER_SPEC, "u")
+    b2 = codex.build_config("e", FAKE_ATTACKER_SPEC, PreparedAttacker())
     assert b2["provider_type"] == "codex" and b2["image"] == "x/y:z"
     assert "CODEX_AUTH_ACCESS_TOKEN" in b2["cred_envs"]
     # opencode uses the openrouter inference provider + its documented image
-    oc = reg.model_validate({"type": "openshell", "agent": "opencode"}).build_config("e", FAKE_ATTACKER_SPEC, "u")
+    oc = reg.model_validate({"type": "openshell", "agent": "opencode"}).build_config("e", FAKE_ATTACKER_SPEC, PreparedAttacker())
     assert oc["provider_type"] == "openrouter" and oc["model"] == "openrouter/anthropic/claude-sonnet-5"
     assert oc["image"] == "ghcr.io/anomalyco/opencode:latest" and oc["cred_envs"] == ["OPENROUTER_API_KEY"]
     assert atk.ui_schema()["config_type"] == "openshell"
@@ -328,11 +329,12 @@ def test_openshell_build_config_contract():
 def test_attacker_graphsearch_build_config_contract():
     """What the Incalmo runner subprocess reads out of build_config must stay stable."""
     atk = AttackerPlugin._registry["incalmo_strategy"].model_validate(ATTACKER)
-    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "http://c2.example:8888")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, IncalmoPreparedC2(local_url="http://c2.example:8888", remote_url="http://kali:8888"))
     assert built["name"] == "ci_exp"
     assert built["strategy"]["name"] == "GraphSearch"
     assert built["environment"] == ENV_STEM
-    assert built["c2c_server"] == "http://c2.example:8888"
+    assert built["c2c_server"] == "http://c2.example:8888"        # from prepared.local_url (the tunnel)
+    assert built["agent_c2c_server"] == "http://kali:8888"        # from prepared.remote_url (victim-facing)
     assert "blacklist_ips" in built
 
 
@@ -345,7 +347,7 @@ def test_attacker_never_blacklists_victim_ips(cfg):
     excluded 192.168.x.10 — webserver0, the DB key-holder — so every run exfiltrated 0 files.
     build_config must exclude ONLY Kali's docker bridge, never a victim subnet."""
     atk = AttackerPlugin._registry[cfg["type"]].model_validate(cfg)
-    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "http://c2.example:8888")
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, IncalmoPreparedC2(local_url="http://c2.example:8888", remote_url="http://kali:8888"))
     bl = built.get("blacklist_ips", [])
     assert bl == ["172.17.0.0/16"], f"unexpected blacklist: {bl}"
     assert not any(str(ip).startswith("192.168") for ip in bl), f"victim IP blacklisted: {bl}"
