@@ -11,12 +11,15 @@ config.yaml
 *.bak.*
 config.gcp2.yaml
 config.gcp2.yaml.bak
+config.gcp.arena.yaml
+experiment_registry_gcp_arena.yaml
 run_dashboard_8080.sh
 prewarm_cache.sh
 
 # alternate/backend output trees and scratch
 output_gcp/
 output_gcp2/
+output_gcp_arena/
 Equifax_small_instrumented_trial_1/
 archive/
 
