@@ -77,7 +77,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        from ..deployer import configure_environment, inject_scoped_keys_env
+        from ..deployer import configure_environment
         from ..rotate import rotate_environment
         if lc:
             lc.emit(EnvironmentSignal.CONFIGURING)
@@ -87,13 +87,10 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
             raise
-        # Issue + inject the per-system scoped keys (attacker_key on the foothold, defender_key on the
-        # box+victims) BEFORE rotate, so this setup activity is cleared from the ground-truth baseline.
-        # Best-effort: a per-host injection failure is logged, never fails configure.
-        try:
-            await inject_scoped_keys_env(experiment, mgmt_ip, cfg)
-        except Exception:  # noqa: BLE001
-            pass
+        # NOTE: per-system scoped-key injection (attacker_key on the foothold, defender_key on box+victims)
+        # now happens INSIDE MHBench's configure (ansible_runner.run_parallel), so it runs on every deploy
+        # path — the full harness here AND a bare `cli.py deploy` (which the defender's box-mode e2e uses).
+        # It's no longer a harness-only step. The rotate below still clears that setup activity.
         # MHBench wrapper detail: rotate the host logs right after configuring so setup activity is
         # cleared before the attack (a clean ground-truth baseline). Internal to this plugin — NOT on
         # the base interface, and the arena never calls it. Best-effort: a rotation failure never fails
