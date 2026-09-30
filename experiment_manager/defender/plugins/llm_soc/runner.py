@@ -272,7 +272,7 @@ else:
 # Self-protection wrapper: any block aimed at the defender's own ES/mgmt IP is dropped, whatever the
 # strategy or the attacker's C2 placement. Applied once here so both the strategy and the Defender
 # (below) share the guarded orchestrator.
-orchestrator = _SelfProtectingOrchestrator(orchestrator, _PROTECTED_IPS)
+orchestrator = SelfProtectingOrchestrator(orchestrator, _PROTECTED_IPS)
 print(f"[{experiment_name}] Self-protecting orchestrator active; protected IPs: {sorted(_PROTECTED_IPS)}", flush=True)
 
 strategy = strategy_cls(
