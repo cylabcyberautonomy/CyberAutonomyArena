@@ -50,7 +50,9 @@ from experiment_manager.experiment.models import ExperimentSpecs
 ENV_SPEC = "environments/non-generated/equifax_small.json"  # path (relative to mhbench_dir)
 ENV_NAME = ENV_SPEC  # alias: any mhbench-accepted env identifier (bare name or path) coerces the same
 ENV_STEM = "equifax_small"  # the short label = path stem
-ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}
+ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}  # for direct plugin model_validate
+ATTACKER_PLUGIN = "incalmo_strategy"          # the (plugin, spec) pair — the only way to select an attacker
+ATTACKER_SPEC = {"strategy": "GraphSearch"}   # inline spec dict (may also be a path to a JSON/YAML file)
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
 TRAFFIC = {"type": "caldera_human", "persona": "office_worker"}
 
@@ -103,7 +105,7 @@ def test_named_combo_experimentspecs_validates():
     specs = ExperimentSpecs(
         experiment_name="ci_contract_smoke",
         environment=ENV_SPEC,
-        attacker=ATTACKER,
+        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
         defender=DEFENDER,
         traffic=TRAFFIC,
     )
@@ -124,12 +126,14 @@ def test_environmentconfig_selectable_and_backcompat():
     dict (all back-compat); each validates to the same EnvironmentConfig."""
     explicit = ExperimentSpecs(experiment_name="ci_env_explicit",
                                environment={"environment_plugin": "mhbench", "environment_spec": ENV_SPEC},
-                               attacker=ATTACKER)
+                               attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
     assert explicit.environment.environment_plugin == "mhbench"
     assert explicit.environment.environment_spec == ENV_SPEC
-    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_SPEC, attacker=ATTACKER)
+    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_SPEC,
+                           attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
     legacy = ExperimentSpecs(experiment_name="ci_env_legacy",
-                             environment={"type": "mhbench", "spec": ENV_SPEC}, attacker=ATTACKER)
+                             environment={"type": "mhbench", "spec": ENV_SPEC},
+                             attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
     assert (explicit.model_dump()["environment"]
             == bare.model_dump()["environment"]
             == legacy.model_dump()["environment"]
@@ -160,10 +164,11 @@ def test_attacker_plugin_plus_spec_file(tmp_path):
     assert s2.attacker.strategy == "Darkside"
 
 
-def test_attacker_plugin_and_embedded_are_mutually_exclusive():
+def test_embedded_attacker_is_rejected():
+    """The attacker is selected only by attacker_plugin (+ attacker_spec). Passing an embedded
+    'attacker' block is rejected ('attacker' is a derived field, not an input)."""
     with pytest.raises(Exception):
-        ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
-                        attacker_plugin="incalmo_strategy", attacker=ATTACKER)
+        ExperimentSpecs(experiment_name="x", environment=ENV_NAME, attacker=ATTACKER)
 
 
 def test_attacker_plugin_unknown_name_rejected():
@@ -176,7 +181,7 @@ def test_experimentspecs_without_traffic_still_valid():
     specs = ExperimentSpecs(
         experiment_name="ci_no_traffic",
         environment=ENV_SPEC,
-        attacker=ATTACKER,
+        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
         defender=DEFENDER,
     )
     assert specs.traffic is None
@@ -188,7 +193,7 @@ def test_experiment_base_is_environment_plus_attacker():
     specs = ExperimentSpecs(
         experiment_name="ci_base_only",
         environment=ENV_NAME,
-        attacker=ATTACKER,
+        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
     )
     assert specs.defender is None
     assert specs.traffic is None
@@ -197,14 +202,15 @@ def test_experiment_base_is_environment_plus_attacker():
 def test_experimentspecs_requires_an_attacker():
     """environment + attacker are the required base: a spec with no attacker (neither the plugin pair
     nor the embedded form) must be rejected, not fail later mid-run."""
-    with pytest.raises(Exception, match="requires an attacker"):
+    with pytest.raises(Exception, match="requires attacker_plugin"):
         ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV_NAME)
 
 
 def test_experimentspecs_requires_an_environment():
     """environment is required (the other half of the base)."""
     with pytest.raises(Exception):
-        ExperimentSpecs(experiment_name="ci_no_env", attacker=ATTACKER)
+        ExperimentSpecs(experiment_name="ci_no_env",
+                        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
 
 
 # ------------------------------------------------- attacker -> runner build_config contract

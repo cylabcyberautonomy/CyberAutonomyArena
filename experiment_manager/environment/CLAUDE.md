@@ -85,9 +85,9 @@ topology path:
 
 A bare path string coerces to `{environment_plugin: mhbench, environment_spec: <path>}`.
 
-The attacker offers the same `plugin` + `spec-file` shape (`attacker_plugin` + `attacker_spec`, a path
-to a spec file) in addition to its embedded `{type, ...}` form — see `attacker/CLAUDE.md`. The defender
-and traffic are selected only by the embedded `{type, ...}` form.
+The attacker uses the same `plugin` + `spec` idea (`attacker_plugin` + `attacker_spec`, where the spec
+is an inline dict or a path) — see `attacker/CLAUDE.md`. The defender and traffic are selected by the
+embedded `{type, ...}` form.
 
 ## Register and verify
 

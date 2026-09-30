@@ -27,20 +27,24 @@ Environment, and Traffic). The plugins package imports every module under it on 
 registers itself. To add a plugin, drop a file in the right `plugins/` directory. There is no central
 list to edit.
 
-A user selects a plugin in the experiment spec by its `type`:
+A user selects each system in the experiment spec:
 
 ```json
 {
   "experiment_name": "demo",
   "environment": "environments/instrumented/equifax_small_instrumented.json",
-  "attacker":  {"type": "incalmo_strategy", "strategy": "GraphSearch"},
+  "attacker_plugin": "incalmo_strategy",
+  "attacker_spec": {"strategy": "GraphSearch"},
   "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"}
 }
 ```
 
-The attacker may instead be given as a `(plugin, spec-file)` pair — `attacker_plugin` +
-`attacker_spec` (a path to a JSON/YAML file). The environment uses the explicit
-`{environment_plugin, environment_spec}` shape (a bare path string coerces to the mhbench plugin).
+The shapes differ by system:
+- **attacker** — a `(plugin, spec)` pair: `attacker_plugin` names the plugin, `attacker_spec` holds its
+  fields as an inline dict or a path to a JSON/YAML file. This is the only attacker form.
+- **environment** — the explicit `{environment_plugin, environment_spec}` shape (a bare path string
+  coerces to the mhbench plugin).
+- **defender** and **traffic** — the embedded `{type, ...}` form.
 
 ## Layout
 

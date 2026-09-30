@@ -85,14 +85,18 @@ the launched process — readiness is established in `setup()`, not `start()`.
 
 ## Selecting this plugin
 
-Pick the plugin in the experiment spec. The attacker accepts two equivalent forms:
+Pick the plugin in the experiment spec with a `(plugin, spec)` pair:
 
-- embedded — `"attacker": {"type": "my_attacker", "model": "..."}`
-- plugin + spec-file — `"attacker_plugin": "my_attacker"` with `"attacker_spec": "path/to/spec.json"`,
-  where the file holds the plugin's fields. Give one form or the other, not both.
+```json
+"attacker_plugin": "my_attacker",
+"attacker_spec": {"model": "..."}
+```
 
-`config_type` is what `type` / `attacker_plugin` match on. (The environment uses the same plugin+spec
-shape; the defender and traffic use only the embedded form.)
+`attacker_plugin` names the plugin; `attacker_spec` holds its fields, either inline as a dict (above)
+or as a path to a JSON/YAML file (`"attacker_spec": "path/to/spec.json"`). `config_type` is what
+`attacker_plugin` matches on. There is no embedded `{type, ...}` form for the attacker — the pair is
+the only way. (The environment uses the same plugin+spec idea; the defender and traffic use the
+embedded `{type, ...}` form.)
 
 ## Register and verify
 

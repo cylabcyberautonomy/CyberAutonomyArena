@@ -123,7 +123,8 @@ def main() -> int:
         payload = {
             "experiment_name": "dash_smoke",
             "environment": "equifax_small",
-            "attacker": {"type": "incalmo_strategy", "strategy": "GraphSearch", "c2_on_kali": True},
+            "attacker_plugin": "incalmo_strategy",
+            "attacker_spec": {"strategy": "GraphSearch", "c2_on_kali": True},
             "defender": {"type": "canary"},
             "trial": 0,
         }

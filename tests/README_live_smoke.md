@@ -75,9 +75,8 @@ strategy), `--defender` (llm_soc strategy or `none`), `--traffic` (persona or `n
 
 Or by hand:
 
-The attacker config is a (plugin + spec-file) pair: `attacker_plugin` selects the plugin and
-`attacker_spec` is a path to a JSON/YAML file holding its bespoke spec. (The embedded
-`attacker: {type, ...}` form still works for back-compat.)
+The attacker is a `(plugin, spec)` pair: `attacker_plugin` selects the plugin and `attacker_spec`
+holds its bespoke fields, either inline as a dict or as a path to a JSON/YAML file.
 
 ```bash
 # write the attacker spec to a file, then reference it by path

@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
@@ -14,29 +14,31 @@ from ..environment import build_environment
 from ..environment.environment import EnvironmentConfig
 
 
-def _load_spec_file(spec_path: Optional[str]) -> dict:
-    """Read a plugin spec from a file path (JSON or YAML). A missing path means an empty spec
-    (plugin defaults). The file must hold a mapping — the bespoke fields the plugin parses."""
-    if not spec_path:
+def _load_spec(spec: Union[dict, str, None]) -> dict:
+    """Read a plugin spec. It may be an inline dict (used as-is), a path to a JSON/YAML file holding a
+    mapping, or None (empty spec -> plugin defaults). Returns the bespoke fields the plugin parses."""
+    if spec is None:
         return {}
-    p = Path(spec_path).expanduser()
+    if isinstance(spec, dict):
+        return spec
+    p = Path(spec).expanduser()
     if not p.exists():
-        raise ValueError(f"spec file not found: {spec_path}")
+        raise ValueError(f"spec file not found: {spec}")
     data = yaml.safe_load(p.read_text()) or {}
     if not isinstance(data, dict):
-        raise ValueError(f"spec file {spec_path} must contain a mapping, got {type(data).__name__}")
+        raise ValueError(f"spec file {spec} must contain a mapping, got {type(data).__name__}")
     return data
 
 
-def _resolve_plugin(registry, plugin_name: str, spec_path: Optional[str]):
-    """Resolve a (plugin, spec-file) pair to a validated plugin instance. The plugin selects the
-    implementation; the spec file holds its bespoke input. `plugin_name` is injected as `type`, so
-    the spec file need not repeat it (and cannot override the chosen plugin)."""
+def _resolve_plugin(registry, plugin_name: str, spec: Union[dict, str, None]):
+    """Resolve a (plugin, spec) pair to a validated plugin instance. The plugin selects the
+    implementation; the spec (inline dict or a file path) holds its bespoke fields. `plugin_name` is
+    injected as `type`, so the spec need not repeat it (and cannot override the chosen plugin)."""
     cls = registry._registry.get(plugin_name)
     if cls is None:
         raise ValueError(f"Unknown plugin {plugin_name!r}. Available: {list(registry._registry)}")
-    spec = _load_spec_file(spec_path)
-    return cls.model_validate({**spec, "type": plugin_name})
+    fields = _load_spec(spec)
+    return cls.model_validate({**fields, "type": plugin_name})
 
 
 class ExperimentStatus(str, Enum):
@@ -58,11 +60,11 @@ class ExperimentSpecs(BaseModel):
     # environment (the 4th selectable system): {environment_plugin: mhbench, environment_spec: ...},
     # or a bare env-name string (→ mhbench). Explicit plugin+spec shape (environment only).
     environment: EnvironmentConfig
-    # attacker as a (plugin, spec-file) pair. attacker_plugin selects the implementation; attacker_spec
-    # is a PATH to a JSON/YAML file holding that plugin's bespoke spec. Resolved into `attacker` below.
-    # The embedded `attacker: {type, ...}` form is also accepted.
+    # attacker as a (plugin, spec) pair. attacker_plugin selects the implementation; attacker_spec holds
+    # that plugin's bespoke fields, either inline as a dict or as a PATH to a JSON/YAML file. Resolved
+    # into `attacker` below. `attacker` is derived — do not pass it directly.
     attacker_plugin: Optional[str] = None
-    attacker_spec: Optional[str] = None
+    attacker_spec: Optional[Union[dict, str]] = None
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
     traffic: Optional[TrafficConfig] = None  # third plugin class: benign background traffic on victim hosts
@@ -82,23 +84,19 @@ class ExperimentSpecs(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_attacker_plugin_spec(self):
-        """attacker_plugin + attacker_spec (file) -> the validated attacker plugin instance in
-        `self.attacker`, so everything downstream (Experiment.attacker, build_config, ...) is
-        unchanged. Give the pair OR the embedded form, not both.
+        """Resolve attacker_plugin + attacker_spec into the validated plugin instance in `self.attacker`,
+        so everything downstream (Experiment.attacker, build_config, ...) is unchanged.
 
-        The experiment base is environment + attacker: both are required. defender and traffic are
-        optional (None = the experiment simply runs without that system)."""
-        if self.attacker_plugin:
-            if self.attacker is not None:
-                raise ValueError("provide attacker_plugin (+attacker_spec) OR the embedded 'attacker', not both")
-            from ..attacker.plugins.base import AttackerPlugin
-            self.attacker = _resolve_plugin(AttackerPlugin, self.attacker_plugin, self.attacker_spec)
-        if self.attacker is None:
-            raise ValueError(
-                "an experiment requires an attacker: provide attacker_plugin (+attacker_spec) or an "
-                "embedded 'attacker'. (environment + attacker are the required base; defender and "
-                "traffic are optional.)"
-            )
+        The attacker is selected only by the (plugin, spec) pair. `attacker` is derived, not an input.
+        The experiment base is environment + attacker (both required); defender and traffic are optional."""
+        if self.attacker is not None:
+            raise ValueError("select the attacker with attacker_plugin (+ attacker_spec), not an "
+                             "embedded 'attacker' block ('attacker' is a derived field).")
+        if not self.attacker_plugin:
+            raise ValueError("an experiment requires attacker_plugin: the attacker is selected by a "
+                             "plugin name plus its spec (attacker_spec, an inline dict or a file path).")
+        from ..attacker.plugins.base import AttackerPlugin
+        self.attacker = _resolve_plugin(AttackerPlugin, self.attacker_plugin, self.attacker_spec)
         return self
 
 

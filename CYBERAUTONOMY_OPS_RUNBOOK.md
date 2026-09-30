@@ -155,7 +155,7 @@ Submit specs (flat form) to `POST http://127.0.0.1:8000/experiments`:
 ```json
 {"experiment_name":"<prefix>_<abs>_<env>_c2b_t<trial>",
  "environment":"instrumented/<env>_instrumented",
- "attacker":{"type":"incalmo_llm","planning_llm":"<model>","execution_llm":"<model>","abstraction":"incalmo|shell"},
+ "attacker_plugin":"incalmo_llm","attacker_spec":{"planning_llm":"<model>","execution_llm":"<model>","abstraction":"incalmo|shell"},
  "defender":{"type":"llm_soc","strategy":"FalcoLLMC2Block","llm_model":"anthropic/claude-sonnet-5"},
  "trial":<0|1|2>,"overwrite":true}
 ```
