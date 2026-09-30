@@ -25,3 +25,6 @@ archive/
 
 # dashboard-written attacker spec files (submission-time artifacts)
 submitted_specs/
+
+# Offline scoring/analysis tools — parked here, not shipped for now
+/scoring/

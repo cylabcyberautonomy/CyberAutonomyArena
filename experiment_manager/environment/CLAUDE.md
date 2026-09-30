@@ -1,14 +1,14 @@
 # Adding an environment plugin
 
 An environment plugin deploys and tears down the network an experiment runs on. It also sizes that
-network for admission, and produces everything the attacker and defender need to reach it.
+network for submission (to allow for parallel experimentation), and produces everything the attacker and defender need to reach it.
 
 To create an environment, create a Python file in `plugins/`. Initialize a class that is subclassed
-under `EnvironmentPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every
-file under it on startup, so the class registers itself. There is no list to edit.
+under `EnvironmentPlugin` (`plugins/base.py`) with a `config_type`. 
 
-The reference implementation is `plugins/mhbench.py` (wraps the external MHBench deployer). A second
-backend (e.g. Ludus) implements the same interface.
+
+Existing plugins:
+- `plugins/mhbench.py` - <put a better description of MHBench here other than wraps the existing deployer>.
 
 ## Lifecycle the arena drives
 
@@ -31,11 +31,11 @@ async def teardown(self, experiment, cfg, lc=None) -> None:   # tear the network
 The arena asks the environment for each system's specs. Keep the two kinds strictly separate:
 
 ```python
-# ADVERSARY-SAFE (objective + identity, safe to hand the agent):
+# ADVERSARY-SAFE (objective + identity, intended to hand the agent):
 def attacker_spec(self, deployed, cfg): ...      -> AttackerEnvSpec
 def defender_spec(self, deployed, cfg): ...      -> DefenderEnvSpec
 
-# HARNESS-ONLY (scoped key + bastion routing; NEVER given to an agent):
+# HARNESS-ONLY (scoped key + bastion routing):
 def attacker_setup_access(self, deployed, mgmt_ip, cfg): ...   -> list[SetupAccess]
 def defender_setup_access(self, deployed, mgmt_ip, cfg): ...   -> list[SetupAccess]
 ```
@@ -43,8 +43,7 @@ def defender_setup_access(self, deployed, mgmt_ip, cfg): ...   -> list[SetupAcce
 ## Scoped credentials — the core security contract
 
 The environment must issue a separate key per system. Each key is scoped to only that system's hosts.
-A leaked attacker key must open the foothold and nothing else. East-west access like `ssh root@victim`
-is not something the attacker may get for free.
+A leaked attacker key must open the foothold and nothing else.
 
 ```python
 def attacker_credential(self, deployed, cfg) -> str:   # foothold only

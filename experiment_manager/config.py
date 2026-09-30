@@ -58,19 +58,9 @@ class ExperimentManagerConfig(BaseModel):
     # bastion (server) and victim hosts (clients). None (default) = the velociraptor
     # defender is unavailable; selecting it then fails fast with a clear message.
     velociraptor_dir: Optional[Path] = None
-    # Detection: Zircolite runs the shipped Sigma Linux ruleset over each host's collected auditd log.
-    zircolite_dir: Path = Path.home() / "Zircolite"
-    zircolite_python: Optional[Path] = None  # defaults to <zircolite_dir>/.venv/bin/python
-    sigma_ruleset: str = "rules/rules_linux.json"  # relative to zircolite_dir; the Auditd/Sysmon-for-Linux ruleset
-    # Custom Sigma rules for MHBench's high-value auditd keys (credential access, lateral movement,
-    # evasion) that the stock ruleset doesn't cover. A dir of .yml Sigma rules, versioned with the harness.
-    custom_sigma_rules_dir: Path = _HERE / "experiment_manager" / "detection" / "sigma_rules"
 
     def get_incalmo_python(self) -> Path:
         return self.incalmo_python or (self.incalmo_dir / ".venv" / "bin" / "python")
-
-    def get_zircolite_python(self) -> Path:
-        return self.zircolite_python or (self.zircolite_dir / ".venv" / "bin" / "python")
 
     def get_deception_python(self) -> Path:
         return self.deception_python or (self.deception_dir / ".venv" / "bin" / "python")
