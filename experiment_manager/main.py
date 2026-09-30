@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerComma
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
-from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access
+from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access, defender_box_present
 from .environment.teardown import teardown_environment
 from .environment.collect import collect_environment
 from .environment.rotate import rotate_environment
@@ -915,6 +915,20 @@ async def _run_experiment(experiment: Experiment) -> None:
     finally:
         if deploy_slot_held:
             _deploy_buffer.release()   # release the deploy slot on any exit before configure started (e.g. provision failure)
+
+    # Interface-contract validation (the ARENA's job — not the defender plugin's). The environment must
+    # supply what each configured system requires; the arena refuses a deploy whose env↔system contract is
+    # violated rather than letting a plugin discover it late (or worse, run degraded). First contract: a
+    # configured defender REQUIRES a defender box from the environment. A defenderless env (no defender box,
+    # e.g. a non-instrumented topology) is fine when there's no defender — but pairing a defender with such
+    # an env is a contract violation, so fail here before any attacker/defender work.
+    if experiment.defender is not None and not defender_box_present(experiment.deployed_environment, cfg):
+        await _handle_failure(
+            experiment,
+            "Interface contract violated: a defender is configured but the environment provides no "
+            "defender box. Use a defender-capable (instrumented) environment, or remove the defender.",
+        )
+        return
 
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # kali, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.

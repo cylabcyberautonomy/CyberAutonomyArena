@@ -43,6 +43,32 @@ def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
     return None
 
 
+def defender_box_present(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig) -> bool:
+    """Does this deployed environment provide a defender box? Part of the environment's defender-relevant
+    spec: the arena checks it to enforce the interface contract "a defender in the config REQUIRES a
+    defender box from the environment" (see main.py). Not the defender plugin's job to discover.
+
+    Stage-A adapter (MHBench today): the defender box is a host in a dedicated defender subnet added only
+    to defender-capable (instrumented) topologies. Detect it by that subnet/host, not by vm_type (the box
+    shares ubuntu_base_running with the DB hosts). Stage B: the env plugin reports this directly.
+    OWNERSHIP: the environment session owns the box + its topology representation; keep this detector in
+    sync with it (defender_subnet 192.168.250.0/24 / a host named 'defender')."""
+    if deployed is None or not deployed.topology_spec:
+        return False
+    try:
+        topology = json.loads(Path(deployed.topology_spec).read_text())
+    except Exception:  # noqa: BLE001 — a missing/unreadable topology means we cannot assert a box exists
+        return False
+    for network in topology.get("networks", []):
+        for subnet in network.get("subnets", []):
+            if "defender" in str(subnet.get("name", "")).lower() or str(subnet.get("cidr", "")).startswith("192.168.250."):
+                return True
+            for host in subnet.get("hosts", []):
+                if "defender" in str(host.get("name", "")).lower():
+                    return True
+    return False
+
+
 def _mhb_config_args(cfg) -> list:
     # Route MHBench at a non-default backend config (e.g. GCP). Group option, before the subcommand.
     return ["--config", cfg.mhbench_config] if getattr(cfg, "mhbench_config", None) else []

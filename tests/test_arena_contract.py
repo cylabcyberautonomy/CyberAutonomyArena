@@ -395,3 +395,36 @@ def test_equifax_small_spec_exists_and_protects_keyholder():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ------------------------------------------------------------------ env↔defender interface contract
+
+def test_defender_box_present_detects_the_env_defender_box(tmp_path):
+    """The environment's defender-relevant spec: defender_box_present() reports whether the deployed
+    topology includes a defender box. The arena uses it to enforce 'a configured defender requires a
+    defender box from the environment' — the check is the ARENA's, not the defender plugin's."""
+    from experiment_manager.environment.deployer import defender_box_present
+
+    base = {"networks": [{"name": "victims", "subnets": [
+        {"name": "webserver_subnet", "cidr": "192.168.200.0/24",
+         "hosts": [{"name": "webserver0", "vm_type": "webserver_instrumented", "ip_address": "192.168.200.10"}]},
+    ]}]}
+    no_box = tmp_path / "no_box.json"
+    no_box.write_text(json.dumps(base))
+    assert defender_box_present(DeployedEnvironment(topology_spec=str(no_box), spec="x"), None) is False
+
+    with_box = json.loads(json.dumps(base))
+    with_box["networks"].append({"name": "defender_net", "subnets": [
+        {"name": "defender_subnet", "cidr": "192.168.250.0/24",
+         "hosts": [{"name": "defender", "vm_type": "ubuntu_base_running", "ip_address": "192.168.250.10"}]},
+    ]})
+    box = tmp_path / "with_box.json"
+    box.write_text(json.dumps(with_box))
+    assert defender_box_present(DeployedEnvironment(topology_spec=str(box), spec="x"), None) is True
+
+
+def test_defender_box_present_false_when_no_env():
+    """No deployed environment (or no topology) => cannot assert a box, so the contract check will fail
+    a defender run rather than assume one exists."""
+    from experiment_manager.environment.deployer import defender_box_present
+    assert defender_box_present(None, None) is False
