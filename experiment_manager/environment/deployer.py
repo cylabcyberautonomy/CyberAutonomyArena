@@ -158,9 +158,16 @@ def _role_from_name(name: str) -> Optional[str]:
 def _bastion_proxy_args(mgmt_ip: Optional[str], key: str) -> str:
     if not mgmt_ip:
         return ""
+    # IdentitiesOnly=yes on BOTH hops is load-bearing: it forces ssh to offer ONLY this scoped key.
+    # Without it, ssh also tries default/agent keys — and whoever runs this (the harness, or a plugin
+    # that forwarded SetupAccess) may hold the broad management key, which would authenticate instead
+    # and silently bypass the bastion's forward-only permitopen. With it, the scoped key is the only
+    # credential in play, so the per-key restrictions actually bind.
     return (
-        f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
-        f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"'
+        f'-o IdentitiesOnly=yes '
+        f'-o ProxyCommand="ssh -W %h:%p -i {key} -o IdentitiesOnly=yes -o BatchMode=yes '
+        f'-o PasswordAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+        f'root@{mgmt_ip}"'
     )
 
 
@@ -190,6 +197,37 @@ def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path]:
     return out[0], out[1]
 
 
+def _inject_bastion_jump(pubkey: str, targets: list[str], mgmt_ip: str, mgmt_key: str) -> bool:
+    """Add a FORWARD-ONLY entry for pubkey to the BASTION's root authorized_keys: it may ONLY open a
+    tunnel (ssh -W) to the listed host:port targets — no shell, no PTY, no other forwarding. Replaces
+    any prior entry for the same key (idempotent). This is what lets a system's SetupAccess route its
+    bastion hop with its OWN scoped key instead of the broad management key: the same key that opens a
+    shell on the system's targets can, on the bastion, do nothing but tunnel to exactly those targets.
+    Reached on the bastion directly (it holds the floating IP), with the management key."""
+    if not targets:
+        return True
+    # restrict = no PTY/agent/X11 + no forwarding; then re-enable port-forwarding but ONLY to `targets`
+    # (permitopen). restrict does NOT block non-interactive command execution, so also force every
+    # session/exec channel to /bin/false — a -W tunnel uses a direct-tcpip channel (no session), so it
+    # is unaffected and still governed by permitopen. Net: this key can ONLY tunnel to `targets`.
+    opts = ('command="/bin/false",restrict,port-forwarding,'
+            + ",".join(f'permitopen="{t}"' for t in targets))
+    entry = f"{opts} {pubkey}"
+    keymat = pubkey.split()[1]  # the base64 blob — match on it to replace any prior entry for this key
+    remote = (
+        "install -d -m700 ~/.ssh && touch ~/.ssh/authorized_keys && "
+        f"{{ grep -vF {keymat!r} ~/.ssh/authorized_keys || true; }} > ~/.ssh/ak.tmp && "
+        "mv ~/.ssh/ak.tmp ~/.ssh/authorized_keys && "
+        f"printf '%s\\n' {entry!r} >> ~/.ssh/authorized_keys"
+    )
+    r = subprocess.run(
+        ["ssh", "-i", mgmt_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", f"root@{mgmt_ip}", remote],
+        capture_output=True, text=True, timeout=60,
+    )
+    return r.returncode == 0
+
+
 def _inject_pubkey(pubkey: str, host_ip: str, mgmt_ip: str, mgmt_key: str) -> bool:
     """Append pubkey to root's authorized_keys on host_ip (reached via the bastion with the broad
     management key). Idempotent per host."""
@@ -207,9 +245,15 @@ def _inject_pubkey(pubkey: str, host_ip: str, mgmt_ip: str, mgmt_key: str) -> bo
 
 
 def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
-    """Issue + inject the per-system scoped pubkeys: attacker_key on the foothold ONLY, defender_key on
-    the defender box + victims. Best-effort per host (logged); the management key still reaches every
-    host for provisioning regardless."""
+    """Issue + inject the per-system scoped keys so NOTHING a plugin could forward to its agent grants
+    more than that system could earn. For each system, ONE keypair serves both hops:
+      - a full-shell entry on the system's own hosts (attacker_key -> foothold; defender_key -> box +
+        victims), and
+      - a FORWARD-ONLY entry on the bastion (permitopen limited to those same hosts), so the bastion
+        hop in SetupAccess uses the scoped key too — the broad management key never appears in
+        SetupAccess. The management key is used only for provisioning (this injection, ansible), which
+        runs in the harness and is never handed out.
+    Best-effort per host (logged)."""
     name = experiment.experiment_name
     if not mgmt_ip:
         log(name, "inject_scoped_keys: no mgmt_ip; skipping per-system key injection.")
@@ -220,11 +264,15 @@ def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: Expe
     dk_pub = Path(str(dk) + ".pub").read_text().strip()
     mgmt_key = _mhbench_ssh_key(cfg)
 
+    # attacker: full shell on the foothold, forward-only tunnel to it on the bastion
     kali_ip = _kali_ip_from_spec(topo)
     if kali_ip:
         ok = _inject_pubkey(ak_pub, kali_ip, mgmt_ip, mgmt_key)
         log(name, f"per-system key: attacker_key -> foothold {kali_ip}: {'ok' if ok else 'FAILED'}")
+        jok = _inject_bastion_jump(ak_pub, [f"{kali_ip}:22"], mgmt_ip, mgmt_key)
+        log(name, f"jump: attacker_key forward-only on bastion -> {kali_ip}:22: {'ok' if jok else 'FAILED'}")
 
+    # defender: full shell on box + victims, forward-only tunnel to exactly those on the bastion
     targets: list[tuple[str, str]] = []
     box = _defender_box_host(topo)
     if box and box.get("ip_address"):
@@ -235,6 +283,9 @@ def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: Expe
     for hname, hip in targets:
         ok = _inject_pubkey(dk_pub, hip, mgmt_ip, mgmt_key)
         log(name, f"per-system key: defender_key -> {hname} {hip}: {'ok' if ok else 'FAILED'}")
+    if targets:
+        jok = _inject_bastion_jump(dk_pub, [f"{ip}:22" for _, ip in targets], mgmt_ip, mgmt_key)
+        log(name, f"jump: defender_key forward-only on bastion -> {len(targets)} hosts: {'ok' if jok else 'FAILED'}")
 
 
 async def inject_scoped_keys_env(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:

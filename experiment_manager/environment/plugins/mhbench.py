@@ -115,10 +115,14 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return attacker_env_spec(deployed, cfg)
 
     def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import attacker_setup_access
-        # The env ISSUES the attacker's scoped credential (foothold-only), stamped over MHBench's routing.
+        from ..deployer import attacker_setup_access, _bastion_proxy_args
+        # The env ISSUES the attacker's scoped credential (foothold-only). Both hops in SetupAccess use
+        # it: the final hop opens a shell on the foothold, and the bastion hop tunnels with the SAME key
+        # (forward-only on the bastion). The broad management key never enters SetupAccess — assume a
+        # plugin may forward SetupAccess to its agent, so nothing in it may out-scope the system.
         cred = self.attacker_credential(deployed, cfg)
-        return [a.model_copy(update={"ssh_key": cred})
+        proxy = _bastion_proxy_args(mgmt_ip, cred)
+        return [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
                 for a in attacker_setup_access(deployed, mgmt_ip, cfg)]
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
@@ -128,10 +132,14 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return spec
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_setup_access, _defender_box_host
+        from ..deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
         from ...attacker.env_spec import SetupAccess
         cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
-        access = [a.model_copy(update={"ssh_key": cred})
+        # Both hops use the scoped defender key: final hop = shell on box/victims, bastion hop = tunnel
+        # with the same key (forward-only on the bastion). No management key in SetupAccess (a plugin may
+        # forward it to its agent).
+        proxy = _bastion_proxy_args(mgmt_ip, cred)
+        access = [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
                   for a in defender_setup_access(deployed, mgmt_ip, cfg)]
         # When the topology declares a defender_subnet, the deployer already added the REAL box entry
         # (reached via the bastion, like the victims). Only fall back to the mgmt-host placeholder for
