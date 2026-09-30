@@ -29,14 +29,9 @@ def _require_access(access):
 
 # Planning/execution-LLM suggestions shown in the dashboard dropdowns. These are *suggestions
 # only*: planning_llm / execution_llm are free-form strings (see the fields below), so any model
-# the configured backend accepts can be entered directly, even if it is not listed here.
-#
-# The built-in defaults cover the major hosted providers, each gated on its standard API-key
-# environment variable. To surface a different catalog — for example the models served by a
-# self-hosted LiteLLM / OpenAI-compatible proxy — point $INCALMO_LLM_MODELS at a JSON file, or
-# drop an `llm_models.json` next to this module, using the same
-# [{"group_label": ..., "options": [...]}] shape (see llm_models.example.json).
-_DEFAULT_LLM_GROUPS = [
+# the configured backend accepts can be entered directly, even if it is not listed here. The list
+# covers the major hosted providers, each gated on its standard API-key environment variable.
+_LLM_GROUPS = [
     {"group_label": "Anthropic (needs ANTHROPIC_API_KEY)", "options": [
         "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6",
         "claude-4.5-sonnet", "claude-3.7-sonnet", "claude-3.5-sonnet", "claude-3.5-haiku",
@@ -56,23 +51,6 @@ _DEFAULT_LLM_GROUPS = [
         "qwen3.8-max", "qwen3-8",
     ]},
 ]
-
-
-def _load_llm_groups() -> list[dict]:
-    """The planning/execution-LLM suggestion groups for the dashboard. Loads a user-supplied
-    catalog when one is configured ($INCALMO_LLM_MODELS, or a sibling llm_models.json), else the
-    generic built-in defaults. A missing or malformed override falls back to the defaults, so the
-    dropdown is never left empty."""
-    for candidate in (os.environ.get("INCALMO_LLM_MODELS"), Path(__file__).with_name("llm_models.json")):
-        if not candidate:
-            continue
-        try:
-            groups = json.loads(Path(candidate).read_text())
-        except (OSError, ValueError):
-            continue
-        if isinstance(groups, list) and groups:
-            return groups
-    return _DEFAULT_LLM_GROUPS
 
 # The abstraction levels whose actions are LLMAgentAction subclasses (under
 # incalmo/core/actions/HighLevel/llm_agents/).  Only these drive an on-host LLM
@@ -332,7 +310,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
-        llm_groups = _load_llm_groups()
+        llm_groups = _LLM_GROUPS
         return {
             "config_type": "incalmo_llm",
             "label": "Incalmo LLM",
