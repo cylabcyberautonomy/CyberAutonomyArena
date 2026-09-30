@@ -67,10 +67,13 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
 - **INVARIANT:** no credential in a system's `SetupAccess` may grant access that system couldn't
   legitimately earn by playing the game (attacker key opens its box and nothing else). This is what
   makes SetupAccess carrying a key safe; the spec split keeps the key out of build_config for free.
-- **[DEFERRED]** Actually GENERATING + INJECTING per-system keypairs per host (attacker key on the
-  foothold only, defender key on box+victims only, management key harness-side) is a wrapper
-  provisioning item. MHBench today injects ONE god-key everywhere — the whole reason spec leakage is
-  dangerous (east-west `ssh root@victim`, which bastion isolation doesn't cover).
+- **[VALIDATED 2026-09-30]** GENERATING + INJECTING the per-system keypairs is done (harness-side, no
+  MHBench change). `deployer.issue_scoped_keys()` generates attacker_key + defender_key (idempotent, at
+  the credential paths); `inject_scoped_keys()` appends attacker_key.pub to the foothold ONLY and
+  defender_key.pub to the box + victims ONLY, via the bastion, in `configure()` before rotate. Private
+  keys never leave the harness; the broad OpenStack management key stays harness-side. Live-validated on
+  chain_2hosts_instrumented: attacker_key opens the foothold and FAILS on victims + box; defender_key
+  opens box+victims and FAILS on the foothold; management key retains full access.
 - The **management/provisioning credential** (broad, used to deploy/configure) is harness-side and
   **NEVER appears in any spec**.
 
@@ -83,6 +86,11 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
   any control-plane port. Now scoped in `network_deployer`: egress open; ingress tcp/22 (SSH jump,
   key-only) from anywhere; ingress tcp/9200 (relay) only from the victim subnets + mgmt CIDR.
   Tightening 22 to a fixed operator CIDR is a further step (harness connects from varying hosts).
+- **[REMAINING] forward-only jump creds:** `SetupAccess.ssh_common_args` still routes the bastion hop
+  with the broad management key (`-i <mgmt_key>` in the ProxyCommand). It's harness-only (never
+  agent-facing) and the per-system TARGET keys are already scoped, so the agent can't ride it — but a
+  clean design gives the bastion hop a forward-only (`-W`-restricted, `ForceCommand`) jump key instead
+  of the full management key. Distinct from per-system key issuance (done); tracked here.
 
 ### Ground-truth logging (scorer independence)
 - **[DESIGN]** The environment owns ground-truth host logging (auditd/syslog) used by the scorer — it
