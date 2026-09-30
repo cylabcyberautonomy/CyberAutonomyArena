@@ -33,9 +33,14 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
   `{name, host, user}`; **NO creds/routing** — safe to hand the LLM via build_config).
 - **[ENFORCED]** `defender_spec()` → agent-facing `DefenderEnvSpec` (objective + host inventory
   `{name, ip, role}` + the defender box; **NO creds/routing**).
-- **[ENFORCED]** `attacker_setup_access()` / `defender_setup_access()` → harness-only `SetupAccess`
-  list (`{name, host, user, port, ssh_key, ssh_common_args}` — creds + routing, NEVER given to the
-  agent's LLM). Kept SEPARATE from the agent-facing spec (do not merge).
+- **[ENFORCED]** `attacker_setup_access()` / `defender_setup_access()` → `SetupAccess` list
+  (`{name, host, user, port, ssh_key, ssh_common_args}` — creds + routing). Produced by the env for the
+  plugin's setup, kept SEPARATE from the agent-facing spec. **Do NOT assume it stays hidden from the
+  agent** — a plugin may forward anything it's given to its attacker/defender agent. So security cannot
+  rely on SetupAccess secrecy: it must be SAFE IF FORWARDED — every credential in it is SCOPED so it
+  grants nothing the system couldn't earn (attacker key: foothold shell + foothold-only tunnel; defender
+  key: box+victims). This is why the management key must never appear in SetupAccess (see forward-only
+  jump creds), and why the spec split still matters (keeps creds out of build_config regardless).
 
 ### Boxes (both agents run on an env-provided box)
 - **[VALIDATED 2026-09-29]** `defender_box()` → a `DefenderBox` in an isolated subnet, hidden from the
@@ -86,11 +91,13 @@ attacker/defender need to reach it. `EnvironmentPlugin` (config_type=...), selec
   any control-plane port. Now scoped in `network_deployer`: egress open; ingress tcp/22 (SSH jump,
   key-only) from anywhere; ingress tcp/9200 (relay) only from the victim subnets + mgmt CIDR.
   Tightening 22 to a fixed operator CIDR is a further step (harness connects from varying hosts).
-- **[REMAINING] forward-only jump creds:** `SetupAccess.ssh_common_args` still routes the bastion hop
-  with the broad management key (`-i <mgmt_key>` in the ProxyCommand). It's harness-only (never
-  agent-facing) and the per-system TARGET keys are already scoped, so the agent can't ride it — but a
-  clean design gives the bastion hop a forward-only (`-W`-restricted, `ForceCommand`) jump key instead
-  of the full management key. Distinct from per-system key issuance (done); tracked here.
+- **[VALIDATED 2026-09-30] forward-only jump creds:** the bastion hop no longer uses the management
+  key. Each scoped key gets a forward-only entry on the bastion —
+  `command="/bin/false",restrict,port-forwarding,permitopen="<own hosts>:22"` — so it can ONLY tunnel
+  (`ssh -W`) to that system's own hosts and cannot get a shell or run a command there. `_bastion_proxy_args`
+  routes the ProxyCommand with the scoped key and forces `IdentitiesOnly=yes` on both hops (else ssh also
+  offers the caller's management key and bypasses permitopen). Net: the management key is absent from
+  SetupAccess entirely. Live-validated 11/11 on chain_2hosts_instrumented.
 
 ### Ground-truth logging (scorer independence)
 - **[DESIGN]** The environment owns ground-truth host logging (auditd/syslog) used by the scorer — it
