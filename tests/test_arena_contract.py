@@ -269,6 +269,23 @@ def test_defender_velociraptor_build_config_contract():
     assert "response_mode" in built
 
 
+# ----------------------------------------------- defender-requested box ingress (env opens exactly these)
+
+def test_defender_box_ingress_declarations():
+    """Each defender declares the box ports the environment must open (telemetry->box:9200 relay
+    route, forward->victim:8000 passthrough). The harness reads box_ingress() at arm and requests
+    exactly these — the box surface matches what the defender uses. Config-aware."""
+    reg = DefenderPlugin._registry
+    assert reg["llm_soc"].model_validate(DEFENDER).box_ingress() == {"telemetry": [9200]}
+    assert reg["velociraptor"].model_validate({"type": "velociraptor"}).box_ingress() == {"forward": [8000]}
+    assert reg["deception"].model_validate({"type": "deception", "strategy": "ReactiveLayered"}).box_ingress() == {"telemetry": [9200]}
+    # canary is config-aware: telemetry checks -> request 9200; ssh/resolve-only -> open nothing
+    assert reg["canary"].model_validate({"type": "canary"}).box_ingress() == {"telemetry": [9200]}
+    assert reg["canary"].model_validate({"type": "canary", "checks": ["ssh", "resolve"]}).box_ingress() == {}
+    # base default is empty (a defender needing no box ingress opens zero ports)
+    assert DefenderPlugin.box_ingress.__doc__  # documented contract
+
+
 # ------------------------------------------------------------------ arena-facing lifecycle
 
 def test_attacker_lifecycle_methods_present():

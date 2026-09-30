@@ -144,6 +144,10 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             ),
         )
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        # Server-mediated EDR: clients beacon in via the victim->mgmt->box:8000 forward. No box ES.
+        return {"forward": [8000]}
+
     def build_config(
         self,
         experiment_name: str,

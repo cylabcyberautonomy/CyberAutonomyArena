@@ -79,6 +79,10 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             ],
         }
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        # Reactive strategies read the box ES telemetry; static ones ignore it (harmless to route).
+        return {"telemetry": [9200]}
+
     def build_config(
         self,
         experiment_name: str,

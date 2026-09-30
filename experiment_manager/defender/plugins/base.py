@@ -25,6 +25,20 @@ class DefenderPlugin(BaseModel):
     def ui_schema(cls) -> PluginUISchema:
         raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        """The defender-requested box-ingress this plugin needs the ENVIRONMENT to open, by kind:
+
+            "telemetry": [9200]  -> the env relay routes sensor telemetry to the box ES on these
+                                    ports (no new victim-facing firewall port opens).
+            "forward":   [8000]  -> a victim->mgmt->box raw-TCP passthrough + a victim->mgmt SG rule
+                                    on these ports (server-mediated EDR clients beacon in).
+
+        The harness reads this at defender arm and calls `request-ingress` with exactly these ports,
+        so the box's exposed surface matches precisely what the defender uses. A defender that needs
+        nothing returns {} (default) and opens ZERO box ports. Config-aware: e.g. a diagnostic-only
+        canary that runs no telemetry checks opens nothing."""
+        return {}
+
     async def setup(
         self,
         experiment_name: str,

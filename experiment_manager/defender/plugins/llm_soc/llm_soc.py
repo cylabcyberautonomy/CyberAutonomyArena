@@ -108,6 +108,10 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             ],
         }
 
+    def box_ingress(self) -> dict[str, list[int]]:
+        # FalcoLLM reads the box ES (falco + sysflow) -> needs telemetry routed to box:9200.
+        return {"telemetry": [9200]}
+
     def build_config(
         self,
         experiment_name: str,
