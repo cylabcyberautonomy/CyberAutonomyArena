@@ -2021,7 +2021,30 @@ def _inner_html(total, summary_cards, rows):
   </div>"""
 
 
+_SUBMITTED_SPECS_DIR = Path(__file__).resolve().parent / "submitted_specs"
+
+
+def _attacker_to_plugin_spec(payload: dict) -> dict:
+    """The manager's attacker config is a (plugin + spec-file) pair. The browser still builds the
+    embedded {type, ...fields} form; convert it here (server-side, same host as the manager): write
+    the bespoke fields to a spec file and pass attacker_plugin + attacker_spec (its path)."""
+    atk = payload.get("attacker")
+    if not (isinstance(atk, dict) and atk.get("type")):
+        return payload
+    plugin = atk["type"]
+    spec = {k: v for k, v in atk.items() if k != "type"}  # bespoke fields only; manager injects type
+    _SUBMITTED_SPECS_DIR.mkdir(parents=True, exist_ok=True)
+    name = payload.get("experiment_name", "exp")
+    spec_path = _SUBMITTED_SPECS_DIR / f"{name}_attacker.json"
+    spec_path.write_text(json.dumps(spec, indent=2))
+    out = {k: v for k, v in payload.items() if k != "attacker"}
+    out["attacker_plugin"] = plugin
+    out["attacker_spec"] = str(spec_path)
+    return out
+
+
 def proxy_submit(payload: dict) -> tuple[int, dict]:
+    payload = _attacker_to_plugin_spec(payload)
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         EXPERIMENT_SERVER,

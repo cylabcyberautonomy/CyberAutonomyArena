@@ -21,6 +21,8 @@ environment/deployer.py; other env plugins later).
 """
 from __future__ import annotations
 
+import os
+import shlex
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -53,3 +55,23 @@ class SetupAccess(BaseModel):
     port: int = 22
     ssh_key: Optional[str] = None
     ssh_common_args: str = ""   # e.g. a ProxyCommand for a bastion/relay; "" = directly reachable
+
+    def ssh_base(self) -> list[str]:
+        """An ssh command prefix that runs a remote command on this box, using its env-provided
+        routing (ssh_common_args carries the ProxyCommand/relay opts; "" = directly reachable).
+
+        This is a pure operation on the access data, not an attacker concern — any system the
+        environment grants a scoped SetupAccess (attacker foothold, defender box, traffic host) reaches
+        its box the same way, so the transport lives on the DTO, callable as `access.ssh_base()`."""
+        cmd = ["ssh"]
+        if self.ssh_key:
+            cmd += ["-i", os.path.expanduser(self.ssh_key)]
+        cmd += [
+            "-p", str(self.port),
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=10",
+        ]
+        if self.ssh_common_args:
+            cmd += shlex.split(self.ssh_common_args)  # env-owned routing (e.g. -o ProxyCommand="...")
+        cmd += [f"{self.user}@{self.host}"]
+        return cmd

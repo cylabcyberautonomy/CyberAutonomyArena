@@ -48,6 +48,7 @@ from experiment_manager.attacker.env_spec import AttackerEnvSpec, AttackerFootho
 from experiment_manager.experiment.models import ExperimentSpecs
 
 ENV_SPEC = "environments/non-generated/equifax_small.json"  # path (relative to mhbench_dir)
+ENV_NAME = ENV_SPEC  # alias: any mhbench-accepted env identifier (bare name or path) coerces the same
 ENV_STEM = "equifax_small"  # the short label = path stem
 ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
@@ -89,7 +90,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
@@ -135,6 +136,41 @@ def test_environmentconfig_selectable_and_backcompat():
             == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC})
 
 
+def test_attacker_plugin_plus_spec_file(tmp_path):
+    """New shape: attacker_plugin selects the implementation; attacker_spec is a PATH to a file
+    holding the plugin's bespoke spec. It resolves to the same plugin instance as the embedded form."""
+    spec_file = tmp_path / "atk_spec.json"
+    spec_file.write_text(json.dumps({"strategy": "GraphSearch", "c2_on_kali": True}))
+    specs = ExperimentSpecs(
+        experiment_name="ci_plugin_spec",
+        environment=ENV_NAME,
+        attacker_plugin="incalmo_strategy",
+        attacker_spec=str(spec_file),
+        defender=DEFENDER,
+    )
+    # resolved into .attacker as the real plugin instance
+    assert specs.attacker.type == "incalmo_strategy"
+    assert specs.attacker.strategy == "GraphSearch"
+    assert specs.attacker.c2_on_kali is True
+    # a YAML spec works too, and an absent spec file means plugin defaults
+    yspec = tmp_path / "atk.yaml"
+    yspec.write_text("strategy: Darkside\n")
+    s2 = ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
+                         attacker_plugin="incalmo_strategy", attacker_spec=str(yspec))
+    assert s2.attacker.strategy == "Darkside"
+
+
+def test_attacker_plugin_and_embedded_are_mutually_exclusive():
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
+                        attacker_plugin="incalmo_strategy", attacker=ATTACKER)
+
+
+def test_attacker_plugin_unknown_name_rejected():
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment=ENV_NAME, attacker_plugin="no_such_plugin")
+
+
 def test_experimentspecs_without_traffic_still_valid():
     """Traffic is optional: a plain attacker-vs-defender run must not require it."""
     specs = ExperimentSpecs(
@@ -144,6 +180,31 @@ def test_experimentspecs_without_traffic_still_valid():
         defender=DEFENDER,
     )
     assert specs.traffic is None
+
+
+def test_experiment_base_is_environment_plus_attacker():
+    """The experiment base is environment + attacker; defender and traffic are optional. A spec with
+    only environment + attacker (no defender, no traffic) must validate, with both left None."""
+    specs = ExperimentSpecs(
+        experiment_name="ci_base_only",
+        environment=ENV_NAME,
+        attacker=ATTACKER,
+    )
+    assert specs.defender is None
+    assert specs.traffic is None
+
+
+def test_experimentspecs_requires_an_attacker():
+    """environment + attacker are the required base: a spec with no attacker (neither the plugin pair
+    nor the embedded form) must be rejected, not fail later mid-run."""
+    with pytest.raises(Exception, match="requires an attacker"):
+        ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV_NAME)
+
+
+def test_experimentspecs_requires_an_environment():
+    """environment is required (the other half of the base)."""
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="ci_no_env", attacker=ATTACKER)
 
 
 # ------------------------------------------------- attacker -> runner build_config contract
@@ -205,6 +266,18 @@ def test_environment_produces_both_spec_and_access():
     from experiment_manager.environment import deployer
     assert callable(deployer.attacker_env_spec)
     assert callable(deployer.attacker_setup_access)
+
+
+def test_terminus_build_config_contract():
+    """Terminus-2 LLM shell attacker: build_config carries model/api routing + objective + the kali
+    box IP the runner drives; ui_schema is well-formed."""
+    atk = AttackerPlugin._registry["terminus_llm"].model_validate(
+        {"type": "terminus_llm", "model": "anthropic/claude-opus-4-1"})
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
+    assert built["model"] == "anthropic/claude-opus-4-1"
+    assert built["kali_ip"] == "192.168.202.100"
+    assert "objective" in built and "max_turns" in built
+    assert atk.ui_schema()["config_type"] == "terminus_llm"
 
 
 def test_attacker_graphsearch_build_config_contract():
@@ -561,3 +634,76 @@ def test_equifax_small_spec_exists_and_protects_keyholder():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ------------------------------------------------------------------ env↔defender interface contract
+
+def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
+    """The environment's defender-relevant spec: defender_box_spec() reports the defender box (or None) in the deployed
+    topology includes a defender box. The arena uses it to enforce 'a configured defender requires a
+    defender box from the environment' — the check is the ARENA's, not the defender plugin's."""
+    from experiment_manager.environment.deployer import defender_box_spec
+
+    base = {"networks": [{"name": "victims", "subnets": [
+        {"name": "webserver_subnet", "cidr": "192.168.200.0/24",
+         "hosts": [{"name": "webserver0", "vm_type": "webserver_instrumented", "ip_address": "192.168.200.10"}]},
+    ]}]}
+    no_box = tmp_path / "no_box.json"
+    no_box.write_text(json.dumps(base))
+    assert defender_box_spec(DeployedEnvironment(topology_spec=str(no_box), spec="x"), None) is None
+
+    with_box = json.loads(json.dumps(base))
+    with_box["networks"].append({"name": "defender_net", "subnets": [
+        {"name": "defender_subnet", "cidr": "192.168.250.0/24",
+         "hosts": [{"name": "defender", "vm_type": "ubuntu_base_running", "ip_address": "192.168.250.10"}]},
+    ]})
+    box = tmp_path / "with_box.json"
+    box.write_text(json.dumps(with_box))
+    assert defender_box_spec(DeployedEnvironment(topology_spec=str(box), spec="x"), None) is not None
+
+
+def test_defender_box_spec_none_when_no_env():
+    """No deployed environment (or no topology) => cannot assert a box, so the contract check will fail
+    a defender run rather than assume one exists."""
+    from experiment_manager.environment.deployer import defender_box_spec
+    assert defender_box_spec(None, None) is None
+
+
+# ------------------------------------------------------------------ attacker plugins: no god key
+
+def test_gcp_c2_uses_scoped_attacker_key_not_god_key(tmp_path, monkeypatch):
+    """gcp_c2 must reach/authorize its C2 VM with the env's SCOPED attacker key (single shared source),
+    never the GCP management key. issue_scoped_keys lives in the env deployer; monkeypatch it in."""
+    from experiment_manager.environment import deployer
+    from experiment_manager.attacker.plugins.incalmo import gcp_c2
+
+    priv = tmp_path / "attacker_key"
+    priv.write_text("SCOPED-PRIVATE")
+    (tmp_path / "attacker_key.pub").write_text("ssh-ed25519 AAAAscopedattacker\n")
+    monkeypatch.setattr(deployer, "issue_scoped_keys",
+                        lambda cfg: (str(priv), str(tmp_path / "defender_key")), raising=False)
+
+    key_path, pub = gcp_c2._scoped_attacker_key(cfg=None)
+    assert key_path == str(priv)
+    assert pub == "ssh-ed25519 AAAAscopedattacker"
+
+
+def test_gcp_c2_has_no_management_key_read():
+    """Regression: gcp_c2 must not read a management SSH key off config (openstack/gcp ssh_key_path)."""
+    import inspect
+    from experiment_manager.attacker.plugins.incalmo import gcp_c2
+    src = inspect.getsource(gcp_c2)
+    assert "ssh_key_path" not in src, "gcp_c2 reintroduced a management-key read"
+
+
+def test_kali_c2_builds_ssh_from_scoped_setupaccess():
+    """Regression: kali_c2 reaches the foothold via the SetupAccess (scoped key + env routing), not a
+    management key read off disk."""
+    from experiment_manager.attacker.plugins.incalmo import kali_c2
+    fa = SetupAccess(name="kali", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
+                     ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')
+    cmd = " ".join(kali_c2._ssh_to_kali(fa))
+    assert "/scoped/attacker_key" in cmd and "ProxyCommand" in cmd and "root@192.168.0.9" in cmd
+    assert "id_ed25519" not in cmd
+    import inspect
+    assert "_mhb_ssh_key" not in inspect.getsource(kali_c2), "kali_c2 reintroduced a management-key read"

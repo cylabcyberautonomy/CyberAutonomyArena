@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerComma
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
-from .environment.deployer import resolve_topology_path
+from .environment.deployer import resolve_topology_path, defender_box_spec
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -814,11 +814,12 @@ def _attacker_command_recorder(experiment: Experiment):
     return _on_command
 
 
-async def _drive_attacker_setup(experiment: Experiment, cfg, mgmt_ip, lc: AttackerLifecycle):
+async def _drive_attacker_setup(experiment: Experiment, cfg, mgmt_ip, lc: AttackerLifecycle, access=None):
     """Handshake the setup phase: send start_setup (run the attacker's setup template as a task),
     wait for its setup_started ack, then wait for ready. Running setup concurrently is what lets a
-    hang between the two show up as a stalled READY wait rather than a silent block."""
-    task = asyncio.create_task(experiment.attacker.run_setup(experiment, cfg, mgmt_ip))
+    hang between the two show up as a stalled READY wait rather than a silent block.
+    `access` is the scoped foothold SetupAccess, passed through to run_setup (env-produced)."""
+    task = asyncio.create_task(experiment.attacker.run_setup(experiment, cfg, mgmt_ip, access))
     try:
         # setup_started is emitted at the very top of run_setup, so it arrives promptly; if the ack
         # wait times out or errors, fall through and let `await task` surface the real cause.
@@ -925,6 +926,20 @@ async def _run_experiment(experiment: Experiment) -> None:
         if deploy_slot_held:
             _deploy_buffer.release()   # release the deploy slot on any exit before configure started (e.g. provision failure)
 
+    # Interface-contract validation (the ARENA's job — not the defender plugin's). The environment must
+    # supply what each configured system requires; the arena refuses a deploy whose env↔system contract is
+    # violated rather than letting a plugin discover it late (or worse, run degraded). First contract: a
+    # configured defender REQUIRES a defender box from the environment. A defenderless env (no defender box,
+    # e.g. a non-instrumented topology) is fine when there's no defender — but pairing a defender with such
+    # an env is a contract violation, so fail here before any attacker/defender work.
+    if experiment.defender is not None and defender_box_spec(experiment.deployed_environment, cfg) is None:
+        await _handle_failure(
+            experiment,
+            "Interface contract violated: a defender is configured but the environment provides no "
+            "defender box. Use a defender-capable (instrumented) environment, or remove the defender.",
+        )
+        return
+
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # kali, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
     # NOTE: the pre-launch _teardown_stale_c2_before_launch() sweep was REMOVED (2026-09-21) — suspected of
@@ -943,9 +958,11 @@ async def _run_experiment(experiment: Experiment) -> None:
     # The environment produces two things: the ADVERSARY-SAFE AttackerEnvSpec (objective + foothold
     # identity, consumed by build_config — could be handed to the adversary) and the HARNESS-ONLY
     # SetupAccess (keys + bastion routing, used only by the trusted plugin's prep, never given to
-    # the adversary). The ENVIRONMENT PLUGIN is the producer of both.
+    # the adversary). The ENVIRONMENT PLUGIN is the producer of both (it issues the scoped attacker
+    # credential + bastion routing). The scoped SetupAccess is PASSED as a parameter into the attacker's
+    # run_setup (same shape as the defender's defender_access), not hung on the experiment.
     experiment._attacker_env_spec = experiment.environment.attacker_spec(experiment.deployed_environment, cfg)
-    experiment._attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
+    attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
     try:
         # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
         # which has no floating IP — through the bastion to install docker, ship the image, and open
@@ -956,9 +973,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         await attacker_lc.send(AttackerCommand.START_SETUP)  # arena -> attacker: begin setup
         if getattr(experiment.attacker, "c2_on_kali", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
-                prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
+                prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
         else:
-            prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc)
+            prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
         await registry.update(experiment)   # persist the setup_started/ready signals
         kali_c2c_url, local_c2c_url = prepared.remote_url, prepared.local_url
         if prepared.container_id:
@@ -1283,6 +1300,10 @@ async def add_experiment(data: ExperimentSpecs):
         updated_at=now,
         priority=max(0, min(1000, int(data.priority))),  # clamp to a sane band so gate ordering can't be abused
     )
+    # Record the (plugin, spec-file) provenance when the pair form was used (data.attacker is the
+    # resolved instance either way).
+    experiment.attacker_plugin = data.attacker_plugin
+    experiment.attacker_spec = data.attacker_spec
 
     try:
         await registry.add(experiment)

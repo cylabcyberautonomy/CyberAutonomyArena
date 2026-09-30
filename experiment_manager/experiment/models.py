@@ -1,15 +1,42 @@
 import json
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+import yaml
+from pydantic import BaseModel, field_validator, model_validator
 
 from ..attacker import AttackerConfig
 from ..defender import DefenderConfig
 from ..traffic import TrafficConfig
 from ..environment import build_environment
 from ..environment.environment import EnvironmentConfig
+
+
+def _load_spec_file(spec_path: Optional[str]) -> dict:
+    """Read a plugin spec from a file path (JSON or YAML). A missing path means an empty spec
+    (plugin defaults). The file must hold a mapping — the bespoke fields the plugin parses."""
+    if not spec_path:
+        return {}
+    p = Path(spec_path).expanduser()
+    if not p.exists():
+        raise ValueError(f"spec file not found: {spec_path}")
+    data = yaml.safe_load(p.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"spec file {spec_path} must contain a mapping, got {type(data).__name__}")
+    return data
+
+
+def _resolve_plugin(registry, plugin_name: str, spec_path: Optional[str]):
+    """Resolve a (plugin, spec-file) pair to a validated plugin instance. The plugin selects the
+    implementation; the spec file holds its bespoke input. `plugin_name` is injected as `type`, so
+    the spec file need not repeat it (and cannot override the chosen plugin)."""
+    cls = registry._registry.get(plugin_name)
+    if cls is None:
+        raise ValueError(f"Unknown plugin {plugin_name!r}. Available: {list(registry._registry)}")
+    spec = _load_spec_file(spec_path)
+    return cls.model_validate({**spec, "type": plugin_name})
 
 
 class ExperimentStatus(str, Enum):
@@ -31,6 +58,11 @@ class ExperimentSpecs(BaseModel):
     # environment (the 4th selectable system): {environment_plugin: mhbench, environment_spec: ...},
     # or a bare env-name string (→ mhbench). Explicit plugin+spec shape (environment only).
     environment: EnvironmentConfig
+    # attacker as a (plugin, spec-file) pair. attacker_plugin selects the implementation; attacker_spec
+    # is a PATH to a JSON/YAML file holding that plugin's bespoke spec. Resolved into `attacker` below.
+    # The embedded `attacker: {type, ...}` form is still accepted (back-compat).
+    attacker_plugin: Optional[str] = None
+    attacker_spec: Optional[str] = None
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
     traffic: Optional[TrafficConfig] = None  # third plugin class: benign background traffic on victim hosts
@@ -48,6 +80,27 @@ class ExperimentSpecs(BaseModel):
         # the legacy {type, spec} dict — all coerce to EnvironmentConfig.
         return EnvironmentConfig.coerce(v)
 
+    @model_validator(mode="after")
+    def _resolve_attacker_plugin_spec(self):
+        """attacker_plugin + attacker_spec (file) -> the validated attacker plugin instance in
+        `self.attacker`, so everything downstream (Experiment.attacker, build_config, ...) is
+        unchanged. Give the pair OR the embedded form, not both.
+
+        The experiment base is environment + attacker: both are required. defender and traffic are
+        optional (None = the experiment simply runs without that system)."""
+        if self.attacker_plugin:
+            if self.attacker is not None:
+                raise ValueError("provide attacker_plugin (+attacker_spec) OR the embedded 'attacker', not both")
+            from ..attacker.plugins.base import AttackerPlugin
+            self.attacker = _resolve_plugin(AttackerPlugin, self.attacker_plugin, self.attacker_spec)
+        if self.attacker is None:
+            raise ValueError(
+                "an experiment requires an attacker: provide attacker_plugin (+attacker_spec) or an "
+                "embedded 'attacker'. (environment + attacker are the required base; defender and "
+                "traffic are optional.)"
+            )
+        return self
+
 
 def _json_default(o):
     if isinstance(o, datetime):
@@ -62,7 +115,7 @@ def _json_default(o):
 _CONFIG_KEYS = {
     "experiment": ("name", "trial", "teardown", "priority"),
     "environment": ("config", "spec"),
-    "attacker": ("config",),
+    "attacker": ("config", "plugin", "spec_path"),
     "defender": ("config",),
     "traffic": ("config",),
 }
@@ -124,6 +177,8 @@ class Experiment:
     environment_last_command = _Field("environment", "last_command")  # last command the arena SENT (Provision/Configure/Teardown)
     # --- attacker ---
     attacker = _Field("attacker", "config")
+    attacker_plugin = _Field("attacker", "plugin")     # provenance: the plugin name the user selected
+    attacker_spec = _Field("attacker", "spec_path")    # provenance: path to the spec file (if the pair form was used)
     pid = _Field("attacker", "pid")
     c2c_container_id = _Field("attacker", "c2c_container_id")
     attacker_started_at = _Field("attacker", "started_at")
@@ -167,7 +222,7 @@ class Experiment:
                 "teardown_started_at": None, "teardown_finished_at": None,
             },
             "attacker": {
-                "config": attacker, "pid": None, "c2c_container_id": None,
+                "config": attacker, "plugin": None, "spec_path": None, "pid": None, "c2c_container_id": None,
                 "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "last_command": None, "setup_started_at": None,
                 "ready_at": None, "stopping_at": None, "stopped_at": None,

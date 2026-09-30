@@ -22,3 +22,6 @@ archive/
 
 # stray editor backups
 *.py.bak
+
+# dashboard-written attacker spec files (submission-time artifacts)
+submitted_specs/

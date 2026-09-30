@@ -7,8 +7,9 @@ is already part of each topology, so the C2 lives at Kali's in-tenant IP (shared
 defender needs). Victims/agents beacon to `kali_ip:8888`, and a defender's BlockIP(kali_ip) severs
 only attacker infra.
 
-Kali has NO floating IP (only the bastion/mgmt host does), so everything reaches it via ProxyJump
-through the bastion at mgmt_ip, as root, with MHBench's SSH key:
+Kali has NO floating IP (only the bastion/mgmt host does), so everything reaches it via the bastion
+using the foothold's SetupAccess the arena attached — its scoped attacker key + env-owned routing
+(a ProxyCommand through the bastion). We never read a management key off disk here:
   - setup ships the incalmo/c2c image + /incalmo to Kali and runs the container there;
   - the attacker LLM on beluga reaches the C2 through an `ssh -L` tunnel opened via the bastion
     (local 127.0.0.1:<port> -> kali_ip:8888).
@@ -29,6 +30,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from ...env_spec import SetupAccess
+
 logger = logging.getLogger(__name__)
 
 _C2C_IMAGE = "incalmo/c2c:latest"
@@ -39,24 +42,6 @@ _built = False
 
 def _statefile(experiment_name: str) -> Path:
     return _STATE_DIR / f"{experiment_name}.json"
-
-
-def _mhb_ssh_key(cfg=None) -> str:
-    """MHBench's OpenStack SSH key (used to reach Kali via the bastion)."""
-    try:
-        if cfg is not None:
-            path = Path(cfg.mhbench_dir) / "config" / "config.yaml"
-        else:
-            path = Path.home() / "MHBench" / "config" / "config.yaml"
-        key = yaml_safe_load(path)["openstack"]["ssh_key_path"]
-        return str(Path(key).expanduser())
-    except Exception:
-        return str(Path.home() / ".ssh" / "id_ed25519")
-
-
-def yaml_safe_load(path: Path) -> dict:
-    import yaml
-    return yaml.safe_load(path.read_text())
 
 
 def _ctl_path(experiment_name: str) -> str:
@@ -71,8 +56,12 @@ def _ctl_path(experiment_name: str) -> str:
     return str(_STATE_DIR / f"cm-{name}")
 
 
-def _ssh_to_kali(key: str, mgmt_ip: str, kali_ip: str, ctl: str | None = None) -> list[str]:
-    """ssh argv reaching Kali as root, ProxyJumping through the bastion (root@mgmt_ip).
+def _ssh_to_kali(access: SetupAccess, ctl: str | None = None) -> list[str]:
+    """ssh argv reaching the foothold (Kali) as the env-granted principal, using the SCOPED key +
+    env-owned routing carried by the SetupAccess. We never read a management key off disk or build our
+    own ProxyCommand: `access.ssh_key` is the foothold-scoped key and `access.ssh_common_args` carries
+    the env's bastion/relay routing (a ProxyCommand with a forward-only jump credential, and its own
+    /dev/null known_hosts handling on the jump — so recycled-FIP stale bastion keys can't reject us).
 
     When `ctl` is given, all invocations sharing that ControlPath multiplex over ONE master
     connection: the master carries the end-to-end Kali session tunnelled through the bastion, so
@@ -82,34 +71,27 @@ def _ssh_to_kali(key: str, mgmt_ip: str, kali_ip: str, ctl: str | None = None) -
     (proven: 30 fresh poll connects all dropped while multiplexed ansible traffic got through), so
     collapsing kali_c2's ~5 fresh connects down to one both removes the post-poll failure points
     and cuts kali_c2's own contribution to the connection storm."""
-    args = [
-        "ssh", "-i", key,
+    args = ["ssh"]
+    if access.ssh_key:
+        args += ["-i", os.path.expanduser(access.ssh_key)]
+    args += [
+        "-p", str(access.port),
         "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
     ]
     if ctl:
         args += ["-o", "ControlMaster=auto", "-o", f"ControlPath={ctl}", "-o", "ControlPersist=120"]
-    # Reach Kali via an explicit ProxyCommand rather than `-o ProxyJump=root@{mgmt}`: the command-line
-    # UserKnownHostsFile=/dev/null does NOT propagate to a ProxyJump hop, so the JUMP (bastion) host key
-    # is checked against ~/.ssh/known_hosts. Bastion FIPs are RECYCLED from a pool, so a reused IP shows
-    # up with a new host key -> "REMOTE HOST IDENTIFICATION HAS CHANGED" -> "Host key verification failed"
-    # -> the poll reports "never came up" (deterministic per reused-IP; masked for months as the generic
-    # error). Ansible never hit this because it always used a ProxyCommand with /dev/null on the jump.
-    # Putting /dev/null + StrictHostKeyChecking=no on the INNER (jump) ssh makes the bastion hop ignore
-    # known_hosts entirely — no stale key can reject us, and we stop polluting known_hosts on success.
-    proxy = (
-        f"ssh -W %h:%p -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no "
-        f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 root@{mgmt_ip}"
-    )
-    args += ["-o", f"ProxyCommand={proxy}", f"root@{kali_ip}"]
+    if access.ssh_common_args:
+        args += shlex.split(access.ssh_common_args)  # env-owned bastion/relay routing (ProxyCommand)
+    args += [f"{access.user}@{access.host}"]
     return args
 
 
-def _close_master(key: str, mgmt_ip: str, kali_ip: str, ctl: str) -> None:
+def _close_master(access: SetupAccess, ctl: str) -> None:
     """Tear down the shared master connection (best-effort) and remove its socket."""
     try:
-        subprocess.run(_ssh_to_kali(key, mgmt_ip, kali_ip, ctl) + ["-O", "exit"],
+        subprocess.run(_ssh_to_kali(access, ctl) + ["-O", "exit"],
                        timeout=20, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
@@ -142,40 +124,30 @@ def _free_local_port() -> int:
         s.close()
 
 
-def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str, str, str]:
+def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None = None) -> tuple[str, str, str]:
     """Run the C2 on the Kali VM and open a beluga->Kali tunnel for the attacker LLM.
+    Reaches the foothold via the env-provided SetupAccess (scoped key + bastion routing) — not a
+    management key read off disk. `mgmt_ip` is accepted for log messages only; routing is opaque in
+    `access.ssh_common_args`.
     Returns (sentinel, remote_url, local_url):
       sentinel  = "kali-c2:<exp>" (stored as c2c_container_id; routes teardown here)
       remote_url= http://<kali_ip>:8888   (sandcat agents / setup play, in-tenant)
       local_url = http://127.0.0.1:<port> (beluga: readiness polls + attacker LLM, via ssh -L)
     """
-    if not mgmt_ip or not kali_ip:
-        raise RuntimeError(f"[kali-c2] need mgmt_ip and kali_ip (got mgmt_ip={mgmt_ip!r} kali_ip={kali_ip!r})")
+    if access is None or not access.host:
+        raise RuntimeError(f"[kali-c2] need a foothold SetupAccess with a host (got {access!r})")
+    kali_ip = access.host
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    key = _mhb_ssh_key(cfg)
     ctl = _ctl_path(experiment_name)
-    ssh = _ssh_to_kali(key, mgmt_ip, kali_ip, ctl)             # steps 2-5 multiplex over one master
-    ssh_plain = _ssh_to_kali(key, mgmt_ip, kali_ip)            # poll: NO ControlMaster (see step 1)
-    ssh_bastion = [                                            # bastion-only probe (no ProxyJump) for hop attribution
-        "ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", f"root@{mgmt_ip}",
-    ]
+    ssh = _ssh_to_kali(access, ctl)                            # steps 2-5 multiplex over one master
+    ssh_plain = _ssh_to_kali(access)                           # poll: NO ControlMaster (see step 1)
     # A stale/dead ControlPath master from a prior attempt of the SAME experiment (retries reuse the
     # name) poisons every future ControlMaster=auto connect — the "ControlSocket already exists" race
     # that dies as "Connection closed by UNKNOWN port 65535". REAP it (ssh -O exit + unlink), not just
     # unlink the socket file: a half-open master PROCESS would otherwise linger holding the path.
-    _close_master(key, mgmt_ip, kali_ip, ctl)
+    _close_master(access, ctl)
 
     _ensure_image_built_sync(cfg)
-
-    def _hop(stderr: str) -> str:
-        """Attribute a poll failure to a hop: probe the bastion DIRECTLY (no ProxyJump). If the bastion
-        answers, the failure is the bastion->Kali leg (or Kali's sshd); if not, it's the bastion/FIP."""
-        b = subprocess.run(ssh_bastion + ["true"], capture_output=True, text=True)
-        if b.returncode == 0:
-            return "bastion REACHABLE -> failure is the bastion->Kali leg / Kali sshd"
-        return "bastion UNREACHABLE -> failure is the bastion/FIP hop (" + \
-               ((b.stderr or "").strip().replace("\n", " ")[:150] or "no stderr") + ")"
 
     # 1. Wait for Kali to be SSH-reachable through the bastion, using a PLAIN (non-multiplexed) ssh.
     #    Decoupled from the ControlMaster deliberately: the old poll ran ControlMaster=auto, so its FIRST
@@ -184,8 +156,8 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
     #    half-open socket was left behind EVERY later attempt reused the dead master and failed the same
     #    way -> all 45 fast-reject -> "never came up". A plain connect has no master to race and no socket
     #    to poison, so the poll now measures true reachability; the master is opened once, after, in step 1b.
-    #    CAPTURE + ATTRIBUTE each failure: log the raw ssh stderr AND a direct-bastion probe so we see
-    #    which hop actually rejects (bastion/FIP vs bastion->Kali vs Kali sshd) instead of inferring it.
+    #    CAPTURE each failure's raw ssh stderr. (The old direct-bastion hop-attribution probe was removed
+    #    with the god-key: the foothold-scoped key can only reach Kali, not open a shell on the bastion.)
     last_err = ""
     for attempt in range(45):
         proc = subprocess.run(ssh_plain + ["true"], capture_output=True, text=True)
@@ -196,15 +168,14 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
             break
         last_err = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
         if attempt == 0 or attempt % 6 == 5:
-            logger.warning("[kali-c2] poll Kali %s via %s attempt %d/45 rc=%d: %s | %s",
+            logger.warning("[kali-c2] poll Kali %s via %s attempt %d/45 rc=%d: %s",
                            kali_ip, mgmt_ip, attempt + 1, proc.returncode,
-                           last_err[:250] or "(no stderr)", _hop(last_err))
+                           last_err[:250] or "(no stderr)")
         time.sleep(10)
     else:
-        hop = _hop(last_err)
         raise RuntimeError(
             f"[kali-c2] SSH to Kali {kali_ip} (via bastion {mgmt_ip}) never came up; "
-            f"last ssh error: {last_err[:300] or '(none captured)'} | {hop}")
+            f"last ssh error: {last_err[:300] or '(none captured)'}")
 
     # 1b. Reachability confirmed — now open the shared ControlMaster EXPLICITLY (a plain `ssh -o ...ctl true`
     #     that Kali is known-reachable for), retrying a few times and clearing any half-open socket between
@@ -217,7 +188,7 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
         logger.warning("[kali-c2] master-open to Kali %s via %s try %d/6 rc=%d: %s",
                        kali_ip, mgmt_ip, m + 1, mo.returncode,
                        (mo.stderr or "").strip().replace("\n", " ")[:200] or "(no stderr)")
-        _close_master(key, mgmt_ip, kali_ip, ctl)  # reap the failed/half-open master before retrying
+        _close_master(access, ctl)  # reap the failed/half-open master before retrying
         time.sleep(5)
 
     # 2. Install docker on Kali if missing (Kali has apt egress + kali repos; docker not baked).
@@ -265,7 +236,7 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
     # Setup ops done — close the shared master. The tunnel below is deliberately its OWN
     # long-lived connection (independent lifecycle: killed by recorded pid on teardown), not
     # multiplexed over the master, so it must not depend on the master staying alive.
-    _close_master(key, mgmt_ip, kali_ip, ctl)
+    _close_master(access, ctl)
 
     # 6. Open the beluga->Kali tunnel (Kali has no FIP), wrapped in a RESILIENT auto-reconnect
     #    supervisor. The bastion/FIP path saturates under concurrent configure/collect handshake
@@ -278,20 +249,23 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
     #    makes the bash the process-GROUP leader; teardown/sweep kill the whole group (see _kill_pid) so
     #    both the loop and its child ssh die.
     local_port = _free_local_port()
-    # ProxyCommand (not ProxyJump) so the bastion hop ignores known_hosts — same recycled-FIP stale-key
-    # trap as the poll (see _ssh_to_kali); a reconnecting tunnel must not get rejected by a stale key.
-    tunnel_proxy = (
-        f"ssh -W %h:%p -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no "
-        f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 root@{mgmt_ip}"
-    )
+    # Reuse the env-owned routing (access.ssh_common_args) for the tunnel too — its ProxyCommand handles
+    # the bastion hop + the recycled-FIP stale-key trap (/dev/null on the jump); a reconnecting tunnel
+    # must not get rejected by a stale key. Same scoped key as every other reach to the foothold.
     ssh_tunnel = [
         "ssh", "-N", "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6", "-o", "TCPKeepAlive=yes",
         "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
-        "-i", key, "-o", f"ProxyCommand={tunnel_proxy}",
+        "-p", str(access.port),
+    ]
+    if access.ssh_key:
+        ssh_tunnel += ["-i", os.path.expanduser(access.ssh_key)]
+    if access.ssh_common_args:
+        ssh_tunnel += shlex.split(access.ssh_common_args)  # env-owned bastion/relay routing
+    ssh_tunnel += [
         "-L", f"127.0.0.1:{local_port}:{kali_ip}:{_C2_PORT}",
-        f"root@{kali_ip}",
+        f"{access.user}@{access.host}",
     ]
     supervisor = "while true; do " + " ".join(shlex.quote(a) for a in ssh_tunnel) + "; sleep 2; done"
     tunnel = subprocess.Popen(["bash", "-c", supervisor],
@@ -299,6 +273,7 @@ def setup_c2(experiment_name: str, cfg, mgmt_ip: str, kali_ip: str) -> tuple[str
                               start_new_session=True)
     _statefile(experiment_name).write_text(json.dumps({
         "tunnel_pid": tunnel.pid, "kali_ip": kali_ip, "mgmt_ip": mgmt_ip, "local_port": local_port,
+        "access": access.model_dump(),  # so teardown reaches Kali with the same scoped key + routing, no disk read
     }))
     logger.info("[kali-c2] resilient tunnel supervisor pid=%s 127.0.0.1:%s -> %s:%s (via %s)",
                 tunnel.pid, local_port, kali_ip, _C2_PORT, mgmt_ip)
@@ -349,14 +324,18 @@ def teardown_c2(experiment_name: str, cfg=None) -> None:
     pid = state.get("tunnel_pid")
     if isinstance(pid, int):
         _kill_pid(pid)
-    kali_ip, mgmt_ip = state.get("kali_ip"), state.get("mgmt_ip")
-    if kali_ip and mgmt_ip:
+    # Reach Kali with the SAME scoped SetupAccess setup persisted (key + routing) — no management-key
+    # disk read. Old statefiles predating this field can't rebuild a scoped reach; skip the remote
+    # docker rm then (best-effort — the tunnel pid was already killed above, and the VMs get torn down).
+    acc = state.get("access")
+    if acc:
         try:
-            ssh = _ssh_to_kali(_mhb_ssh_key(cfg), mgmt_ip, kali_ip)
+            access = SetupAccess.model_validate(acc)
+            ssh = _ssh_to_kali(access)
             subprocess.run(ssh + ["docker rm -f c2 >/dev/null 2>&1 || true"],
                            timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
-            logger.warning("[kali-c2] teardown docker rm on Kali %s: %s", kali_ip, e)
+            logger.warning("[kali-c2] teardown docker rm on Kali %s: %s", state.get("kali_ip"), e)
     try:
         os.unlink(_ctl_path(experiment_name))  # reap any lingering master socket
     except OSError:

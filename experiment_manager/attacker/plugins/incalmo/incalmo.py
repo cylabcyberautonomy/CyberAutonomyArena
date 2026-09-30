@@ -19,12 +19,11 @@ from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin
 
 
-def _foothold_access(experiment):
-    """The HARNESS-ONLY SetupAccess list the arena attached (how to reach the footholds to prep
-    them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
-    access = getattr(experiment, "_attacker_access", None)
+def _require_access(access):
+    """The HARNESS-ONLY SetupAccess list the arena passes to run_setup (how to reach the footholds to
+    prep them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
     if not access:
-        raise RuntimeError("no SetupAccess on the experiment — the arena must attach it before setup")
+        raise RuntimeError("no SetupAccess passed to the attacker — the arena must pass it to run_setup()")
     return access
 
 _LLM_GROUPS = [
@@ -153,22 +152,23 @@ class _IncalmoAttacker(AttackerPlugin):
     # config — not a harness-global flag. Default False = beluga-docker C2.
     c2_on_kali: bool = False
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip):
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None):
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
         _preflight_incalmo_host(cfg)
-        return await super().setup(experiment, cfg, mgmt_ip)
+        return await super().setup(experiment, cfg, mgmt_ip, access)
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
-        # SetupAccess (key + routing) — no MHBench cli, no environment.deployer.
-        await foothold.land_sandcat(_foothold_access(experiment), remote_url, cfg, experiment.experiment_name)
+        # SetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
+        await foothold.land_sandcat(_require_access(access), remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
-        kali_ip: Optional[str] = None,
+        kali_ip: Optional[str] = None, foothold_access=None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip, c2_on_kali=self.c2_on_kali)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip,
+                                      c2_on_kali=self.c2_on_kali, foothold_access=foothold_access)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -201,11 +201,11 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             return value[0] if value else "GraphSearch"
         return value
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
-        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
+        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
         # Only install msf for strategies that actually dispatch Metasploit ops.
         if self.strategy in _MSF_STRATEGIES:
-            await foothold.install_metasploit(_foothold_access(experiment), cfg, experiment.experiment_name)
+            await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -286,13 +286,13 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     execution_llm: str = ""
     abstraction: str = "incalmo"
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url):
-        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url)
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
+        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
         # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
         # run on the Kali box itself (it binds 127.0.0.1, and the box has no floating IP), which is
         # exactly why the attacker installs it on its own foothold here.
-        await foothold.install_metasploit(_foothold_access(experiment), cfg, experiment.experiment_name)
+        await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
