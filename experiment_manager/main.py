@@ -187,7 +187,7 @@ registry: Registry
 _openstack_lock: _PriorityLock
 _configure_lock: _PriorityLock
 _collect_lock: asyncio.Semaphore  # caps concurrent post-attacker host-log collects (bastion SSH burst / shared FIP-L3 load)
-_attacker_setup_lock: _PriorityLock  # caps concurrent attacker C2 bring-up — ONLY used when c2_on_kali (bastion-FIP SSH into Kali)
+_attacker_setup_lock: _PriorityLock  # caps concurrent C2-attacker bring-up (bastion-FIP SSH into the foothold)
 _deploy_buffer: asyncio.Semaphore
 _inflight_gate: _PriorityLock  # caps concurrently-active (non-queued, non-terminal) experiments; priority-ordered
 _capacity: CapacityTracker
@@ -207,7 +207,7 @@ async def lifespan(app: FastAPI):
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
     _collect_lock = asyncio.Semaphore(cfg.max_concurrent_collects)        # concurrent COLLECT (post-attacker host-log fetch burst)
-    _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent attacker C2 bring-up (only enforced under c2_on_kali)
+    _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent C2-attacker bring-up (gated by requires_docker)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments; overflow waits in QUEUED (priority-ordered)
     if cfg.cloud_backend == "gcp":
@@ -456,10 +456,10 @@ async def _clean_slate() -> None:
             logger.exception("Failed to reap '%s' on clean-slate", pattern)
 
     # Reap the bare `ssh` CLIENTS the cli.py/ansible reaper above misses — the ControlMaster /
-    # ProxyCommand connections ansible spawns, plus the kali_c2 poll/tunnel ssh. They are NOT matched
+    # ProxyCommand connections ansible spawns, plus the foothold_c2 poll/tunnel ssh. They are NOT matched
     # by "MHBench/cli.py"/"ansible", so every kill -9 restart orphaned them (ppid=1) and they PILED UP
-    # (observed 1,600+ this session), drowning beluga's fds/proc table AND holding/retrying connections
-    # that keep the bastions'/Kali's sshd near MaxStartups — a prime driver of the "SSH to Kali never
+    # (observed 1,600+ this session), drowning the harness host's fds/proc table AND holding/retrying
+    # connections that keep the bastions'/foothold's sshd near MaxStartups — a prime driver of "SSH never
     # came up" + mid-run tunnel-drop failures. Scope to OpenStack ssh (they use the openstack key
     # id_ed25519, which GCP ssh do not) and explicitly skip any GCP ssh; comm=="ssh" guards against
     # killing a non-ssh proc that merely mentions the key. At clean-slate every pre-existing OpenStack
@@ -486,13 +486,13 @@ async def _clean_slate() -> None:
     except Exception:
         logger.exception("Failed to reap stale ssh on clean-slate")
 
-    # Reap orphaned in-env-Kali-C2 ssh -L tunnels left by a crashed prior manager (c2_on_kali).
-    # Lazy import so a GCP manager never loads it; no-op when no state dir / no tunnels.
+    # Reap orphaned foothold-C2 ssh -L tunnels left by a crashed prior manager.
+    # Lazy import; no-op when no state dir / no tunnels.
     try:
-        from .attacker.plugins.incalmo import kali_c2
-        kali_c2.sweep_stale_tunnels()
+        from .attacker.plugins.incalmo import foothold_c2
+        foothold_c2.sweep_stale_tunnels()
     except Exception:
-        logger.exception("Failed to sweep stale Kali-C2 tunnels on clean-slate")
+        logger.exception("Failed to sweep stale foothold-C2 tunnels on clean-slate")
 
     experiments = registry.load()
 
@@ -870,7 +870,6 @@ async def _run_experiment(experiment: Experiment) -> None:
             _write_result(experiment)
             return
 
-    kali_c2c_url = None
     local_c2c_url = None
     prepared = None
 
@@ -983,20 +982,20 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment._attacker_env_spec = experiment.environment.attacker_spec(experiment.deployed_environment, cfg)
     attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
     try:
-        # Attacker C2 bring-up is bastion-FIP-heavy ONLY under c2_on_kali (SSH into the in-env Kali —
-        # which has no floating IP — through the bastion to install docker, ship the image, and open
-        # the tunnel). Many large setups at once storm the shared FIP/L3 datapath and the kali_c2 SSH
-        # poll never connects. Gate it like configure so only a few run concurrently. Legacy
-        # beluga-docker C2 setup is a local `docker run` (no bastion SSH) — run it ungated. Teardown on
-        # failure is uncapped and never takes this lock, so _handle_failure below cannot deadlock.
+        # A C2-based attacker's bring-up is bastion-FIP-heavy: it SSHes into the in-env foothold (which
+        # has no floating IP) through the bastion to install docker, ship the image, and open the
+        # tunnel. Many large setups at once storm the shared FIP/L3 datapath and the SSH poll never
+        # connects. Gate those like configure so only a few run concurrently (requires_docker marks the
+        # C2 attackers; shell agents do no C2 bring-up and run ungated). Teardown on failure is uncapped
+        # and never takes this lock, so _handle_failure below cannot deadlock.
         await attacker_lc.send(AttackerCommand.START_SETUP)  # arena -> attacker: begin setup
-        if getattr(experiment.attacker, "c2_on_kali", False):
+        if getattr(experiment.attacker, "requires_docker", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
                 prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
         else:
             prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
         await registry.update(experiment)   # persist the setup_started/ready signals
-        kali_c2c_url, local_c2c_url = prepared.remote_url, prepared.local_url
+        local_c2c_url = prepared.local_url
         if prepared.container_id:
             experiment.c2c_container_id = prepared.container_id
             await registry.update(experiment)
@@ -1119,12 +1118,10 @@ async def _run_experiment(experiment: Experiment) -> None:
             exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
     try:
-        # On GCP the attacker LLM runs on beluga and must reach the C2 at its EXTERNAL IP (local_c2c_url);
-        # kali_c2c_url is the in-VPC internal IP the sandcat agents beacon to, unreachable from beluga.
-        # Same when c2_on_kali: the C2 is on the Kali VM's in-tenant IP (kali_c2c_url), which beluga
-        # can't reach directly — the LLM uses local_c2c_url, the ssh -L tunnel through the bastion.
-        attacker_c2c = local_c2c_url if (getattr(cfg, 'cloud_backend', 'openstack') == 'gcp'
-                                         or getattr(experiment.attacker, 'c2_on_kali', False)) else kali_c2c_url
+        # The C2 runs on the attacker's in-env foothold; the attacker LLM (on the harness host, which
+        # has no in-env address) reaches it through the ssh -L tunnel (local_c2c_url). The foothold's
+        # in-env address that the sandcat agents beacon to is not reachable from the harness host.
+        attacker_c2c = local_c2c_url
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
         process = await run_attacker(experiment.attacker, experiment, cfg, prepared, c2c_server=attacker_c2c)
     except Exception as e:

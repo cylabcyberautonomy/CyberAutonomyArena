@@ -26,35 +26,52 @@ def _require_access(access):
         raise RuntimeError("no SetupAccess passed to the attacker — the arena must pass it to run_setup()")
     return access
 
-_LLM_GROUPS = [
-    # LiteLLM deployments routed through the CMU AI gateway (single LITELLM_API_KEY).
-    # These are the ones to use here — the direct groups below need per-vendor keys.
-    {"group_label": "LiteLLM (CMU gateway)", "options": [
-        "gpt-5-mini-litellm", "gpt-5-nano-litellm", "gpt-5.4-mini-litellm", "gpt-4.1-mini-litellm",
-        "gpt-5.4-litellm", "gpt-5.5-litellm", "gpt-5.6-sol-litellm",
-        "claude-sonnet-4-6-litellm", "claude-haiku-4-5-litellm", "claude-sonnet-5-litellm",
-        "claude-opus-4-6-litellm", "claude-opus-4-7-litellm", "claude-opus-4-8-litellm",
-        "gemini-2.5-pro-litellm", "gemini-3.1-pro-litellm", "gemini-3.5-flash-litellm",
-    ]},
-    {"group_label": "Anthropic (direct — needs ANTHROPIC_API_KEY)", "options": [
+# Planning/execution-LLM suggestions shown in the dashboard dropdowns. These are *suggestions
+# only*: planning_llm / execution_llm are free-form strings (see the fields below), so any model
+# the configured backend accepts can be entered directly, even if it is not listed here.
+#
+# The built-in defaults cover the major hosted providers, each gated on its standard API-key
+# environment variable. To surface a different catalog — for example the models served by a
+# self-hosted LiteLLM / OpenAI-compatible proxy — point $INCALMO_LLM_MODELS at a JSON file, or
+# drop an `llm_models.json` next to this module, using the same
+# [{"group_label": ..., "options": [...]}] shape (see llm_models.example.json).
+_DEFAULT_LLM_GROUPS = [
+    {"group_label": "Anthropic (needs ANTHROPIC_API_KEY)", "options": [
         "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6",
         "claude-4.5-sonnet", "claude-3.7-sonnet", "claude-3.5-sonnet", "claude-3.5-haiku",
     ]},
-    {"group_label": "OpenAI (direct — needs OPENAI_API_KEY)", "options": [
+    {"group_label": "OpenAI (needs OPENAI_API_KEY)", "options": [
         "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
         "gpt-4o", "gpt-4o-mini",
         "o4-mini", "o3-mini", "o3",
         "gpt-5", "gpt-5-mini",
     ]},
-    {"group_label": "Google (direct — needs GOOGLE_API_KEY)", "options": [
+    {"group_label": "Google (needs GOOGLE_API_KEY)", "options": [
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
     ]},
-    {"group_label": "DeepSeek (direct — needs DEEPSEEK_API_KEY)", "options": ["deepseek-v3", "deepseek-r1"]},
-    {"group_label": "OpenRouter — needs OPENROUTER_API_KEY", "options": [
+    {"group_label": "DeepSeek (needs DEEPSEEK_API_KEY)", "options": ["deepseek-v3", "deepseek-r1"]},
+    {"group_label": "OpenRouter (needs OPENROUTER_API_KEY)", "options": [
         "kimi-k3", "glm-5.2", "kimi-k2-base", "qwen3-235b-non-thinking", "glm-4.5",
         "qwen3.8-max", "qwen3-8",
     ]},
 ]
+
+
+def _load_llm_groups() -> list[dict]:
+    """The planning/execution-LLM suggestion groups for the dashboard. Loads a user-supplied
+    catalog when one is configured ($INCALMO_LLM_MODELS, or a sibling llm_models.json), else the
+    generic built-in defaults. A missing or malformed override falls back to the defaults, so the
+    dropdown is never left empty."""
+    for candidate in (os.environ.get("INCALMO_LLM_MODELS"), Path(__file__).with_name("llm_models.json")):
+        if not candidate:
+            continue
+        try:
+            groups = json.loads(Path(candidate).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(groups, list) and groups:
+            return groups
+    return _DEFAULT_LLM_GROUPS
 
 # The abstraction levels whose actions are LLMAgentAction subclasses (under
 # incalmo/core/actions/HighLevel/llm_agents/).  Only these drive an on-host LLM
@@ -104,16 +121,13 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
             f"    cd {cfg.incalmo_dir} && uv sync"
         )
     # 2. Incalmo's ConfigService reads ./config/config.json (relative to incalmo_dir, the attacker's
-    #    cwd). Its c2c_server is overridden by the C2C_SERVER env var we pass, but — contrary to a
-    #    long-standing assumption that this file "only has to exist and parse" — the low-level
-    #    scan_network action ALSO reads blacklist_ips from it (via ConfigService, NOT the per-run
-    #    AttackerConfig the strategy gets). The shipped example historically blacklisted
-    #    192.168.199.10 and 192.168.200.10, so nmap ran `--exclude 192.168.199.10,192.168.200.10`
-    #    and the attacker never discovered any host at .10 — in MHBench's equifax/enterprise
-    #    topologies that .10 is the key-holding webserver0, so the attacker could never reach the
-    #    database tier (0 files exfiltrated). Seed the file when absent, then FORCE blacklist_ips
-    #    empty so a stale/hand-edited config.json can't silently blind the attacker again. Per-run
-    #    exclusions, if ever needed, belong in the run's AttackerConfig, not this shared file.
+    #    cwd). Its c2c_server is overridden by the C2C_SERVER env var we pass, but the low-level
+    #    scan_network action ALSO reads blacklist_ips from this file (via ConfigService, NOT the
+    #    per-run AttackerConfig the strategy gets). A blacklist entry becomes an `nmap --exclude`,
+    #    so a stale or hand-edited config.json that lists a victim subnet silently hides those hosts
+    #    from discovery — the attacker then never reaches them. Seed the file when absent, then
+    #    normalize blacklist_ips below so such a config can't blind the attacker. Per-run exclusions,
+    #    if ever needed, belong in the run's AttackerConfig, not this shared file.
     config_json = cfg.incalmo_dir / "config" / "config.json"
     if not config_json.exists():
         example = cfg.incalmo_dir / "config" / "config_example.json"
@@ -125,14 +139,13 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
         shutil.copyfile(example, config_json)
     try:
         _cfg = json.loads(config_json.read_text())
-        # Force blacklist_ips to exclude ONLY Kali's docker bridge (172.17.0.0/16), never any
-        # 192.168.x victim IP. Two reasons: (a) the shipped default historically blacklisted
-        # 192.168.199.10/200.10, hiding the webserver0 that holds the DB keys -> 0 exfil; we must
-        # never reintroduce that. (b) Kali runs the C2 in docker, so its host carries 172.17.0.1;
-        # Incalmo derives a 172.17.0.0/24 subnet from it and GraphSearch ping-scans it, flooding the
-        # attack graph with ~250 phantom bridge hosts that dilute the (shuffled) attack-path queue.
-        # scan_network reads blacklist_ips via ConfigService from THIS file, so excluding the bridge
-        # here (nmap --exclude 172.17.0.0/16) keeps the graph to real victims.
+        # Normalize blacklist_ips to exclude ONLY the C2 host's Docker bridge (172.17.0.0/16), never
+        # a victim subnet. Two reasons: (a) blacklisting a victim subnet hides those hosts from the
+        # attacker's scan (see above), so we must never let one persist here. (b) The C2 runs in
+        # Docker, so its host carries 172.17.0.1; Incalmo derives a 172.17.0.0/24 subnet from it and
+        # GraphSearch ping-scans it, flooding the attack graph with phantom bridge hosts that dilute
+        # the attack-path queue. scan_network reads blacklist_ips via ConfigService from THIS file,
+        # so excluding the bridge here (nmap --exclude 172.17.0.0/16) keeps the graph to real victims.
         if _cfg.get("blacklist_ips") != ["172.17.0.0/16"]:
             _cfg["blacklist_ips"] = ["172.17.0.0/16"]
             config_json.write_text(json.dumps(_cfg, indent=4))
@@ -143,27 +156,22 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
 
 
 class _IncalmoAttacker(AttackerPlugin):
-    """Shared C2 lifecycle for all Incalmo-based attackers. Incalmo is the only C2-based attacker, so
-    its C2 hooks (launch_c2c / wait_c2c_* / stop_c2c) and C2-orchestration setup() live here rather
-    than in a shared base class."""
+    """Shared C2 lifecycle for all Incalmo-based attackers."""
 
-    requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
-    # Opt-in (OpenStack only): run the Incalmo C2 on the in-environment Kali VM instead of a beluga
-    # Docker container, so victims beacon to Kali's in-tenant IP (a defender can BlockIP the whole C2
-    # IP without hitting shared beluga services). Incalmo-specific, so it lives here on the attacker
-    # config — not a harness-global flag. Default False = beluga-docker C2.
-    c2_on_kali: bool = False
+    # The C2 image is built with Docker on the harness host before it is shipped to the foothold.
+    requires_docker: ClassVar[bool] = True
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
         _preflight_incalmo_host(cfg)
-        # Bring up the C2, prep the foothold, and block until an agent beacons in. Transactional:
-        # tear down a partial C2 on failure.
-        kali_ip = experiment.deployed_environment.ip if experiment.deployed_environment else None
+        # Bring up the C2 on the attacker's foothold, prep the foothold, and block until an agent
+        # beacons in. Transactional: tear down a partial C2 on failure.
         foothold_access = self.primary_access(access) if access else None
+        if foothold_access is None:
+            raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no SetupAccess")
         container_id, remote_url, local_url = await self.launch_c2c(
-            experiment.experiment_name, cfg, mgmt_ip, kali_ip, foothold_access=foothold_access)
+            experiment.experiment_name, cfg, mgmt_ip, foothold_access=foothold_access)
         try:
             if local_url:
                 await self.wait_c2c_ready(local_url, experiment.experiment_name)
@@ -183,10 +191,9 @@ class _IncalmoAttacker(AttackerPlugin):
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
-        kali_ip: Optional[str] = None, foothold_access=None,
+        foothold_access=None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip,
-                                      c2_on_kali=self.c2_on_kali, foothold_access=foothold_access)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip, foothold_access=foothold_access)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -280,8 +287,8 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
                 "C2C_SERVER": c2c_url,
                 # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
                 # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
-                # fall back to C2C_SERVER, which under c2_on_kali is the 127.0.0.1 tunnel a victim
-                # can't reach. Defaults to c2c_url so non-kali backends are unchanged.
+                # fall back to C2C_SERVER, which is the 127.0.0.1 ssh -L tunnel a victim can't reach.
+                # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
                 "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
@@ -314,6 +321,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
+        llm_groups = _load_llm_groups()
         return {
             "config_type": "incalmo_llm",
             "label": "Incalmo LLM",
@@ -323,13 +331,13 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                     "field_type": "grouped_checkboxes",
                     "label": "Planning LLM",
                     "key": "planning_llm",
-                    "groups": _LLM_GROUPS,
+                    "groups": llm_groups,
                 },
                 {
                     "field_type": "grouped_checkboxes",
                     "label": "Execution LLM",
                     "key": "execution_llm",
-                    "groups": _LLM_GROUPS,
+                    "groups": llm_groups,
                     # Sub-agent LLM: relevant only for the agent_* abstractions.
                     "show_when": {"abstraction": _AGENT_ABSTRACTIONS},
                 },
@@ -382,8 +390,8 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                 "C2C_SERVER": c2c_url,
                 # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
                 # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
-                # fall back to C2C_SERVER, which under c2_on_kali is the 127.0.0.1 tunnel a victim
-                # can't reach. Defaults to c2c_url so non-kali backends are unchanged.
+                # fall back to C2C_SERVER, which is the 127.0.0.1 ssh -L tunnel a victim can't reach.
+                # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
                 "C2C_SERVER_AGENTS": agent_c2c_url or c2c_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
                 "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),

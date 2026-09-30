@@ -37,7 +37,7 @@ _PATTERNS = [
 # Baseline of currently-known reads, keyed by plugin-relative path. Shrink as fixes merge.
 # Value = one-line reason so a reviewer knows why it's still here and when it goes away.
 _BASELINE = {
-    # Attacker plugins (cai, kali_c2) and defender runners (canary/deception/llm_soc/prompt_injection)
+    # Attacker plugins (cai, foothold_c2) and defender runners (canary/deception/llm_soc/prompt_injection)
     # were fixed on arena-refactor / arena-refactor-defender and their fixes are now MERGED here — they
     # consume the injected scoped SetupAccess and no longer read the god key, so they are OUT of the
     # baseline (the guard is strict for them now).

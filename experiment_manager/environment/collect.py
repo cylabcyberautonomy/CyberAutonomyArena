@@ -12,7 +12,7 @@ from .deployer import resolve_topology_path
 from ..experiment_log import init_logger, log, output_root
 
 # Hard cap on host-log collection. Collection is best-effort (non-fatal), but it runs
-# ansible over the experiment's bastion, which under c2_on_kali + high concurrency on a
+# ansible over the experiment's bastion, which under the foothold C2 + high concurrency on a
 # large topology (27-52 hosts) can saturate the bastion's sshd so the collect ansible
 # hangs indefinitely — wedging the run in "Running" forever, pinning its VMs, and stalling
 # the whole matrix (observed: 4 runs stuck ~1.5h holding 108 VMs). A bounded timeout kills

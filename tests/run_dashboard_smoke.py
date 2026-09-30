@@ -124,7 +124,7 @@ def main() -> int:
             "experiment_name": "dash_smoke",
             "environment": "equifax_small",
             "attacker_plugin": "incalmo_strategy",
-            "attacker_spec": {"strategy": "GraphSearch", "c2_on_kali": True},
+            "attacker_spec": {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"},
             "defender": {"type": "canary"},
             "trial": 0,
         }
@@ -146,7 +146,7 @@ def main() -> int:
             written_spec = Path(fwd["attacker_spec"])
             try:
                 spec = json.loads(written_spec.read_text())
-                spec_ok = spec == {"strategy": "GraphSearch", "c2_on_kali": True}
+                spec_ok = spec == {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"}
                 detail = f"{written_spec.name}: {spec}"
             except Exception as e:
                 detail = f"unreadable: {e}"

@@ -28,3 +28,7 @@ submitted_specs/
 
 # Offline scoring/analysis tools — parked here, not shipped for now
 /scoring/
+
+# Local Incalmo attacker LLM-suggestion catalog (copy from llm_models.example.json; keeps a
+# deployment-specific model list out of the source). Loaded by the Incalmo attacker plugin.
+experiment_manager/attacker/plugins/incalmo/llm_models.json

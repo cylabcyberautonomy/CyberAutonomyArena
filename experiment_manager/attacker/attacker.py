@@ -55,12 +55,11 @@ async def run_attacker(
     # arena) — it never parses raw environment/topology internals.
     built = attacker.build_config(experiment_name, env_spec, c2c_server)
     # Target-side payloads (ExploitStruts, ssh/nc agent-spawn) make the VICTIM fetch the implant
-    # from a C2 URL. Normally that's c2c_server, but under c2_on_kali c2c_server is a 127.0.0.1
-    # ssh -L tunnel usable only by the strategy on beluga — victims must use the Kali in-tenant
-    # URL (prepared.remote_url). Record it separately so low-level download actions use the
-    # victim-reachable address without changing the strategy's own C2 API URL. Other backends:
-    # agent_c2c == c2c_server, so their payloads are unchanged.
-    agent_c2c = prepared.remote_url if (getattr(attacker, "c2_on_kali", False) and prepared.remote_url) else c2c_server
+    # from a C2 URL. The C2 runs on the attacker's in-env foothold, so victims must use its in-env
+    # address (prepared.remote_url) — c2c_server is the 127.0.0.1 ssh -L tunnel usable only by the
+    # strategy on the harness host. Record it separately so low-level download actions use the
+    # victim-reachable address without changing the strategy's own C2 API URL.
+    agent_c2c = prepared.remote_url or c2c_server
     if agent_c2c:
         built["agent_c2c_server"] = agent_c2c
     config_path.write_text(json.dumps(built, indent=2))
