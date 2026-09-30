@@ -428,3 +428,43 @@ def test_defender_box_spec_none_when_no_env():
     a defender run rather than assume one exists."""
     from experiment_manager.environment.deployer import defender_box_spec
     assert defender_box_spec(None, None) is None
+
+
+# ------------------------------------------------------------------ attacker plugins: no god key
+
+def test_gcp_c2_uses_scoped_attacker_key_not_god_key(tmp_path, monkeypatch):
+    """gcp_c2 must reach/authorize its C2 VM with the env's SCOPED attacker key (single shared source),
+    never the GCP management key. issue_scoped_keys lives in the env deployer; monkeypatch it in."""
+    from experiment_manager.environment import deployer
+    from experiment_manager.attacker.plugins.incalmo import gcp_c2
+
+    priv = tmp_path / "attacker_key"
+    priv.write_text("SCOPED-PRIVATE")
+    (tmp_path / "attacker_key.pub").write_text("ssh-ed25519 AAAAscopedattacker\n")
+    monkeypatch.setattr(deployer, "issue_scoped_keys",
+                        lambda cfg: (str(priv), str(tmp_path / "defender_key")), raising=False)
+
+    key_path, pub = gcp_c2._scoped_attacker_key(cfg=None)
+    assert key_path == str(priv)
+    assert pub == "ssh-ed25519 AAAAscopedattacker"
+
+
+def test_gcp_c2_has_no_management_key_read():
+    """Regression: gcp_c2 must not read a management SSH key off config (openstack/gcp ssh_key_path)."""
+    import inspect
+    from experiment_manager.attacker.plugins.incalmo import gcp_c2
+    src = inspect.getsource(gcp_c2)
+    assert "ssh_key_path" not in src, "gcp_c2 reintroduced a management-key read"
+
+
+def test_kali_c2_builds_ssh_from_scoped_setupaccess():
+    """Regression: kali_c2 reaches the foothold via the SetupAccess (scoped key + env routing), not a
+    management key read off disk."""
+    from experiment_manager.attacker.plugins.incalmo import kali_c2
+    fa = SetupAccess(name="kali", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
+                     ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')
+    cmd = " ".join(kali_c2._ssh_to_kali(fa))
+    assert "/scoped/attacker_key" in cmd and "ProxyCommand" in cmd and "root@192.168.0.9" in cmd
+    assert "id_ed25519" not in cmd
+    import inspect
+    assert "_mhb_ssh_key" not in inspect.getsource(kali_c2), "kali_c2 reintroduced a management-key read"

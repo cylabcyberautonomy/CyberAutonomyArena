@@ -67,14 +67,31 @@ def _ssh_opts(key_path: str) -> list[str]:
             "-o", "ConnectTimeout=15"]
 
 
+def _scoped_attacker_key(cfg) -> tuple[str, str]:
+    """The env's SCOPED attacker keypair (cloud-agnostic, single source) — NOT the GCP management key,
+    which is authorized on victims too (= god key). We inject only this pub on the C2 VM and reach the
+    C2 with this private key, so even forwarded to the agent it opens only the attacker's own box; the
+    attacker must EARN victim access via the C2/sandcat, not SSH-with-a-broad-key. Mirrors the OpenStack
+    kali_c2 fix. Returns (private_key_path, public_key_text).
+
+    NOTE: issue_scoped_keys lives in the environment deployer on the env branch (arena-refactor-env);
+    imported lazily so this module still loads on branches without it. If it is genuinely unavailable we
+    raise — we do NOT fall back to the GCP management key (that would reintroduce the god key)."""
+    from ....environment.deployer import issue_scoped_keys  # shared source of the scoped attacker key
+    ak, _ = issue_scoped_keys(cfg)  # idempotent local keygen; returns the attacker_key path
+    priv = str(Path(ak).expanduser())
+    pub = Path(priv + ".pub").read_text().strip()
+    return priv, pub
+
+
 def setup_c2(experiment_name: str, cfg) -> tuple[str, str]:
     """Create the attacker/C2 host in the experiment VPC, run the C2 container on it,
     return (vm_name, external_url)."""
     gc = _gcp_conf(cfg)
     c, k = _clients(gc)
     project = gc["project"]; region = gc.get("region", "us-central1"); zone = gc.get("zone", "us-central1-a")
-    key_path = gc["ssh_key_path"]
-    pub = Path(gc.get("ssh_public_key_path") or (gc["ssh_key_path"] + ".pub")).expanduser().read_text().strip()
+    # Reach + authorize the C2 with the SCOPED attacker key (C2-only), never the GCP management key.
+    key_path, pub = _scoped_attacker_key(cfg)
     prefix = _gcp_name(experiment_name)
     name = _gcp_name(f"{experiment_name}-c2"); tag = name
     net = f"projects/{project}/global/networks/{_gcp_name(prefix + '-vpc')}"
