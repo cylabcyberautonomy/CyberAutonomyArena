@@ -1,9 +1,11 @@
 # Adding an environment plugin
 
-An environment plugin deploys and tears down the network an experiment runs on, sizes it for
-admission, and **produces everything the attacker and defender need to reach it**. Subclass
-`EnvironmentPlugin` (`plugins/base.py`) with a `config_type`, drop the file under `plugins/<name>/`,
-and it self-registers.
+An environment plugin deploys and tears down the network an experiment runs on. It also sizes that
+network for admission, and produces everything the attacker and defender need to reach it.
+
+To create an environment, create a Python file in `plugins/`. Initialize a class that is subclassed
+under `EnvironmentPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every
+file under it on startup, so the class registers itself. There is no list to edit.
 
 The reference implementation is `plugins/mhbench.py` (wraps the external MHBench deployer). A second
 backend (e.g. Ludus) implements the same interface.
@@ -40,9 +42,9 @@ def defender_setup_access(self, deployed, mgmt_ip, cfg): ...   -> list[SetupAcce
 
 ## Scoped credentials — the core security contract
 
-The environment must issue a **separate key per system**, each scoped to only that system's hosts.
-A leaked attacker key must open the foothold **and nothing else** — east-west `ssh root@victim` is not
-something the attacker may get for free.
+The environment must issue a separate key per system. Each key is scoped to only that system's hosts.
+A leaked attacker key must open the foothold and nothing else. East-west access like `ssh root@victim`
+is not something the attacker may get for free.
 
 ```python
 def attacker_credential(self, deployed, cfg) -> str:   # foothold only
@@ -83,6 +85,7 @@ The environment uses the explicit shape (not the embedded `type` selector the ot
 
 A bare path string coerces to `{environment_plugin: mhbench, environment_spec: <path>}`.
 
-## Register + verify
+## Register and verify
 
-Add a contract test in `tests/test_arena_contract.py` (registry + `ui_schema`), then `pytest tests/`.
+Add a contract test in `tests/test_arena_contract.py`. Assert the class is in the registry and that
+`ui_schema` is well-formed. Then run `pytest tests/`.

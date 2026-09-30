@@ -1,8 +1,11 @@
 # Adding an attacker plugin
 
-An attacker plugin runs an offensive agent from a **foothold** the environment provides, and its
-process **exit code is the verdict**. Subclass `AttackerPlugin` (`plugins/base.py`) with a
-`config_type`, drop the file under `plugins/<name>/`, and it self-registers.
+An attacker plugin runs an offensive agent from an attacker foothold the environment provides. The
+agent runs as a process, and its exit code is the verdict.
+
+To create an attacker, create a Python file in `plugins/`. Initialize a class that is subclassed under
+`AttackerPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every file
+under it on startup, so the class registers itself. There is no list to edit.
 
 Existing plugins to copy from:
 - `plugins/incalmo/` — a C2-based agent (runs a C2 container, agents beacon in). The complex case.
@@ -35,13 +38,15 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
     async def collect_logs(self, experiment, cfg, dest) -> None: ...   # optional
 ```
 
-`launch_c2c` / `wait_c2c_ready` / `wait_c2c_agent` / `stop_c2c` are only for C2-based attackers; a
-shell agent leaves them at their no-op defaults. Set `requires_docker = True` (ClassVar) only if
-`setup()` needs a **local** Docker daemon (a C2 container) — not if Docker runs on the foothold.
+The `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c` methods are only for C2-based
+attackers. A shell agent leaves them at their no-op defaults. Set `requires_docker = True` (a ClassVar)
+only if `setup()` needs a local Docker daemon for a C2 container. Leave it off if Docker runs on the
+foothold instead.
 
-## Reaching the foothold — the golden rule
+## Reaching the foothold
 
-The arena passes `setup()` a `list[SetupAccess]` (the scoped, env-issued credential + routing). Use it:
+The arena passes `setup()` a list of `SetupAccess` objects. Each one holds a scoped key and the
+routing to reach one foothold. Use them to reach the foothold:
 
 ```python
 base = self.persist_primary_access(experiment_name, cfg, access).ssh_base()  # in setup()
@@ -49,19 +54,20 @@ base = self.persist_primary_access(experiment_name, cfg, access).ssh_base()  # i
 base = self.load_primary_access(experiment_name, cfg).ssh_base()
 ```
 
-`ssh_base()` is a ready-to-run `ssh` prefix (scoped key + bastion ProxyCommand). **Never** read a key
-path off disk (`cfg.*.ssh_key_path`, `~/.ssh/id_ed25519`) — that re-arms the god key and
-`tests/test_no_god_key.py` will fail. `build_config`'s `env_spec` is adversary-safe by design; keys
-live only in SetupAccess, which stays in trusted plugin code.
+`ssh_base()` returns a ready-to-run `ssh` prefix (the scoped key plus the bastion ProxyCommand).
 
-## Lifecycle handshake
+Do not read a key off disk. Reading a key path (`cfg.*.ssh_key_path`, `~/.ssh/id_ed25519`) re-arms the
+god key, and `tests/test_no_god_key.py` will fail. Keys live only in SetupAccess, which stays in
+trusted plugin code. The `env_spec` you get in `build_config` is adversary-safe and carries none.
 
-The arena drives setup → ready → running → stopping → stopped and waits for each signal. You get this
-for free: implement `setup`/`start`/`stop`; the base's `run_setup`/`run_start`/`run_stop` emit the
-signals around them. `start()` must return promptly with the launched process (readiness is
-established in `setup()`).
+## Lifecycle
 
-## Register + verify
+The arena drives the agent through setup → ready → running → stopping → stopped, and waits for each
+step. You do not emit these yourself. Implement `setup`, `start`, and `stop`; the base class wraps them
+in `run_setup` / `run_start` / `run_stop`, which emit the signals. `start()` must return quickly with
+the launched process — readiness is established in `setup()`, not `start()`.
 
-Add a contract test beside the others in `tests/test_arena_contract.py` (assert it's in the registry
-and `build_config` carries what the runner reads), then `pytest tests/`.
+## Register and verify
+
+Add a contract test next to the others in `tests/test_arena_contract.py`. Assert the class is in the
+registry and that `build_config` carries what the runner reads. Then run `pytest tests/`.

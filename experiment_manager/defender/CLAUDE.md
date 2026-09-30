@@ -1,9 +1,12 @@
 # Adding a defender plugin
 
-A defender plugin runs a defensive system against the attack: detection, deception, active response.
-It **arms** (places decoys, plants honey data, starts its detection loop), then reacts while the
-attacker runs. Subclass `DefenderPlugin` (`plugins/base.py`) with a `config_type`, drop the file under
-`plugins/<name>/`, and it self-registers.
+A defender plugin runs a defensive system against the attack: detection, deception, or active
+response. It first arms — it places decoys, plants honey data, and starts its detection loop — and
+then reacts while the attacker runs.
+
+To create a defender, create a Python file in `plugins/`. Initialize a class that is subclassed under
+`DefenderPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every file under
+it on startup, so the class registers itself. There is no list to edit.
 
 Existing plugins to copy from:
 - `plugins/llm_soc/` — an LLM SOC reading telemetry (Falco/sysflow) from the defender box's ES.
@@ -35,31 +38,32 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
     async def teardown(self, experiment_name, environment, cfg) -> None: ...
 ```
 
-## The readiness handshake — required
+## The readiness marker — required
 
-`run()` only *spawns* the runner; arming (decoys, fake data, detection loop init) takes minutes. The
-arena blocks on `wait_until_ready` before letting the attacker in, so **the runner must create the
-marker file when it is actually armed**:
+`run()` only spawns the runner. Arming (decoys, fake data, detection loop init) then takes minutes.
+The arena blocks on `wait_until_ready` before it lets the attacker in. So the runner must create the
+marker file once it is actually armed:
 
 ```python
 DefenderPlugin.ready_marker_path(experiment_name, cfg)   # touch this from inside the runner
 ```
 
-Without it, the attacker could finish before the defense exists. A runner that crashes before the
-marker fails the experiment (correct — an undefended run must not be reported as defended).
+Without the marker, the attacker could finish before the defense exists. If the runner crashes before
+it writes the marker, the experiment fails — an undefended run must not be reported as defended.
 
-## Reaching victims + the defender box — the golden rule
+## Reaching victims and the defender box
 
-The arena injects `defender_setup_access` (a `list[SetupAccess]`, scoped key + bastion routing) into
-your config. The runner reads hosts + access from there — **never** resolve an MHBench key or parse
-the topology for credentials yourself (`tests/test_no_god_key.py` enforces this). The base class
-`prepare_box_es(...)` stands up per-experiment Elasticsearch on the env-provided defender box and
-tunnels to it — reuse it rather than pointing at a shared ES.
+The arena injects `defender_setup_access` into your config — a list of `SetupAccess`, each with a
+scoped key and bastion routing. The runner reads its hosts and access from there. Do not resolve an
+MHBench key or parse the topology for credentials yourself; `tests/test_no_god_key.py` enforces this.
+
+To read telemetry, reuse the base class method `prepare_box_es(...)`. It stands up a per-experiment
+Elasticsearch on the env-provided defender box and opens a tunnel to it. Do not point at a shared ES.
 
 ## Box ingress — request exactly what you use
 
-The environment gives the defender a **bare, isolated box** and opens **zero** ports to it by default.
-Declare what you need from `box_ingress()`:
+The environment gives the defender a bare, isolated box, and opens zero ports to it by default. To
+open a port, return it from `box_ingress()`:
 
 ```python
 def box_ingress(self):
@@ -69,6 +73,7 @@ def box_ingress(self):
 
 The harness opens exactly these at arm. A defender that needs nothing returns `{}` and opens nothing.
 
-## Register + verify
+## Register and verify
 
-Add a contract test in `tests/test_arena_contract.py` (registry + `build_config`), then `pytest tests/`.
+Add a contract test in `tests/test_arena_contract.py`. Assert the class is in the registry and that
+`build_config` carries what the runner reads. Then run `pytest tests/`.

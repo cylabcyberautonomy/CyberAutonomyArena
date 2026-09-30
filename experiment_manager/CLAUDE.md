@@ -22,9 +22,10 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
     ...
 ```
 
-`config_type` registers the class in `AttackerPlugin._registry` (same for Defender/Environment/Traffic).
-The plugins package `__init__.py` auto-imports every module under it, so **dropping a file in the
-right `plugins/` directory is all it takes to register** — no central list to edit.
+The `config_type` registers the class in `AttackerPlugin._registry` (the same holds for Defender,
+Environment, and Traffic). The plugins package imports every module under it on startup, so the class
+registers itself. To add a plugin, drop a file in the right `plugins/` directory. There is no central
+list to edit.
 
 A user selects a plugin in the experiment spec by its `type`:
 
@@ -56,12 +57,13 @@ experiment_manager/
 
 ## Two invariants every plugin must respect
 
-1. **No god key.** The environment issues a *scoped* credential per system (attacker → its foothold
-   only; defender → its box + victims only). A plugin receives that key via the injected `SetupAccess`
-   and must never read the broad management key off disk. `tests/test_no_god_key.py` enforces this.
-2. **Adversary-safe vs harness-only.** The environment produces two things per system: an
-   *agent-facing* spec (objective + identity — safe to hand the model) and a *harness-only* SetupAccess
-   (keys + bastion routing — used by the trusted plugin code, never given to the agent).
+1. No god key. The environment issues a scoped credential per system. The attacker key opens its
+   foothold only; the defender key opens its box and victims only. A plugin gets that key from the
+   injected `SetupAccess`. It must never read the broad management key off disk.
+   `tests/test_no_god_key.py` enforces this.
+2. Adversary-safe vs harness-only. The environment produces two things per system. The agent-facing
+   spec holds the objective and identity, and is safe to hand the model. The harness-only `SetupAccess`
+   holds the keys and bastion routing, and stays in trusted plugin code — it is never given to the agent.
 
 ## Running the tests
 
