@@ -73,14 +73,8 @@ base = access.ssh_base()                         # in start()/stop()/collect_log
 it and pass it in. `ssh_base()` returns a ready-to-run `ssh` prefix (the scoped key plus the bastion
 ProxyCommand).
 
-Do not read a key off disk. A plugin is trusted code — nothing sandboxes it — so this is about
-experimental integrity, not stopping a malicious author. The broad management key
-(`cfg.*.ssh_key_path`, `~/.ssh/id_ed25519`) opens every host. If you read it and hand it to the agent,
-the agent moves laterally without exploiting anything, and the run stops measuring attacker capability.
-The real controls are two: the environment issues *scoped* keys, so the attacker's key opens its
-foothold and not the victims; and the adversary-facing `env_spec` carries no keys at all.
-`tests/test_no_god_key.py` is a regression tripwire that keeps the shortcut out of plugin code — it is
-not the boundary itself.
+Do not read a key off disk — reach the foothold only through the `access` you're handed.
+`tests/test_no_god_key.py` enforces this.
 
 ## Lifecycle
 
