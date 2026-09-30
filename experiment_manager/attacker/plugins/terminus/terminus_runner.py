@@ -9,14 +9,14 @@ no nested shell / DinD). The agent flow is:
     await agent.setup(env)                      # builds a TmuxSession bound to env (execs tmux locally)
     await agent.run(instruction, env, context)  # read-terminal -> LLM -> type-command loop
 
-VALIDATION: the LocalShellEnvironment <-> Terminus-2 contract is validated by an on-box probe
+The LocalShellEnvironment <-> Terminus-2 contract is checked by an on-box probe
 (tests/README_live_smoke.md) that runs agent.setup(env) and drives one command through the tmux
-session WITHOUT the LLM — this is what previously needed "a real run to confirm the attribute set".
-harbor's BaseEnvironment is a heavy abstract class, but Terminus-2/TmuxSession only touch a small
-slice of it: default_user, exec(), and (skills/recording only) is_dir()/upload_file()/trial_paths.
-We override __init__ to skip the container/resource/network machinery and implement exactly that
-slice. Recording is disabled for the first cut (it additionally needs a TrialPaths + asciinema on the
-box); the tmux pane log + the agent context still capture the full session.
+session WITHOUT the LLM. harbor's BaseEnvironment is a large abstract class, but Terminus-2/TmuxSession
+only touch a small slice of it: default_user, exec(), and (skills/recording only)
+is_dir()/upload_file()/trial_paths. We override __init__ to skip the container/resource/network
+machinery and implement exactly that slice. Recording is disabled (it would additionally need a
+TrialPaths + asciinema on the box); the tmux pane log and the agent context still capture the full
+session.
 """
 import asyncio
 import json
@@ -117,7 +117,7 @@ async def main() -> int:
         model_name=cfg["model"],
         api_base=cfg.get("api_base"),
         max_turns=cfg.get("max_turns", 1000),
-        record_terminal_session=False,  # first cut: recording also needs TrialPaths + asciinema
+        record_terminal_session=False,  # recording also needs TrialPaths + asciinema
     )
     env = LocalShellEnvironment(default_user=None)
     context = AgentContext()

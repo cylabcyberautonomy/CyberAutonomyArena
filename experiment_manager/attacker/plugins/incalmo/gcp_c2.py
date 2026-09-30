@@ -74,9 +74,9 @@ def _scoped_attacker_key(cfg) -> tuple[str, str]:
     attacker must EARN victim access via the C2/sandcat, not SSH-with-a-broad-key. Mirrors the OpenStack
     kali_c2 fix. Returns (private_key_path, public_key_text).
 
-    NOTE: issue_scoped_keys lives in the environment deployer on the env branch (arena-refactor-env);
-    imported lazily so this module still loads on branches without it. If it is genuinely unavailable we
-    raise — we do NOT fall back to the GCP management key (that would reintroduce the god key)."""
+    issue_scoped_keys lives in the environment deployer; imported lazily to avoid an import cycle. If
+    it is unavailable we raise — we do NOT fall back to the GCP management key (that would reintroduce
+    the god key)."""
     from ....environment.deployer import issue_scoped_keys  # shared source of the scoped attacker key
     ak, _ = issue_scoped_keys(cfg)  # idempotent local keygen; returns the attacker_key path
     priv = str(Path(ak).expanduser())

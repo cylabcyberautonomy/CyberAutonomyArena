@@ -34,8 +34,8 @@ LOG_DIR = Path(CONFIG["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # The environment-produced host access: one entry per victim, {name, host, user, port, ssh_key,
-# ssh_common_args (the bastion ProxyCommand etc.)}. The canary no longer parses the topology or
-# resolves an MHBench key itself.
+# ssh_common_args (the bastion ProxyCommand etc.)}. The canary does not parse the topology or
+# resolve an MHBench key itself.
 ACCESS = CONFIG.get("defender_setup_access", [])
 
 

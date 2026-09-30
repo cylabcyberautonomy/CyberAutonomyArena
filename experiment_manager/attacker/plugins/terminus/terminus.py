@@ -10,8 +10,8 @@ Structure (same shape as the CAI plugin):
   start()  - push terminus_runner.py + the run config, launch it on Kali
   stop()   - kill the remote runner
 The runner (terminus_runner.py) constructs a Terminus2 agent + a local shell environment and runs it
-with the attack objective. NOTE: the harbor BaseEnvironment adapter in the runner is a first cut and
-needs an on-box validation pass (harbor's environment contract is heavy) — see terminus_runner.py.
+with the attack objective. The harbor BaseEnvironment adapter in the runner is minimal and needs an
+on-box validation pass (harbor's environment contract is large) — see terminus_runner.py.
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             "export PATH=$HOME/.local/bin:$PATH; "
             "test -d /opt/terminus/venv || uv venv /opt/terminus/venv --python 3.12; "
             "uv pip install --python /opt/terminus/venv/bin/python harbor; "
-            "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux)"  # recording is off in the runner (first cut), so no asciinema needed
+            "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux)"  # recording is off in the runner, so no asciinema needed
         )
         proc = await asyncio.create_subprocess_exec(
             *ssh_base_cmd, install, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)

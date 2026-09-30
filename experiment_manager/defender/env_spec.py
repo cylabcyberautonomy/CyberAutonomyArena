@@ -11,9 +11,9 @@
                     bespoke sensors (ssh key + routing). Produced by the environment, never given to
                     the defender's brain.
 
-Both are provider-agnostic DTOs the ENVIRONMENT produces (MHBench today via environment/deployer.py).
-Stage 2a: DefenderEnvSpec also carries `topology_spec` (a path) so the existing defender runners,
-which build Perry's network from the MHBench JSON, keep working until they are migrated.
+Both are provider-agnostic DTOs the environment produces (MHBench via environment/deployer.py).
+DefenderEnvSpec also carries `topology_spec` (a path); the defender runners build Perry's network
+from the MHBench JSON at that path.
 """
 from __future__ import annotations
 
@@ -47,4 +47,4 @@ class DefenderEnvSpec(BaseModel):
     objective: str = "none"
     hosts: list[DefenderHost] = Field(default_factory=list)
     box: Optional[DefenderBox] = None    # the always-provisioned defender box (env guarantees one)
-    topology_spec: Optional[str] = None  # Stage-2a back-compat: path the existing runners still read
+    topology_spec: Optional[str] = None  # path the defender runners read to build Perry's network

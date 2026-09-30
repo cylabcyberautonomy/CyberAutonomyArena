@@ -42,7 +42,7 @@ def _collect_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     init_logger(name, output_root(name, cfg))
     mhbench_log = exp_dir / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
-    env_dir.mkdir(parents=True, exist_ok=True)  # --dest for collected logs; provisioning no longer creates environment/
+    env_dir.mkdir(parents=True, exist_ok=True)  # --dest for collected logs (provisioning does not create environment/)
     log(name, f"Collecting host logs via MHBench CLI (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
         # start_new_session so a timeout can SIGKILL the whole process GROUP (cli.py +

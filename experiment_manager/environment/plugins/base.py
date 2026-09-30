@@ -1,20 +1,16 @@
-"""Base class for the ENVIRONMENT plugin type — the 4th selectable system alongside
-attacker/defender/traffic. A plugin deploys and tears down the network the experiment runs on
-and answers "how big is it" for admission.
+"""Base class for the environment plugin — one of the four selectable systems
+(environment / attacker / defender / traffic).
 
-Stage 1a: `MHBenchEnvironment` wraps the existing (live-validated) environment functions by
-delegation, so behavior is identical while the plugin interface goes in. Later stages move the
-bodies in, split the agent-facing specs out, and remove the direct MHBench coupling.
+An environment plugin deploys and tears down the network an experiment runs on, sizes it for
+admission, and produces the agent-facing specs (plus the harness-only access) the attacker and
+defender need. See ``CLAUDE.md`` in this package for how to add one.
 
-Lifecycle the arena drives (see main.py):
-    capacity(experiment, cfg)                 -> [(vcpus, ram_mb, disk_gb), ...]  # admission sizing
-    provision(experiment, c2c_url, cfg)       -> (DeployedEnvironment, mgmt_ip)
-    configure(experiment, mgmt_ip, c2c_url, cfg)              -> None   # + internal rotate (mhbench)
-    collect(experiment, cfg)                  -> None   # pull host logs before teardown
-    teardown(experiment, cfg)                 -> None
-
-NOTE (Stage 1a): log rotation stays a separate main.py step for now (folding it into the mhbench
-plugin's configure changes its timing — deferred to Stage 2, per the design doc).
+Lifecycle the arena drives:
+    capacity(experiment, cfg)                    -> [(vcpus, ram_mb, disk_gb), ...]  # admission sizing
+    provision(experiment, c2c_url, cfg)          -> (DeployedEnvironment, mgmt_ip)
+    configure(experiment, mgmt_ip, c2c_url, cfg) -> None
+    collect(experiment, cfg)                     -> None   # pull host logs before teardown
+    teardown(experiment, cfg)                    -> None
 """
 from __future__ import annotations
 

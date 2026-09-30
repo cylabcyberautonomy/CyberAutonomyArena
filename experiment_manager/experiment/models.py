@@ -60,7 +60,7 @@ class ExperimentSpecs(BaseModel):
     environment: EnvironmentConfig
     # attacker as a (plugin, spec-file) pair. attacker_plugin selects the implementation; attacker_spec
     # is a PATH to a JSON/YAML file holding that plugin's bespoke spec. Resolved into `attacker` below.
-    # The embedded `attacker: {type, ...}` form is still accepted (back-compat).
+    # The embedded `attacker: {type, ...}` form is also accepted.
     attacker_plugin: Optional[str] = None
     attacker_spec: Optional[str] = None
     attacker: Optional[AttackerConfig] = None
@@ -199,7 +199,7 @@ class Experiment:
     # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the arena records
     # each defender signal here as it drives setup->ready->running->stopping->stopped, so an observer
     # sees which phase the defender is in (a hang shows as a stalled status, not one opaque "failed to
-    # arm"). defender_started_at doubles as the RUNNING timestamp (kept for back-compat).
+    # arm"). defender_started_at also serves as the RUNNING timestamp.
     defender_status = _Field("defender", "lifecycle_status")
     defender_setup_started_at = _Field("defender", "setup_started_at")
     defender_ready_at = _Field("defender", "ready_at")

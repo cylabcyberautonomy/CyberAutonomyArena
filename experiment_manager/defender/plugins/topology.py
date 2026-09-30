@@ -1,15 +1,11 @@
 """Shared MHBench-topology -> Perry-network translation for the defender runners.
 
-Each defender plugin (deception / llm_soc / prompt_injection) spawns its own
-standalone runner script, and each one used to carry its own copy of this
-function. They drifted: only the deception copy ever got the fixes for the
-Neutron network name prefix, the host user lists and the attacker-subnet flag,
-so a decoy deployed by prompt_injection's AIAttackerDetection looked up a
-network name that doesn't exist, and its honey credentials were planted against
-hosts with no users. One copy, imported by all three.
+Each defender plugin (deception / llm_soc / prompt_injection) spawns its own standalone runner
+script; all three import this one translation so decoy placement, host user lists, the Neutron
+network-name prefix, and the attacker-subnet flag stay consistent across plugins.
 
-Perry's Network/Subnet/Host are plain classes, not pydantic models (no
-.model_validate), so they're built by hand from MHBench's topology JSON.
+Perry's Network/Subnet/Host are plain classes (not pydantic models), so they're built by hand from
+MHBench's topology JSON.
 """
 from __future__ import annotations
 
@@ -27,7 +23,7 @@ def host_users(vm_type: str) -> list[str]:
     """Login accounts a host of this MHBench vm_type actually has.
 
     Perry's Host defaults to an empty user list and MHBench's topology JSON
-    doesn't carry accounts, so hosts used to be built with `users == []`.
+    doesn't carry accounts, so hosts would otherwise be built with `users == []`.
     AddHoneyCredentials plants its credential trail by iterating
     `credential_host.users` (an ssh key in that user's ~/.ssh plus a matching
     ~/.ssh/config entry pointing at the decoy) - over an empty list that loop

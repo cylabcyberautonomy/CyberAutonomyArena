@@ -22,8 +22,8 @@ class ExperimentManagerConfig(BaseModel):
     mhbench_config: Optional[str] = None  # passed to MHBench cli as --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"; None = MHBench default (OpenStack)
     gcp_relay_ip: str = "10.0.1.10"  # GCP-only: internal IP of the management/bastion host on the victim-reachable management CIDR (10.0.1.0/24) where a socat ES relay (falco-es-relay.service) listens on :9200. GCP victims' egress firewall blocks the on-prem harness ES (host_ip 10.81.1.20) but permits the management host, so falcosidekick on GCP victims ships to this relay, which forwards over a reverse SSH tunnel to the harness ES. Unused on OpenStack (victims reach host_ip directly).
     # NOTE: c2_on_kali is NOT a harness-global flag — it is Incalmo-specific and lives on the Incalmo
-    # attacker plugin config (incalmo_strategy/incalmo_llm: c2_on_kali). The defender no longer reads
-    # it; it protects its own telemetry by never blocking its own ES/mgmt IP (see llm_soc runner).
+    # attacker plugin config (incalmo_strategy/incalmo_llm: c2_on_kali). The defender does not read it;
+    # it protects its own telemetry by never blocking its own ES/mgmt IP (see llm_soc runner).
     max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
     max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_concurrent_collects: int = 2         # concurrent post-attacker host-log COLLECT. Collect fans a per-host SSH burst out over the experiment's bastion; many large collects finishing together storm the shared FIP/L3 datapath (which the vCPU/VM trackers don't model) and wedge (observed: collects hung >1.5h). Gate it like configure so the storm never forms. Non-fatal + holds no other slot, so a small cap only briefly delays teardown.

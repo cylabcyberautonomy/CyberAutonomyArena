@@ -123,7 +123,7 @@ def _holds_vms(e) -> bool:
     reservation yet, so it never holds. A retry clears vms_reserved (and
     teardown_finished_at) before re-reserving, so the failed attempt's VMs never count
     alongside the new attempt's. An experiment removed from the registry (DELETE) stops
-    holding by virtue of no longer being there."""
+    holding once it is gone."""
     return (getattr(e, "vms_reserved", None) is not None
             and getattr(e, "teardown_finished_at", None) is None)
 

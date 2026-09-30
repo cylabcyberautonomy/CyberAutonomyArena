@@ -1,9 +1,9 @@
-"""MHBench environment plugin — a wrapper making MHBench compatible with the harness.
+"""MHBench environment plugin — deploys an MHBench topology as the experiment's network.
 
-The environment is identified by `environment_spec` — a PATH to a topology JSON (absolute, or relative
-to mhbench_dir, e.g. 'environments/instrumented/equifax_small_instrumented.json'). Stage 1a delegation:
-lifecycle methods call the existing (live-validated) environment functions, which resolve the path via
-deployer.resolve_topology_path. The short label (Incalmo's env name) is the path stem.
+The topology is named by ``environment_spec``: a path to a topology JSON, absolute or relative to
+``cfg.mhbench_dir`` (e.g. ``environments/instrumented/equifax_small_instrumented.json``). The short
+env label is the path stem. Lifecycle methods delegate to the environment package's functions
+(deployer / collect / teardown / rotate), which resolve the path via ``deployer.resolve_topology_path``.
 """
 from __future__ import annotations
 
@@ -87,14 +87,11 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
             raise
-        # NOTE: per-system scoped-key injection (attacker_key on the foothold, defender_key on box+victims)
-        # now happens INSIDE MHBench's configure (ansible_runner.run_parallel), so it runs on every deploy
-        # path — the full harness here AND a bare `cli.py deploy` (which the defender's box-mode e2e uses).
-        # It's no longer a harness-only step. The rotate below still clears that setup activity.
-        # MHBench wrapper detail: rotate the host logs right after configuring so setup activity is
-        # cleared before the attack (a clean ground-truth baseline). Internal to this plugin — NOT on
-        # the base interface, and the arena never calls it. Best-effort: a rotation failure never fails
-        # configure.
+        # Per-system scoped-key injection (attacker_key on the foothold, defender_key on the box +
+        # victims) happens inside MHBench's own configure, so it runs on every deploy path.
+        # Rotate the host logs right after configuring so setup activity is cleared before the attack
+        # (a clean ground-truth baseline). This is internal to the plugin — not on the base interface,
+        # and the arena never calls it. Best-effort: a rotation failure never fails configure.
         try:
             await rotate_environment(experiment, cfg)
         except Exception:  # noqa: BLE001
@@ -106,7 +103,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from ..collect import collect_environment
         await collect_environment(experiment, cfg)
 
-    # -- spec production (delegates to the deployer adapters; env is the producer) ----------------
+    # -- spec production (the environment is the producer of the agent-facing specs + setup access) --
     def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
         from ..deployer import attacker_env_spec
         return attacker_env_spec(deployed, cfg)
@@ -150,10 +147,9 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return access
 
     # -- per-system credential issuance -----------------------------------------------------------
-    # DEFERRED live-injection: MHBench today injects ONE god-key everywhere; issuing SEPARATE per-system
-    # keypairs (attacker key on the foothold only, defender key on the box+victims only, management key
-    # harness-side) is an MHBench-wrapper provisioning item. Distinct paths here encode the intent; the
-    # keygen+injection is the live piece (see ARENA_PLUGIN_REQUIREMENTS.md).
+    # The environment issues a SEPARATE scoped keypair per system (attacker key on the foothold only,
+    # defender key on the box + victims only); the broad management key stays harness-side and is never
+    # placed in a spec. MHBench generates and injects these keys during configure.
     def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "attacker_key")
 
@@ -182,9 +178,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return TelemetryIngest(host=self._mgmt_internal_ip(cfg), port=9200, scheme="tcp")
 
     async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
-        # The socat/Vector fan-out relay on the mgmt host is the not-yet-provisioned item; for now
-        # record the intended routes so the wiring is observable. (Grouping by source_channel gives
-        # multi-stream routing + same-stream fan-out.)
+        # Record the intended telemetry routes to the experiment log. (Grouping by source_channel gives
+        # multi-stream routing and same-stream fan-out.)
         from ...experiment_log import log
         for r in (routes or []):
             log(getattr(deployed, "spec", "env") or "env",

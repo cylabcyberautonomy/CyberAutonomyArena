@@ -1145,7 +1145,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     try:
         # Robust wait: process.wait() alone can hang when the child is reaped
         # out-of-band (a finished attacker whose OS process already exited), which
-        # used to block the run to its full cap and then mislabel it TimedOut.
+        # would otherwise block the run to its full cap and mislabel it TimedOut.
         # _wait_attacker also probes the pid so an exit is caught in seconds.
         returncode, timed_out = await _wait_attacker(
             process, experiment.pid, cfg.attacker_timeout_seconds, exp_log, name

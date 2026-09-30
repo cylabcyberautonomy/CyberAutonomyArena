@@ -18,9 +18,9 @@ Checks (any subset via `checks`):
 `fail_closed: false` (default) always arms and just reports; `true` refuses to arm if a
 required check fails, turning the canary into a hard gate.
 
-Stage 2b: the canary reads its hosts + per-host SSH access from the arena-produced DefenderEnvSpec +
-SetupAccess (injected into its config by run_defender) — it no longer resolves an MHBench SSH key or
-parses the topology itself.
+The canary reads its hosts and per-host SSH access from the arena-produced DefenderEnvSpec +
+SetupAccess (injected into its config by run_defender); it does not resolve an MHBench SSH key or
+parse the topology itself.
 """
 from __future__ import annotations
 

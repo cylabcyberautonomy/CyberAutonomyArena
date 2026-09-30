@@ -76,8 +76,8 @@ _KALI_FOOTHOLD = "kali"  # logical name for the attacker's foothold (MHBench's k
 
 
 def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: MHBench serves up the ADVERSARY-SAFE AttackerEnvSpec (objective + foothold
-    identity only — no keys, no bastion). Stage B: the env plugin returns it directly."""
+    """Build the adversary-safe AttackerEnvSpec (objective + foothold identity only — no keys, no
+    bastion routing)."""
     from ..attacker.env_spec import AttackerEnvSpec, AttackerFoothold  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     return AttackerEnvSpec(
@@ -87,9 +87,9 @@ def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
 
 
 def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: MHBench serves up the HARNESS-ONLY SetupAccess (how to reach the foothold
-    to prep it — key + routing through the bastion). Never given to the adversary. MHBench uses one
-    shared root key today; ssh_common_args routes through the bastion via ProxyCommand."""
+    """Build the harness-only SetupAccess for the attacker's foothold (how to reach it to prep it —
+    key + routing through the bastion). Never given to the adversary. ssh_common_args routes through
+    the bastion via ProxyCommand; the plugin stamps in the scoped attacker key."""
     from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     if not kali_ip:
@@ -294,9 +294,8 @@ async def inject_scoped_keys_env(experiment: Experiment, mgmt_ip: Optional[str],
 
 
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: MHBench serves up the AGENT-FACING DefenderEnvSpec (objective + host inventory
-    at the defender's knowledge level — no creds/routing). Carries topology_spec for the not-yet-migrated
-    runners. Stage B: the env plugin returns it directly."""
+    """Build the agent-facing DefenderEnvSpec (objective + host inventory at the defender's knowledge
+    level — no creds/routing). Carries topology_spec, which the defender runners read."""
     from ..defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
     hosts = []
     topo = deployed.topology_spec if deployed else None
@@ -314,9 +313,8 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
 
 
 def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
-    """Stage-A adapter: HARNESS-ONLY SetupAccess (shared type) for each victim the defender may reach —
-    key + bastion routing. This replaces per-plugin _mhbench_ssh_key + hand-built ProxyCommand. Never
-    given to the defender's brain."""
+    """Build the harness-only SetupAccess for each victim the defender may reach — key + bastion
+    routing. Never given to the defender's brain; the plugin stamps in the scoped defender key."""
     from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
     topo = deployed.topology_spec if deployed else None
     if not (topo and Path(topo).exists()):
