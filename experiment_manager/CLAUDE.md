@@ -1,0 +1,73 @@
+# experiment_manager — the arena
+
+The arena runs cyber-range **experiments**. An experiment pairs four pluggable systems:
+
+| System         | Role                                                           | Required? |
+|----------------|----------------------------------------------------------------|-----------|
+| **environment**| deploys the network the experiment runs on, sizes it, issues scoped access | yes |
+| **attacker**   | the offensive agent, run from a foothold in that network       | yes |
+| **defender**   | the defensive system (detection / deception / active response) | optional |
+| **traffic**    | benign background activity on the victim hosts                 | optional |
+
+The arena (`main.py`) drives each system through a fixed lifecycle and never reaches inside a plugin.
+Swapping any system is choosing a different plugin — no arena change.
+
+## How a plugin is selected and registered
+
+Each plugin subclasses its system's base class and passes a `config_type`:
+
+```python
+class MyAttacker(AttackerPlugin, config_type="my_attacker"):
+    type: Literal["my_attacker"]
+    ...
+```
+
+`config_type` registers the class in `AttackerPlugin._registry` (same for Defender/Environment/Traffic).
+The plugins package `__init__.py` auto-imports every module under it, so **dropping a file in the
+right `plugins/` directory is all it takes to register** — no central list to edit.
+
+A user selects a plugin in the experiment spec by its `type`:
+
+```json
+{
+  "experiment_name": "demo",
+  "environment": "environments/instrumented/equifax_small_instrumented.json",
+  "attacker":  {"type": "incalmo_strategy", "strategy": "GraphSearch"},
+  "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"}
+}
+```
+
+The attacker may instead be given as a `(plugin, spec-file)` pair — `attacker_plugin` +
+`attacker_spec` (a path to a JSON/YAML file). The environment uses the explicit
+`{environment_plugin, environment_spec}` shape (a bare path string coerces to the mhbench plugin).
+
+## Layout
+
+```
+experiment_manager/
+  main.py            the arena: the experiment lifecycle + admission/queueing
+  config.py          ExperimentManagerConfig (paths, limits, backend selection)
+  experiment/        the Experiment model + its persisted state
+  environment/       environment plugin type + the MHBench implementation   (see environment/CLAUDE.md)
+  attacker/          attacker plugin type + implementations                  (see attacker/CLAUDE.md)
+  defender/          defender plugin type + implementations                  (see defender/CLAUDE.md)
+  traffic/           traffic plugin type (implementation pending)
+```
+
+## Two invariants every plugin must respect
+
+1. **No god key.** The environment issues a *scoped* credential per system (attacker → its foothold
+   only; defender → its box + victims only). A plugin receives that key via the injected `SetupAccess`
+   and must never read the broad management key off disk. `tests/test_no_god_key.py` enforces this.
+2. **Adversary-safe vs harness-only.** The environment produces two things per system: an
+   *agent-facing* spec (objective + identity — safe to hand the model) and a *harness-only* SetupAccess
+   (keys + bastion routing — used by the trusted plugin code, never given to the agent).
+
+## Running the tests
+
+`tests/test_arena_contract.py` is the fast, cloud-free contract guard (plugin registration,
+config round-trip, build_config shape). Run the whole suite before committing:
+
+```
+pytest tests/
+```
