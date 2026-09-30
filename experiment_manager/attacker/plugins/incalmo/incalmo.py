@@ -10,7 +10,7 @@ from typing import ClassVar, Literal, Optional
 
 from pydantic import field_validator
 
-from .c2c import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
+from .c2 import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
 from . import foothold
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root

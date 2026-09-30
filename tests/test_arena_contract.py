@@ -778,14 +778,14 @@ def test_defender_box_spec_none_when_no_env():
 
 # ------------------------------------------------------------------ attacker plugins: no god key
 
-def test_foothold_c2_builds_ssh_from_scoped_setupaccess():
+def test_c2_builds_ssh_from_scoped_setupaccess():
     """Regression: the foothold C2 reaches the foothold via the SetupAccess (scoped key + env routing),
     not a management key read off disk."""
-    from experiment_manager.attacker.plugins.incalmo import foothold_c2
+    from experiment_manager.attacker.plugins.incalmo import c2
     fa = SetupAccess(name="foothold", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
                      ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')
-    cmd = " ".join(foothold_c2._ssh_to_foothold(fa))
+    cmd = " ".join(c2._ssh_to_foothold(fa))
     assert "/scoped/attacker_key" in cmd and "ProxyCommand" in cmd and "root@192.168.0.9" in cmd
     assert "id_ed25519" not in cmd
     import inspect
-    assert "_mhb_ssh_key" not in inspect.getsource(foothold_c2), "foothold_c2 reintroduced a management-key read"
+    assert "_mhb_ssh_key" not in inspect.getsource(c2), "c2 reintroduced a management-key read"

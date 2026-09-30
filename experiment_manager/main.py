@@ -489,8 +489,8 @@ async def _clean_slate() -> None:
     # Reap orphaned foothold-C2 ssh -L tunnels left by a crashed prior manager.
     # Lazy import; no-op when no state dir / no tunnels.
     try:
-        from .attacker.plugins.incalmo import foothold_c2
-        foothold_c2.sweep_stale_tunnels()
+        from .attacker.plugins.incalmo import c2
+        c2.sweep_stale_tunnels()
     except Exception:
         logger.exception("Failed to sweep stale foothold-C2 tunnels on clean-slate")
 
