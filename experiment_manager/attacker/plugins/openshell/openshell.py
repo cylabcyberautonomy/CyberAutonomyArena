@@ -17,10 +17,10 @@ Two things are selectable (see the plugin fields):
 
 Structure (same shape as the CAI / Terminus plugins):
   setup()  - install the `openshell` CLI + gateway on Kali (needs a container runtime); no C2.
-  start()  - push openshell_runner.sh + the run config (+ generated policy), launch it on Kali.
+  start()  - push openshell_runner.py + the run config (+ generated policy), launch it on Kali.
   stop()   - kill the remote runner and delete the sandbox.
 
-The runner (openshell_runner.sh) drives the documented OpenShell CLI flow: import the provider
+The runner (openshell_runner.py) drives the documented OpenShell CLI flow: import the provider
 profile, create the provider from the API key in the environment, then `openshell sandbox create
 --from <agent-image> --provider <p> -- <agent headless command with the objective>`.
 
@@ -58,7 +58,7 @@ from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
 
-_RUNNER = Path(__file__).parent / "openshell_runner.sh"
+_RUNNER = Path(__file__).parent / "openshell_runner.py"
 _REMOTE_DIR = "/opt/openshell"
 
 _OBJECTIVE = (
@@ -231,14 +231,14 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
                     agent_c2c_url: Optional[str] = None, access=None) -> asyncio.subprocess.Process:
         base = access.ssh_base()
-        await self._push(base, f"{_REMOTE_DIR}/openshell_runner.sh", _RUNNER.read_text())
+        await self._push(base, f"{_REMOTE_DIR}/openshell_runner.py", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
             *base,
-            f"bash {_REMOTE_DIR}/openshell_runner.sh {_REMOTE_DIR}/attacker_config.json",
+            f"python3 {_REMOTE_DIR}/openshell_runner.py {_REMOTE_DIR}/attacker_config.json",
             stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True,
         )
 
