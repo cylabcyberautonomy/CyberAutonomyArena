@@ -64,7 +64,8 @@ class AttackerPlugin(BaseModel):
         persists it automatically, so start()/stop()/collect_logs() receive the primary entry without
         the plugin touching disk. Use `self.primary_access(access)` to reach the foothold here.
 
-        C2-based attackers subclass C2AttackerPlugin (below), which overrides this to bring up the C2."""
+        An attacker that runs a C2 (e.g. Incalmo) overrides this to bring the C2 up and wait for an
+        agent to beacon in before returning."""
         return PreparedAttacker()
 
     async def start(
@@ -186,59 +187,3 @@ class AttackerPlugin(BaseModel):
         access = self._load_access(experiment.experiment_name, cfg)
         await self.collect_logs(experiment, cfg, dest, access=access)
 
-
-class C2AttackerPlugin(AttackerPlugin):
-    """Base for attackers that run a command-and-control server. It adds the C2 bring-up/teardown
-    hooks and a setup() that orchestrates them: start the C2, let the attacker prep its foothold,
-    then block until an agent has beaconed in. C2 attackers (e.g. Incalmo) subclass this and override
-    the hooks. Shell/LLM agents that need no C2 subclass AttackerPlugin directly."""
-
-    # True if setup() needs a local Docker daemon on the harness host (a C2 container there). The
-    # in-environment C2 path (running the C2 on the foothold) leaves this False. Gates an early preflight.
-    requires_docker: ClassVar[bool] = False
-
-    async def launch_c2c(
-        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
-        kali_ip: Optional[str] = None, foothold_access: Optional[SetupAccess] = None,
-    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Start the C2 server. Returns (container_id, remote_url, local_url), any of which may be None.
-        foothold_access lets a C2 that runs on the foothold reach it with the scoped key — never a key
-        read off disk."""
-        return None, None, None
-
-    async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
-        """Block until the C2 server is accepting requests."""
-
-    async def wait_c2c_agent(self, local_url: str, experiment_name: str) -> None:
-        """Block until at least one agent has beaconed to the C2 server."""
-
-    async def stop_c2c(self, container_id: str) -> None:
-        """Stop and remove the C2 server."""
-
-    async def prepare_foothold(
-        self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str],
-        remote_url: Optional[str], access: Optional[list[SetupAccess]] = None,
-    ) -> None:
-        """Prep the foothold box over the scoped `access` (default: nothing). Runs after the C2 is up
-        and before its agent is awaited."""
-        return
-
-    async def setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str],
-                    access: Optional[list[SetupAccess]] = None) -> PreparedAttacker:
-        """Bring up the C2, prep the foothold, and block until an agent beacons in. Transactional:
-        tears down its own partial C2 on failure."""
-        kali_ip = experiment.deployed_environment.ip if experiment.deployed_environment else None
-        foothold_access = self.primary_access(access) if access else None
-        container_id, remote_url, local_url = await self.launch_c2c(
-            experiment.experiment_name, cfg, mgmt_ip, kali_ip, foothold_access=foothold_access)
-        try:
-            if local_url:
-                await self.wait_c2c_ready(local_url, experiment.experiment_name)
-            await self.prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
-            if local_url:
-                await self.wait_c2c_agent(local_url, experiment.experiment_name)
-        except Exception:
-            if container_id:
-                await self.stop_c2c(container_id)
-            raise
-        return PreparedAttacker(container_id, remote_url, local_url)

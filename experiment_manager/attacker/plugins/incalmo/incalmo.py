@@ -16,7 +16,7 @@ from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
-from ..base import C2AttackerPlugin
+from ..base import AttackerPlugin, PreparedAttacker
 
 
 def _require_access(access):
@@ -142,8 +142,10 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
         pass
 
 
-class _IncalmoAttacker(C2AttackerPlugin):
-    """Shared C2 lifecycle for all Incalmo-based attackers."""
+class _IncalmoAttacker(AttackerPlugin):
+    """Shared C2 lifecycle for all Incalmo-based attackers. Incalmo is the only C2-based attacker, so
+    its C2 hooks (launch_c2c / wait_c2c_* / stop_c2c) and C2-orchestration setup() live here rather
+    than in a shared base class."""
 
     requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
     # Opt-in (OpenStack only): run the Incalmo C2 on the in-environment Kali VM instead of a beluga
@@ -152,11 +154,27 @@ class _IncalmoAttacker(C2AttackerPlugin):
     # config — not a harness-global flag. Default False = beluga-docker C2.
     c2_on_kali: bool = False
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None):
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
         _preflight_incalmo_host(cfg)
-        return await super().setup(experiment, cfg, mgmt_ip, access)
+        # Bring up the C2, prep the foothold, and block until an agent beacons in. Transactional:
+        # tear down a partial C2 on failure.
+        kali_ip = experiment.deployed_environment.ip if experiment.deployed_environment else None
+        foothold_access = self.primary_access(access) if access else None
+        container_id, remote_url, local_url = await self.launch_c2c(
+            experiment.experiment_name, cfg, mgmt_ip, kali_ip, foothold_access=foothold_access)
+        try:
+            if local_url:
+                await self.wait_c2c_ready(local_url, experiment.experiment_name)
+            await self.prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
+            if local_url:
+                await self.wait_c2c_agent(local_url, experiment.experiment_name)
+        except Exception:
+            if container_id:
+                await self.stop_c2c(container_id)
+            raise
+        return PreparedAttacker(container_id, remote_url, local_url)
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only

@@ -8,7 +8,7 @@ To create an attacker, create a Python file in `plugins/`. Initialize a class th
 Existing plugins:
 - `plugins/incalmo/` — the Incalmo integration: an LLM attacker that runs a C2 (sandcat agents beacon
   in from the victims) and drives it either through fixed strategies (GraphSearch, ...) or a free-form
-  LLM planning loop. Subclasses `C2AttackerPlugin`.
+  LLM planning loop. The only C2-based attacker; see it for the C2 pattern.
 - `plugins/terminus/` — Terminus-2, Terminal-Bench 2.0's reference shell agent (from the `harbor`
   framework): an LLM that drives a real shell in a read-terminal → think → type-command loop, run on
   the foothold.
@@ -46,12 +46,12 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
 
 ## Running a C2
 
-If your attacker needs a command-and-control server, subclass `C2AttackerPlugin` (in `plugins/base.py`)
-instead of `AttackerPlugin`. It adds the C2 hooks — `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`,
-`stop_c2c` — and a `setup()` that brings the C2 up, preps the foothold, and waits for an agent to beacon
-in. Set `requires_docker = True` on your subclass only if the C2 runs as a Docker container on the
-harness host. Shell and LLM agents that need no C2 subclass `AttackerPlugin` directly and write their
-own `setup()`. See `plugins/incalmo/` for the C2 case.
+If your attacker needs a command-and-control server, do it in your own `setup()`: bring the C2 up,
+prep the foothold, and block until an agent beacons in before returning. There's no shared C2 base
+class — `plugins/incalmo/` is the only C2 attacker, and it keeps its C2 helpers (`launch_c2c`,
+`wait_c2c_ready`, `wait_c2c_agent`, `stop_c2c`) on itself; copy that shape. Set
+`requires_docker = True` on your class only if the C2 runs as a Docker container on the harness host —
+it gates an early preflight. Shell and LLM agents that need no C2 just write a plain `setup()`.
 
 ## Reaching the foothold
 
