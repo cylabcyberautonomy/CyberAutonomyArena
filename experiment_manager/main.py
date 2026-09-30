@@ -959,10 +959,10 @@ async def _run_experiment(experiment: Experiment) -> None:
         return
 
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
-    # kali, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
+    # the foothold, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
     # NOTE: the pre-launch _teardown_stale_c2_before_launch() sweep was REMOVED (2026-09-21) — suspected of
     # interfering with concurrent runs' C2s. Stale/leftover C2s are already handled per-run: setup_c2 does
-    # `docker rm -f c2` + a fresh tunnel on its own Kali, _handle_failure/teardown reaps each run's own C2,
+    # `docker rm -f c2` + a fresh tunnel on its own foothold, _handle_failure/teardown reaps each run's own C2,
     # and _clean_slate sweeps on restart. So the pre-launch global sweep was redundant.
     #
     # Lifecycle handshake (see attacker/lifecycle.py): the arena drives the attacker through

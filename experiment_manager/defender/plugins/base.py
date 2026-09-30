@@ -211,7 +211,7 @@ class DefenderPlugin(BaseModel):
     # sensor telemetry to it via its relay (victim -> relay(mgmt:9200) -> box:9200), under the
     # plain indices "falco"/"sysflow". Here the defender stands up ES ON that box itself (bare
     # box, no docker/java -> the ES tarball bundles a JDK) and opens an ssh -L tunnel so the
-    # detection loop (running on beluga, the Incalmo-style out-of-band pattern) reads the box's
+    # detection loop (running on the harness host, the Incalmo-style out-of-band pattern) reads the box's
     # own per-experiment ES at localhost:<port>. This is what gives each run its OWN ES —
     # fixing the shared-ES cross-experiment contamination and the single-node shard-cap arming
     # failures. Kept on the base class (not a per-plugin helper) since llm_soc / deception /
@@ -222,10 +222,10 @@ class DefenderPlugin(BaseModel):
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "es_tunnel.pid"
 
     def prepare_box_es(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> Optional[dict]:
-        """Install ES on the defender box (idempotent) and open a beluga->box:9200 ssh -L tunnel.
+        """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.
         Writes es_url + falco_index/sysflow_index into the config JSON the runner reads, and drops
         an es_tunnel.pid for teardown/clean-slate. Returns the injected dict, or None when the
-        topology has no defender box (older env: caller keeps the legacy beluga+shared-ES path)."""
+        topology has no defender box (older env: caller keeps the legacy harness-host+shared-ES path)."""
         import json as _json
         import shlex
         import socket
@@ -268,7 +268,7 @@ class DefenderPlugin(BaseModel):
         else:
             raise RuntimeError(f"defender-box ES did not come up on {box_ip}:9200 within 300s")
 
-        # 3. open an ssh -L tunnel beluga:<lport> -> box:9200 (via the box access's bastion jump).
+        # 3. open an ssh -L tunnel harness-host:<lport> -> box:9200 (via the box access's bastion jump).
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             lport = s.getsockname()[1]
@@ -299,7 +299,7 @@ class DefenderPlugin(BaseModel):
 
     @classmethod
     def _teardown_box_es_tunnel(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
-        """Kill the beluga->box ES ssh -L tunnel (ES itself dies with the box at env teardown)."""
+        """Kill the harness-host->box ES ssh -L tunnel (ES itself dies with the box at env teardown)."""
         pidfile = cls._es_tunnel_pidfile(experiment_name, cfg)
         try:
             pid = int(pidfile.read_text().strip())

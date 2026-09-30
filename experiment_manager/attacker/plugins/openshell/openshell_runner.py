@@ -1,4 +1,4 @@
-"""OpenShell attacker runner — runs on the Kali foothold. Drives NVIDIA OpenShell to launch the chosen
+"""OpenShell attacker runner — runs on the foothold. Drives NVIDIA OpenShell to launch the chosen
 coding agent (claude/codex/opencode) in a sandbox whose shell can reach the victims east-west.
 
 Reads attacker_config.json (path = argv[1]), produced by OpenShellAttacker.build_config(), with keys:
@@ -20,7 +20,7 @@ The sandbox's foreground exit code is the attack verdict.
 Stdlib only, run with the system python3 (OpenShell is a CLI, not a pip package — no venv).
 
 VALIDATION NOTE (see the module docstring): the command surface matches the repo's example scripts.
-What still needs an on-Kali pass: (a) OpenShell forbids raw-IP native TCP, so ssh/nc lateral movement
+What still needs an on-foothold pass: (a) OpenShell forbids raw-IP native TCP, so ssh/nc lateral movement
 only reaches the hosts declared in tcp_hosts, by name; (b) the provider type's binary paths must match
 the image layout or the agent's LLM credential is not injected; (c) codex needs CODEX_AUTH_* tokens.
 """

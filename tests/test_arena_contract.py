@@ -281,7 +281,7 @@ def test_terminus_build_config_contract():
         {"type": "terminus_llm", "model": "anthropic/claude-opus-4-1"})
     built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
     assert built["model"] == "anthropic/claude-opus-4-1"
-    assert built["kali_ip"] == "192.168.202.100"
+    assert built["foothold_ip"] == "192.168.202.100"
     assert "objective" in built and "max_turns" in built
     assert atk.ui_schema()["config_type"] == "terminus_llm"
 
@@ -299,7 +299,7 @@ def test_openshell_build_config_contract():
     assert built["cred_envs"] == ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
     assert built["image"] == ""            # claude omits --from (agent default image)
     assert built["policy"] == "restrictive"
-    assert built["kali_ip"] == "192.168.202.100"
+    assert built["foothold_ip"] == "192.168.202.100"
     assert "objective" in built
     # two egress planes: HTTP/forward-proxy CIDRs (valid hostless) + native-TCP only via declared hosts
     assert built["http_cidrs"] and built["http_ports"] == [80, 443, 8080]

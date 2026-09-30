@@ -1,7 +1,7 @@
 """Attacker-owned foothold prep — the attacker prepares its own box, over the bastion, using the
 credentials in the AttackerEnvSpec. No MHBench cli, no environment.deployer.
 
-The environment provides the box (a reachable Kali VM) and the access (bastion + key) in the
+The environment provides the box (a reachable foothold VM) and the access (bastion + key) in the
 AttackerEnvSpec; the attacker does everything ON the box itself. This mirrors how the Velociraptor
 and caldera_human plugins run their own bastion-hop ansible with vendored plays (aux/), reusing
 only the ansible-playbook binary — not MHBench's orchestration.

@@ -206,7 +206,7 @@ class _IncalmoAttacker(AttackerPlugin):
 
 
 # Hardcoded strategies that drive Metasploit directly (via MsfRpcCommand) need
-# msfrpcd + pymetasploit3 on the Kali host, exactly like the LLM attacker. Most
+# msfrpcd + pymetasploit3 on the foothold, exactly like the LLM attacker. Most
 # state-machine strategies never touch msf (LateralMoveToHost's msf path is
 # llm_interface-gated, which they don't set), so this install is opt-in per
 # strategy to avoid paying metasploit-framework's large download for runs that
@@ -315,7 +315,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
         # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
-        # run on the Kali box itself (it binds 127.0.0.1, and the box has no floating IP), which is
+        # run on the foothold itself (it binds 127.0.0.1, and the box has no floating IP), which is
         # exactly why the attacker installs it on its own foothold here.
         await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
 
