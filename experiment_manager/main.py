@@ -577,13 +577,11 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Background-traffic log collection failed for '%s'", experiment.experiment_name)
 
-    # Defender teardown (e.g. deleting decoy VMs - see DefenderPlugin.teardown) runs
-    # before MHBench's own teardown: those decoys aren't in the topology JSON, so
-    # MHBench can't see them, and if left alive they keep this experiment's security
-    # groups "in use" - MHBench's teardown aborts outright on the first such
-    # conflict, leaking every network/subnet/security-group for the experiment right
-    # along with the decoy. Best-effort, like the log collection above: a defender
-    # teardown failure must not block reclaiming the environment's VMs.
+    # Defender teardown (harness-side cleanup, e.g. the box ES tunnel) runs before the environment
+    # teardown. Best-effort, like the log collection above: a defender teardown failure must not block
+    # reclaiming the environment's VMs. (Stray decoy VMs are reaped by the environment's own teardown -
+    # see MHBenchEnvironment._teardown_decoys - not here; deleting a VM is backend-specific and defenders
+    # are backend-agnostic.)
     if experiment.defender:
         try:
             await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)

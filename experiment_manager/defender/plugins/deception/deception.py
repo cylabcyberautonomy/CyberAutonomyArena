@@ -112,16 +112,9 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             cfg,
         )
 
-    async def teardown(
-        self,
-        experiment_name: str,
-        environment: Optional[DeployedEnvironment],
-        cfg: ExperimentManagerConfig,
-    ) -> None:
-        # Every strategy this plugin runs (Static*/Reactive*/NaiveDecoy*/...) can
-        # deploy decoy VMs via DeployDecoy - clean them up regardless of which
-        # strategy was actually used (see DefenderPlugin._teardown_decoys).
-        await self._teardown_decoys(experiment_name, cfg)
+    # This plugin's strategies (Static*/Reactive*/NaiveDecoy*/...) deploy decoy VMs via DeployDecoy;
+    # the environment reaps any that outlive the run as part of its own teardown, so no teardown override
+    # is needed here (base no-op).
 
     async def run(
         self,

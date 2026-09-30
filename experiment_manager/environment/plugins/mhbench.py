@@ -198,6 +198,49 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from ..deployer import request_ingress_env
         await request_ingress_env(experiment, mgmt_ip, cfg, ingress)
 
+    async def _teardown_decoys(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+        """Delete any VMs standing on this experiment's networks that aren't topology hosts (decoys) -
+        before the network teardown. A defender's DeployDecoy actuator creates OpenStack servers directly
+        via openstacksdk, outside the topology JSON, so teardown_environment has no idea they exist; if
+        left alive they keep this experiment's security groups "in use", and MHBench's teardown deletes in
+        order and aborts on the first ConflictException, leaking every network/subnet/security-group for
+        the whole experiment right along with the decoy (confirmed live, repeatedly). Reaping stray VMs on
+        our own networks is the environment's job, not the defender's (the defender is backend-agnostic;
+        deleting a VM is not).
+
+        Identified by the experiment-name prefix, not a decoy name pattern: every server MHBench
+        provisions is named "<experiment_name>-<host>" (see HostDeployer._n), while DeployDecoy creates
+        servers under the bare `action.host_name` with no prefix. So on this experiment's own networks,
+        "unprefixed" is exactly "not a real topology host" - i.e. a decoy. Cross-referencing the network
+        name ("<experiment_name>-<subnet_name>") keeps this scoped to this experiment even under
+        concurrency. Looked up via Neutron ports (device_id=server.id), not server.addresses: addresses is
+        empty while a server is still BUILD (a slow/stuck decoy - exactly the case this must catch), but a
+        port with its network exists as soon as create_server() returns.
+
+        Best-effort: never fails teardown. No-op on backends without this escape hatch."""
+        if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+            return  # GCP decoys are named/reaped by MHBench's own teardown; no stray-VM sweep needed
+        import asyncio
+        import openstack
+
+        def _sync() -> None:
+            conn = openstack.connect(cloud=cfg.os_cloud)
+            prefix = f"{experiment.experiment_name}-"
+            for server in conn.compute.servers():
+                if (server.name or "").startswith(prefix):
+                    continue  # a real MHBench-provisioned host, not a decoy
+                network_ids = {port.network_id for port in conn.network.ports(device_id=server.id)}
+                network_names = {conn.network.get_network(nid).name for nid in network_ids}
+                if not any(name.startswith(prefix) for name in network_names):
+                    continue
+                conn.compute.delete_server(server, ignore_missing=True)
+                conn.compute.wait_for_delete(server, wait=120)
+
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _sync)
+        except Exception:  # noqa: BLE001 — a decoy sweep failure must not block reclaiming the env's VMs
+            pass
+
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
@@ -205,6 +248,9 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from ..teardown import teardown_environment
         if lc:
             lc.emit(EnvironmentSignal.TEARING_DOWN)
+        # Sweep stray decoy VMs on this experiment's networks first, so the network teardown below doesn't
+        # abort on a security group a decoy still holds "in use" (see _teardown_decoys).
+        await self._teardown_decoys(experiment, cfg)
         try:
             await teardown_environment(experiment, cfg)
         except Exception as e:  # noqa: BLE001

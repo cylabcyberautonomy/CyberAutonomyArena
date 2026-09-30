@@ -156,11 +156,8 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
-        # Best-effort no-op today (FalcoLLM/FalcoLLMC2Block don't deploy decoys),
-        # but this plugin shares Defense-MHBench-compatible's Network/Subnet/Host
-        # machinery with deception/prompt_injection - see DefenderPlugin._teardown_decoys.
-        await self._teardown_decoys(experiment_name, cfg)
         # Kill the harness-host->box ES ssh -L tunnel (no-op if this run used the legacy path).
+        # Stray decoy VMs, if any, are reaped by the environment's own teardown, not here.
         self._teardown_box_es_tunnel(experiment_name, cfg)
 
     async def run(
