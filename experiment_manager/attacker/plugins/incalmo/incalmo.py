@@ -166,9 +166,10 @@ class _IncalmoAttacker(AttackerPlugin):
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
-        kali_ip: Optional[str] = None,
+        kali_ip: Optional[str] = None, foothold_access=None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip, c2_on_kali=self.c2_on_kali)
+        return await start_c2c_server(experiment_name, cfg, mgmt_ip, kali_ip,
+                                      c2_on_kali=self.c2_on_kali, foothold_access=foothold_access)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)

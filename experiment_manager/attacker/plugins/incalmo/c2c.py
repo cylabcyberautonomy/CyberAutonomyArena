@@ -45,7 +45,7 @@ async def _ensure_image_built(experiment_name: str, cfg: ExperimentManagerConfig
     log(experiment_name, f"Built '{_C2C_IMAGE}' successfully.")
 
 
-async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, kali_ip: str | None = None, c2_on_kali: bool = False) -> tuple[str, str, str]:
+async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, kali_ip: str | None = None, c2_on_kali: bool = False, foothold_access=None) -> tuple[str, str, str]:
     """
     Launch the Incalmo C2 Docker container and return immediately.
     Returns (container_id, kali_url, local_url) — container may not be ready yet.
@@ -72,9 +72,11 @@ async def start_c2c_server(experiment_name: str, cfg: ExperimentManagerConfig, m
         # only attacker infra, not beluga's shared ES/telemetry IP. local_url (beluga: readiness +
         # attacker LLM) = an ssh -L tunnel to Kali through the bastion (Kali has no floating IP).
         from . import kali_c2
+        if foothold_access is None:
+            raise RuntimeError("c2_on_kali needs the foothold SetupAccess (scoped key + routing); none was attached")
         loop = asyncio.get_event_loop()
         sentinel, remote_url, local_url = await loop.run_in_executor(
-            None, kali_c2.setup_c2, experiment_name, cfg, mgmt_ip, kali_ip)
+            None, kali_c2.setup_c2, experiment_name, cfg, foothold_access, mgmt_ip)
         log(experiment_name, f"Kali C2: env/agents -> {remote_url}, harness (tunnel) -> {local_url}")
         return sentinel, remote_url, local_url
     await _ensure_image_built(experiment_name, cfg)
