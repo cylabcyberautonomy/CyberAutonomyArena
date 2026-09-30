@@ -177,6 +177,13 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         # Fixed bake target = the relay on the mgmt host, constant across runs.
         return TelemetryIngest(host=self._mgmt_internal_ip(cfg), port=9200, scheme="tcp")
 
+    def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig):
+        # On GCP the victim egress firewall blocks the on-prem harness ES, so victim sensors ship to a
+        # socat relay on the mgmt host (which forwards to the harness ES). On OpenStack victims reach
+        # the harness directly -> no relay. This backend decision lives here (the environment), not in
+        # the defender.
+        return self._mgmt_internal_ip(cfg) if getattr(cfg, "cloud_backend", "openstack") == "gcp" else None
+
     async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
         # Record the intended telemetry routes to the experiment log. (Grouping by source_channel gives
         # multi-stream routing and same-stream fan-out.)

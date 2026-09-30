@@ -48,6 +48,7 @@ async def run_defender(
     mgmt_ip: Optional[str] = None,
     defender_env_spec=None,
     defender_access=None,
+    relay_ip: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,17 +73,14 @@ async def run_defender(
     # random experiment's private OpenStack subnet.
     built["management_ip"] = cfg.host_ip
     built["bastion_ip"] = mgmt_ip
-    # GCP-only: the address GCP victims' falcosidekick ships Falco alerts to. On GCP the
-    # victim egress firewall blocks the on-prem harness ES (management_ip/host_ip), so alerts
-    # go to a socat relay on the management host (gcp_relay_ip:9200), which forwards them over
-    # a reverse SSH tunnel to the harness ES. The runner uses this ONLY for perry_cfg.external_ip
-    # (falcosidekick's target); the defender itself still reads ES directly at management_ip.
-    # Absent on OpenStack, where victims reach host_ip directly.
-    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
-        # getattr default so an already-running manager (config object predating the
-        # gcp_relay_ip field) still resolves it without a restart; a restart picks up
-        # any override from config.gcp.yaml.
-        built["falco_relay_ip"] = getattr(cfg, "gcp_relay_ip", "10.0.1.10")
+    # The address victim sensors ship telemetry to when they can't reach the consumer directly. The
+    # ENVIRONMENT decides this — it is backend-specific, and the defender is backend-agnostic. `relay_ip`
+    # comes from environment.telemetry_relay_ip(): None means victims reach the consumer directly (e.g.
+    # OpenStack); a value means route through that relay (e.g. the GCP socat relay on the mgmt host,
+    # which forwards to the harness ES). The runner uses it only for the sensor target (falcosidekick);
+    # the defender itself still reads ES at management_ip.
+    if relay_ip:
+        built["falco_relay_ip"] = relay_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")

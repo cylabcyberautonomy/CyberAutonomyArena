@@ -132,6 +132,12 @@ class EnvironmentPlugin(BaseModel):
         across runs for this backend so it can be baked into the sensor images."""
         raise NotImplementedError(f"{type(self).__name__} must implement telemetry_ingest()")
 
+    def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig) -> Optional[str]:
+        """The relay address victim sensors ship telemetry to when they can't reach the consumer
+        directly (a backend-specific decision — this is the environment's to make, not the defender's).
+        Default None = victims reach the consumer directly; a value routes them through that relay."""
+        return None
+
     async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
         """Program the relay to deliver each source stream to the consumers' endpoints (routes =
         list[TelemetryRoute], grouped by source_channel → multi-stream routing + same-stream fan-out).
