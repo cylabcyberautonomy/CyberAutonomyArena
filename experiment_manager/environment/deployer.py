@@ -43,30 +43,34 @@ def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
     return None
 
 
-def defender_box_present(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig) -> bool:
-    """Does this deployed environment provide a defender box? Part of the environment's defender-relevant
-    spec: the arena checks it to enforce the interface contract "a defender in the config REQUIRES a
-    defender box from the environment" (see main.py). Not the defender plugin's job to discover.
+def defender_box_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig) -> Optional[dict]:
+    """The defender box the environment provides, or None if it provides none. Part of the environment's
+    defender-relevant spec: the arena checks `is not None` to enforce the interface contract "a defender in
+    the config REQUIRES a defender box from the environment" (see main.py). Not the defender plugin's job
+    to discover.
 
     Stage-A adapter (MHBench today): the defender box is a host in a dedicated defender subnet added only
     to defender-capable (instrumented) topologies. Detect it by that subnet/host, not by vm_type (the box
-    shares ubuntu_base_running with the DB hosts). Stage B: the env plugin reports this directly.
-    OWNERSHIP: the environment session owns the box + its topology representation; keep this detector in
-    sync with it (defender_subnet 192.168.250.0/24 / a host named 'defender')."""
+    shares ubuntu_base_running with the DB hosts). Stage B / on the env branch: the environment session
+    owns a non-heuristic `defender_box_spec` derived directly from the defender_subnet (same name +
+    signature) which supersedes this scan at merge — the arena call site (`is not None`) does not change."""
     if deployed is None or not deployed.topology_spec:
-        return False
+        return None
     try:
         topology = json.loads(Path(deployed.topology_spec).read_text())
     except Exception:  # noqa: BLE001 — a missing/unreadable topology means we cannot assert a box exists
-        return False
+        return None
     for network in topology.get("networks", []):
         for subnet in network.get("subnets", []):
-            if "defender" in str(subnet.get("name", "")).lower() or str(subnet.get("cidr", "")).startswith("192.168.250."):
-                return True
+            is_def_subnet = "defender" in str(subnet.get("name", "")).lower() \
+                or str(subnet.get("cidr", "")).startswith("192.168.250.")
             for host in subnet.get("hosts", []):
-                if "defender" in str(host.get("name", "")).lower():
-                    return True
-    return False
+                if is_def_subnet or "defender" in str(host.get("name", "")).lower():
+                    return {"name": host.get("name"), "ip": host.get("ip_address"),
+                            "subnet": subnet.get("name")}
+            if is_def_subnet:  # subnet is the defender's but has no host listed
+                return {"name": None, "ip": None, "subnet": subnet.get("name")}
+    return None
 
 
 def _mhb_config_args(cfg) -> list:

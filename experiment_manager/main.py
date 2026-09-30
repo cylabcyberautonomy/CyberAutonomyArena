@@ -17,7 +17,7 @@ from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerComma
 from .defender import run_defender
 from .environment import DeployedEnvironment
 from .environment.capacity import CapacityTracker, count_vm_specs, estimate_decoy_vms
-from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access, defender_box_present
+from .environment.deployer import provision_environment, configure_environment, attacker_env_spec, attacker_setup_access, defender_box_spec
 from .environment.teardown import teardown_environment
 from .environment.collect import collect_environment
 from .environment.rotate import rotate_environment
@@ -922,7 +922,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     # configured defender REQUIRES a defender box from the environment. A defenderless env (no defender box,
     # e.g. a non-instrumented topology) is fine when there's no defender — but pairing a defender with such
     # an env is a contract violation, so fail here before any attacker/defender work.
-    if experiment.defender is not None and not defender_box_present(experiment.deployed_environment, cfg):
+    if experiment.defender is not None and defender_box_spec(experiment.deployed_environment, cfg) is None:
         await _handle_failure(
             experiment,
             "Interface contract violated: a defender is configured but the environment provides no "

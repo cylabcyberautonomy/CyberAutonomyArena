@@ -399,11 +399,11 @@ if __name__ == "__main__":
 
 # ------------------------------------------------------------------ env↔defender interface contract
 
-def test_defender_box_present_detects_the_env_defender_box(tmp_path):
-    """The environment's defender-relevant spec: defender_box_present() reports whether the deployed
+def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
+    """The environment's defender-relevant spec: defender_box_spec() reports the defender box (or None) in the deployed
     topology includes a defender box. The arena uses it to enforce 'a configured defender requires a
     defender box from the environment' — the check is the ARENA's, not the defender plugin's."""
-    from experiment_manager.environment.deployer import defender_box_present
+    from experiment_manager.environment.deployer import defender_box_spec
 
     base = {"networks": [{"name": "victims", "subnets": [
         {"name": "webserver_subnet", "cidr": "192.168.200.0/24",
@@ -411,7 +411,7 @@ def test_defender_box_present_detects_the_env_defender_box(tmp_path):
     ]}]}
     no_box = tmp_path / "no_box.json"
     no_box.write_text(json.dumps(base))
-    assert defender_box_present(DeployedEnvironment(topology_spec=str(no_box), spec="x"), None) is False
+    assert defender_box_spec(DeployedEnvironment(topology_spec=str(no_box), spec="x"), None) is None
 
     with_box = json.loads(json.dumps(base))
     with_box["networks"].append({"name": "defender_net", "subnets": [
@@ -420,11 +420,11 @@ def test_defender_box_present_detects_the_env_defender_box(tmp_path):
     ]})
     box = tmp_path / "with_box.json"
     box.write_text(json.dumps(with_box))
-    assert defender_box_present(DeployedEnvironment(topology_spec=str(box), spec="x"), None) is True
+    assert defender_box_spec(DeployedEnvironment(topology_spec=str(box), spec="x"), None) is not None
 
 
-def test_defender_box_present_false_when_no_env():
+def test_defender_box_spec_none_when_no_env():
     """No deployed environment (or no topology) => cannot assert a box, so the contract check will fail
     a defender run rather than assume one exists."""
-    from experiment_manager.environment.deployer import defender_box_present
-    assert defender_box_present(None, None) is False
+    from experiment_manager.environment.deployer import defender_box_spec
+    assert defender_box_spec(None, None) is None
