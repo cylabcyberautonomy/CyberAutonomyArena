@@ -90,7 +90,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
@@ -278,6 +278,31 @@ def test_terminus_build_config_contract():
     assert built["kali_ip"] == "192.168.202.100"
     assert "objective" in built and "max_turns" in built
     assert atk.ui_schema()["config_type"] == "terminus_llm"
+
+
+def test_openshell_build_config_contract():
+    """NVIDIA OpenShell attacker: an LLM coding agent driven under OpenShell on the foothold. agent +
+    policy are selectable; build_config carries the provider/key routing, image, generated-policy
+    inputs, objective and the kali IP; ui_schema is well-formed."""
+    reg = AttackerPlugin._registry["openshell"]
+    # default: claude agent, permissive policy
+    atk = reg.model_validate({"type": "openshell"})
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, "unused")
+    assert built["agent"] == "claude"
+    assert built["provider"] == "anthropic" and built["api_key_env"] == "ANTHROPIC_API_KEY"
+    assert built["policy"] == "permissive"
+    assert built["kali_ip"] == "192.168.202.100"
+    assert "objective" in built and built["ports"] and built["allow_cidrs"]
+    assert built["model"] == "anthropic/claude-sonnet-4-5"  # per-agent default when model omitted
+    assert built["agent_cmd_template"] and "{objective}" in built["agent_cmd_template"]
+    # selectable agent + policy + explicit overrides route correctly
+    codex = reg.model_validate({"type": "openshell", "agent": "codex", "policy": "restrictive",
+                                "model": "gpt-5", "image": "x/y:z"})
+    b2 = codex.build_config("e", FAKE_ATTACKER_SPEC, "u")
+    assert b2["provider"] == "openai" and b2["policy"] == "restrictive" and b2["image"] == "x/y:z"
+    oc = reg.model_validate({"type": "openshell", "agent": "opencode"}).build_config("e", FAKE_ATTACKER_SPEC, "u")
+    assert oc["provider"] == "openrouter" and oc["model"] == "openrouter/anthropic/claude-sonnet-5"
+    assert atk.ui_schema()["config_type"] == "openshell"
 
 
 def test_attacker_graphsearch_build_config_contract():
