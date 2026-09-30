@@ -97,7 +97,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         # defender_key + bastion routing from the environment's SetupAccess (matched by box.ip) — the
         # same scoped access every other defender uses. The box + victims all sit behind the bastion,
         # so the deploy reaches both via that scoped-key ProxyCommand.
-        from ...environment import deployer as _env_deployer
+        from ....environment import deployer as _env_deployer
         box = _env_deployer.defender_box_spec(environment, cfg)
         if not (box and box.ip):
             raise RuntimeError("Velociraptor requires a defender box, but the environment provides none.")

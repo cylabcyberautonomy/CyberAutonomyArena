@@ -42,11 +42,14 @@ def _bin(velociraptor_dir: Path) -> Path:
 
 
 def victim_hosts(topology_path: Path) -> list[tuple[str, str]]:
-    """[(name, internal_ip)] for every non-attacker host (the monitored victims)."""
+    """[(name, internal_ip)] for every monitored victim: excludes the attacker (kali) AND the
+    defender's own box (the host in defender_subnet) — the defender doesn't run a client on itself."""
     topo = json.loads(Path(topology_path).read_text())
     out: list[tuple[str, str]] = []
     for net in topo.get("networks", []):
         for subnet in net.get("subnets", []):
+            if "defender" in (subnet.get("name") or "").lower():
+                continue  # the defender box's own subnet — not a monitored victim
             for host in subnet.get("hosts", []):
                 if host.get("vm_type") == "kali_running":
                     continue
