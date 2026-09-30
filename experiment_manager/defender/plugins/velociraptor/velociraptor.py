@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 from typing import Literal, Optional
 
-import yaml
 from pydantic import PrivateAttr
 
 from ....config import ExperimentManagerConfig
@@ -30,6 +29,10 @@ from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
 from . import deploy
+
+# The mgmt-host address Velo clients beacon to (where the env's mgmt:8000->box:8000 forward listens);
+# same host as the falcosidekick relay. Constant across deploys (management subnet host).
+_MGMT_ADVERTISE_IP = "10.0.1.10"
 
 
 def _require_velociraptor_dir(cfg: ExperimentManagerConfig) -> Path:
@@ -40,19 +43,6 @@ def _require_velociraptor_dir(cfg: ExperimentManagerConfig) -> Path:
             "holding bin/velociraptor (the static binary) in config.yaml."
         )
     return Path(d)
-
-
-def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> Path:
-    default = Path("~/.ssh/id_ed25519").expanduser()
-    try:
-        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
-        data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
-        backend = data.get("backend", "openstack")
-        block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
-        key = block.get("ssh_key_path") or data.get("ssh_key_path")
-        return Path(os.path.expanduser(key)) if key else default
-    except Exception:  # noqa: BLE001
-        return default
 
 
 def _topology_path(cfg: ExperimentManagerConfig, environment_spec: str) -> Path:
@@ -83,6 +73,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     _server_ip: Optional[str] = PrivateAttr(default=None)
     _expected_clients: int = PrivateAttr(default=0)
     _ssh_key: Optional[str] = PrivateAttr(default=None)
+    _server_proxy: Optional[str] = PrivateAttr(default=None)  # bastion ProxyCommand to reach the box
 
     # -- lifecycle ---------------------------------------------------------
     async def setup(
@@ -101,30 +92,45 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         if not topology_path.exists():
             # environment.topology_spec is the canonical path the deployer used.
             topology_path = Path(environment.topology_spec) if environment else topology_path
-        ssh_key = _mhbench_ssh_key(cfg)
-        self._ssh_key = str(ssh_key)
+
+        # The server now runs ON the defender box (not the bastion). Get the box's IP + the SCOPED
+        # defender_key + bastion routing from the environment's SetupAccess (matched by box.ip) — the
+        # same scoped access every other defender uses. The box + victims all sit behind the bastion,
+        # so the deploy reaches both via that scoped-key ProxyCommand.
+        from ...environment import deployer as _env_deployer
+        box = _env_deployer.defender_box_spec(environment, cfg)
+        if not (box and box.ip):
+            raise RuntimeError("Velociraptor requires a defender box, but the environment provides none.")
+        box_ip = str(box.ip)
+        access = _env_deployer.defender_setup_access(environment, mgmt_ip, cfg)
+        box_access = next((a for a in access if str(a.host) == box_ip), None)
+        if not box_access or not box_access.ssh_key:
+            raise RuntimeError(f"no SetupAccess entry with an ssh_key for the defender box {box_ip}")
+        scoped_key = box_access.ssh_key
+        proxy_common = box_access.ssh_common_args
+        self._ssh_key = str(scoped_key)
+        self._server_ip = box_ip                 # server runs here; runner drives it over the box's proxy
+        self._server_proxy = proxy_common        # runner SSHes to the box via this bastion ProxyCommand
         victims = deploy.victim_hosts(topology_path)
         self._expected_clients = len(victims)
         out = _defender_out(experiment_name, cfg)
         log_path = out / "velociraptor_deploy.log"
 
         loop = asyncio.get_event_loop()
-        # 1. discover the bastion's internal IP victims should beacon to
-        self._server_ip = await loop.run_in_executor(
-            None, lambda: deploy.discover_bastion_internal_ip(mgmt_ip, ssh_key, victims[0][1])
-        )
-        # 2. generate server/client/api configs pinned to that IP
+        # 1. generate configs advertising the mgmt-host address clients beacon to (the forward-listen
+        #    IP), while the server binds 0.0.0.0:8000 on the box.
         cfgs = await loop.run_in_executor(
-            None, lambda: deploy.generate_configs(velo_dir, self._server_ip, out / "velociraptor_cfg")
+            None, lambda: deploy.generate_configs(velo_dir, _MGMT_ADVERTISE_IP, out / "velociraptor_cfg")
         )
-        # 3. deploy server (bastion) + clients (victims)
+        # 2. deploy server (box) + clients (victims), both via the scoped-key bastion ProxyCommand
         await loop.run_in_executor(
             None,
             lambda: deploy.run_play(
                 action="install",
                 topology_path=topology_path,
-                mgmt_ip=mgmt_ip,
-                ssh_key=ssh_key,
+                server_ip=box_ip,
+                ssh_key=scoped_key,
+                proxy_common=proxy_common,
                 ansible_playbook_bin=_ansible_playbook_bin(cfg),
                 velociraptor_dir=velo_dir,
                 extravars={
@@ -147,7 +153,8 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             "experiment_name": experiment_name,
             "topology_spec": environment.topology_spec if environment else None,
             "install_dir": deploy.INSTALL_DIR,
-            "server_ip": self._server_ip,
+            "server_ip": self._server_ip,          # the defender box (server runs here)
+            "server_proxy": self._server_proxy,    # bastion ProxyCommand so the runner can SSH to the box
             "expected_clients": self._expected_clients,
             "ssh_key": self._ssh_key or str(Path("~/.ssh/id_ed25519").expanduser()),
             "response_mode": self.response_mode,

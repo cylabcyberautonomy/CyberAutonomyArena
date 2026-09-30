@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -39,7 +40,8 @@ SSH_KEY = os.path.expanduser(CFG["ssh_key"])
 INSTALL_DIR = CFG["install_dir"]
 API_CONFIG = f"{INSTALL_DIR}/api.yaml"
 VELO = f"{INSTALL_DIR}/velociraptor"
-SERVER_IP = CFG["server_ip"]                  # bastion internal IP (quarantine allowlist)
+SERVER_IP = CFG["server_ip"]                  # the defender box: the server runs here
+SERVER_PROXY = CFG.get("server_proxy") or ""  # bastion ProxyCommand to reach the box (scoped key)
 EXPECTED_CLIENTS = int(CFG.get("expected_clients", 1))
 POLL = float(CFG.get("poll_interval", 15))
 READY_TIMEOUT = float(CFG.get("ready_timeout", 600))
@@ -73,7 +75,9 @@ def vql(query: str, timeout: float = 90) -> list[dict]:
     """Run VQL on the bastion server via SSH; return parsed rows ([] on error)."""
     cmd = [
         "ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", f"root@{BASTION_IP}",
+        "-o", "UserKnownHostsFile=/dev/null",
+        *shlex.split(SERVER_PROXY),           # bastion ProxyCommand -> reach the box (server host)
+        f"root@{SERVER_IP}",                  # server runs on the box, not the bastion
         VELO, "--api_config", API_CONFIG, "query", "--format", "json", query,
     ]
     try:

@@ -59,9 +59,12 @@ def victim_hosts(topology_path: Path) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 # Config generation (on the harness host, with the local binary)
 # --------------------------------------------------------------------------- #
-def generate_configs(velociraptor_dir: Path, bastion_internal_ip: str, out_dir: Path) -> dict:
-    """Produce server.yaml / client.yaml / api.yaml in out_dir, wired for a server
-    on the bastion at ``bastion_internal_ip``. Returns the paths + the API user/password."""
+def generate_configs(velociraptor_dir: Path, advertise_ip: str, out_dir: Path) -> dict:
+    """Produce server.yaml / client.yaml / api.yaml in out_dir. The server RUNS on the defender box
+    (bound 0.0.0.0:FRONTEND_PORT), but clients reach it through the mgmt-host TCP forward, so the
+    Frontend advertises ``advertise_ip`` (the mgmt host, e.g. 10.0.1.10) — that address is the cert CN,
+    the client beacon URL, and the forward-listen address, all consistent so pinned-CA validation lines
+    up through the raw-TCP hop. Returns the paths + the API user/password."""
     binp = _bin(velociraptor_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     server_yaml = out_dir / "server.yaml"
@@ -73,15 +76,15 @@ def generate_configs(velociraptor_dir: Path, bastion_internal_ip: str, out_dir: 
         raise RuntimeError(f"velociraptor config generate failed: {raw.stderr.strip()}")
     cfg = yaml.safe_load(raw.stdout)
 
-    server_url = f"https://{bastion_internal_ip}:{FRONTEND_PORT}/"
-    # Datastore + logs live under INSTALL_DIR on the bastion.
+    server_url = f"https://{advertise_ip}:{FRONTEND_PORT}/"
+    # Datastore + logs live under INSTALL_DIR on the box (where the server runs).
     cfg.setdefault("Datastore", {})
     cfg["Datastore"]["location"] = f"{INSTALL_DIR}/datastore"
     cfg["Datastore"]["filestore_directory"] = f"{INSTALL_DIR}/datastore"
-    # Frontend must advertise the bastion IP (clients derive their URL from this),
-    # and bind on all interfaces so victims on the internal net can reach it.
+    # Advertise the mgmt-host address clients beacon to (the forward's listen IP); bind on all
+    # interfaces on the box so the forward (mgmt:8000 -> box:8000) can reach it.
     cfg.setdefault("Frontend", {})
-    cfg["Frontend"]["hostname"] = bastion_internal_ip
+    cfg["Frontend"]["hostname"] = advertise_ip
     cfg["Frontend"]["bind_address"] = "0.0.0.0"
     cfg["Frontend"]["bind_port"] = FRONTEND_PORT
     # The client section here is what `config client` copies out — pin the server URL.
@@ -131,50 +134,25 @@ def generate_configs(velociraptor_dir: Path, bastion_internal_ip: str, out_dir: 
 # --------------------------------------------------------------------------- #
 # SSH / ansible
 # --------------------------------------------------------------------------- #
-def _proxy_command(mgmt_ip: str, ssh_key: Path) -> str:
-    return (
-        f"ssh -W %h:%p -i {ssh_key} -o BatchMode=yes -o PasswordAuthentication=no "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"
-    )
-
-
-def discover_bastion_internal_ip(mgmt_ip: str, ssh_key: Path, a_victim_ip: str) -> str:
-    """Ask the bastion which source IP it routes to a victim from — that's the internal
-    address victim clients should beacon to. Robust to whatever the mgmt network is named."""
-    ssh_key = Path(os.path.expanduser(str(ssh_key)))
-    cmd = [
-        "ssh", "-i", str(ssh_key), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", f"root@{mgmt_ip}",
-        f"ip -o route get {a_victim_ip}",
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if r.returncode != 0:
-        raise RuntimeError(f"could not discover bastion internal IP: {r.stderr.strip()}")
-    # "... src 192.168.200.1 ..." -> 192.168.200.1
-    for tok in r.stdout.split():
-        if tok == "src":
-            idx = r.stdout.split().index("src")
-            return r.stdout.split()[idx + 1]
-    raise RuntimeError(f"no src IP in route output: {r.stdout.strip()}")
-
-
-def _write_inventory(mgmt_ip: str, victims: list[tuple[str, str]], ssh_key: Path, tmp: Path) -> Path:
-    proxy = _proxy_command(mgmt_ip, ssh_key)
-    victim_common = (
+def _write_inventory(server_ip: str, victims: list[tuple[str, str]], ssh_key: Path,
+                     proxy_common: str, tmp: Path) -> Path:
+    """Inventory with the server on the DEFENDER BOX (velo_server) and clients on the victims
+    (velo_clients). Both are behind the bastion, so BOTH reach through it via the same scoped-key
+    ProxyCommand (proxy_common = the SetupAccess ssh_common_args). This is the key change from the
+    old 'server on the bastion (direct FIP)' shape."""
+    common = (
         "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
-        f'-o ProxyCommand="{proxy}"'
+        f"{proxy_common}"
     )
     inv = {
         "velo_server": {
             "hosts": {
-                "bastion": {
-                    "ansible_host": mgmt_ip,
+                "defender_box": {
+                    "ansible_host": server_ip,
                     "ansible_user": "root",
                     "ansible_ssh_private_key_file": str(ssh_key),
-                    "ansible_ssh_common_args": (
-                        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-                    ),
+                    "ansible_ssh_common_args": common,
                 }
             }
         },
@@ -184,7 +162,7 @@ def _write_inventory(mgmt_ip: str, victims: list[tuple[str, str]], ssh_key: Path
                     "ansible_host": ip,
                     "ansible_user": "root",
                     "ansible_ssh_private_key_file": str(ssh_key),
-                    "ansible_ssh_common_args": victim_common,
+                    "ansible_ssh_common_args": common,
                 }
                 for name, ip in victims
             }
@@ -195,7 +173,7 @@ def _write_inventory(mgmt_ip: str, victims: list[tuple[str, str]], ssh_key: Path
     return p
 
 
-def run_play(*, action: str, topology_path: Path, mgmt_ip: str, ssh_key: Path,
+def run_play(*, action: str, topology_path: Path, server_ip: str, ssh_key: Path, proxy_common: str,
              ansible_playbook_bin: Path, velociraptor_dir: Path, extravars: dict,
              log_path: Optional[Path] = None) -> None:
     victims = victim_hosts(topology_path)
@@ -204,7 +182,7 @@ def run_play(*, action: str, topology_path: Path, mgmt_ip: str, ssh_key: Path,
     ssh_key = Path(os.path.expanduser(str(ssh_key)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        inv = _write_inventory(mgmt_ip, victims, ssh_key, tmp)
+        inv = _write_inventory(server_ip, victims, ssh_key, proxy_common, tmp)
         varfile = tmp / "vars.json"
         varfile.write_text(json.dumps({
             "velo_action": action,
@@ -228,7 +206,7 @@ def run_play(*, action: str, topology_path: Path, mgmt_ip: str, ssh_key: Path,
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "a") as lf:
-                lf.write(f"\n=== velociraptor play action={action} (server=bastion, {len(victims)} clients) ===\n")
+                lf.write(f"\n=== velociraptor play action={action} (server=box, {len(victims)} clients) ===\n")
                 lf.flush()
                 r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         else:
