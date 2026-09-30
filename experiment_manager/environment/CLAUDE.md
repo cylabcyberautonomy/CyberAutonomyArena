@@ -75,7 +75,8 @@ async def program_ingress(self, experiment, mgmt_ip, cfg, ingress) -> None:
 
 ## Selection
 
-The environment uses the explicit shape (not the embedded `type` selector the other systems use):
+The environment is selected with the explicit `{plugin, spec}` shape. `environment_spec` is the
+topology path:
 
 ```json
 {"environment_plugin": "mhbench",
@@ -83,6 +84,10 @@ The environment uses the explicit shape (not the embedded `type` selector the ot
 ```
 
 A bare path string coerces to `{environment_plugin: mhbench, environment_spec: <path>}`.
+
+The attacker offers the same `plugin` + `spec-file` shape (`attacker_plugin` + `attacker_spec`, a path
+to a spec file) in addition to its embedded `{type, ...}` form — see `attacker/CLAUDE.md`. The defender
+and traffic are selected only by the embedded `{type, ...}` form.
 
 ## Register and verify
 

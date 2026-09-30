@@ -83,6 +83,17 @@ step. You do not emit these yourself. Implement `setup`, `start`, and `stop`; th
 in `run_setup` / `run_start` / `run_stop`, which emit the signals. `start()` must return quickly with
 the launched process — readiness is established in `setup()`, not `start()`.
 
+## Selecting this plugin
+
+Pick the plugin in the experiment spec. The attacker accepts two equivalent forms:
+
+- embedded — `"attacker": {"type": "my_attacker", "model": "..."}`
+- plugin + spec-file — `"attacker_plugin": "my_attacker"` with `"attacker_spec": "path/to/spec.json"`,
+  where the file holds the plugin's fields. Give one form or the other, not both.
+
+`config_type` is what `type` / `attacker_plugin` match on. (The environment uses the same plugin+spec
+shape; the defender and traffic use only the embedded form.)
+
 ## Register and verify
 
 Add a contract test next to the others in `tests/test_arena_contract.py`. Assert the class is in the

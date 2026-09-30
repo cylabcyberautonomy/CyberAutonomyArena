@@ -78,6 +78,17 @@ def box_ingress(self):
 
 The harness opens exactly these at arm. A defender that needs nothing returns `{}` and opens nothing.
 
+## Selecting this plugin
+
+Pick the plugin in the experiment spec with the embedded form:
+
+```json
+"defender": {"type": "my_defender", "strategy": "..."}
+```
+
+`config_type` is what `type` matches on. The defender has no separate plugin+spec-file form — that
+shape exists only for the environment and the attacker.
+
 ## Register and verify
 
 Add a contract test in `tests/test_arena_contract.py`. Assert the class is in the registry and that
