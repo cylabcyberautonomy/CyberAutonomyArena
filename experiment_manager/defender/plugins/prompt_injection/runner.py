@@ -136,6 +136,9 @@ perry_cfg = Config(**perry_config_data)
 # (database0-23 among them) and restored its own host0 off the back of that.
 perry_cfg.experiment_name = experiment_name
 
+# PERRY SEAM (cross-repo, not harness-side): same as llm_soc/runner.py — the only backend read left
+# is choosing the concrete orchestrator + its cloud handle, both of which live in
+# Defense-MHBench-compatible. Everything else here is backend-agnostic.
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
 openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
