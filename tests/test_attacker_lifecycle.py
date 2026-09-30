@@ -23,7 +23,7 @@ class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
     def build_config(self, experiment_name, env_spec, c2c_url):  # unused here
         return {}
 
-    async def setup(self, experiment, cfg, mgmt_ip):
+    async def setup(self, experiment, cfg, mgmt_ip, access=None):
         await asyncio.sleep(0)  # yield, so a concurrent waiter can observe SETUP_STARTED first
         if self.fail_setup:
             raise RuntimeError("boom in setup")
@@ -117,3 +117,26 @@ async def test_wait_times_out_when_signal_never_arrives():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.asyncio
+async def test_run_setup_threads_scoped_access_as_a_parameter():
+    """Unified with the defender: the arena passes the scoped foothold SetupAccess to run_setup as a
+    PARAMETER (not via an experiment._attacker_access attribute), and it reaches setup()."""
+    from experiment_manager.attacker.env_spec import SetupAccess
+
+    seen = {}
+    class _Probe(AttackerPlugin, config_type="_probe_access_param"):
+        def build_config(self, *a): return {}
+        async def setup(self, experiment, cfg, mgmt_ip, access=None):
+            seen["access"] = access
+            return PreparedAttacker()
+
+    acc = [SetupAccess(name="kali", host="10.0.0.9", user="root", ssh_key="/scoped/k")]
+    await _Probe(type="_probe_access_param").run_setup(_Exp(AttackerLifecycle()), cfg=None, mgmt_ip=None, access=acc)
+    assert seen["access"] is acc
+
+    # and the base plugin no longer reads the old experiment._attacker_access side-channel
+    import inspect
+    from experiment_manager.attacker.plugins import base
+    assert "_attacker_access" not in inspect.getsource(base)

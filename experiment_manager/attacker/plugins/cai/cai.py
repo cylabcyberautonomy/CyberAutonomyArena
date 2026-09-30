@@ -54,8 +54,8 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "kali_ip": (env_spec.primary.host if env_spec.primary else None),
         }
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> PreparedAttacker:
-        base = self.persist_primary_access(experiment, cfg).ssh_base()  # persist so start()/stop() recover it
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str], access=None) -> PreparedAttacker:
+        base = self.persist_primary_access(experiment.experiment_name, cfg, access).ssh_base()  # persist so start()/stop() recover it
         install = (
             "set -e; mkdir -p /opt/cai/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
