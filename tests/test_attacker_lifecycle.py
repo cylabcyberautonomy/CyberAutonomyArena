@@ -29,11 +29,11 @@ class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
             raise RuntimeError("boom in setup")
         return PreparedAttacker()
 
-    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None):
+    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None, access=None):
         await asyncio.sleep(0)
         return object()  # stand-in for the spawned process
 
-    async def stop(self, experiment, cfg):
+    async def stop(self, experiment, cfg, access=None):
         await asyncio.sleep(0)
 
 

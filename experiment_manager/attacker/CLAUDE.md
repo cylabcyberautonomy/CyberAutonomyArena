@@ -1,16 +1,19 @@
 # Adding an attacker plugin
 
-An attacker plugin runs an offensive agent from an attacker foothold the environment provides. The
-agent runs as a process, and its exit code is the verdict.
+An attacker plugin runs an offensive agent from an attacker foothold the environment provides.
 
 To create an attacker, create a Python file in `plugins/`. Initialize a class that is subclassed under
-`AttackerPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every file
-under it on startup, so the class registers itself. There is no list to edit.
+`AttackerPlugin` (`plugins/base.py`) with a `config_type`. 
 
-Existing plugins to copy from:
-- `plugins/incalmo/` — a C2-based agent (runs a C2 container, agents beacon in). The complex case.
-- `plugins/terminus/`, `plugins/cai/` — pure shell agents (no C2): install a tool on the foothold,
-  push a runner, launch it. **Start here for a new shell/LLM agent.**
+Existing plugins:
+- `plugins/incalmo/` — the Incalmo integration: an LLM attacker that runs a C2 (sandcat agents beacon
+  in from the victims) and drives it either through fixed strategies (GraphSearch, ...) or a free-form
+  LLM planning loop. Subclasses `C2AttackerPlugin`.
+- `plugins/terminus/` — Terminus-2, Terminal-Bench 2.0's reference shell agent (from the `harbor`
+  framework): an LLM that drives a real shell in a read-terminal → think → type-command loop, run on
+  the foothold.
+- `plugins/cai/` — the CAI (Cybersecurity AI) framework's offensive agent, installed and run on the
+  foothold as a shell agent.
 
 ## The interface
 
@@ -27,38 +30,57 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
         (objective + foothold identity — no keys). Safe to serialize and hand to the agent."""
 
     async def setup(self, experiment, cfg, mgmt_ip, access=None) -> PreparedAttacker:
-        """Prepare the foothold. `access` is the harness-only SetupAccess (scoped key + bastion
-        routing) — persist it with self.persist_primary_access(...) so start()/stop() can recover it.
-        Return PreparedAttacker() (with C2 urls if you run one)."""
+        """Prepare the foothold. `access` is a list of harness-only SetupAccess (scoped key + bastion
+        routing). Reach the foothold with self.primary_access(access).ssh_base(). Return
+        PreparedAttacker()."""
 
-    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None):
-        """Launch the attack process and return it. Exit code = verdict."""
+    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None, access=None):
+        """Launch the attack process and return it, without waiting for it to finish. You do not emit
+        lifecycle signals here: the base emits RUNNING right after start() returns, STOPPING/STOPPED
+        around stop(). So return as soon as the process is up."""
 
-    async def stop(self, experiment, cfg) -> None: ...          # kill the process(es)
-    async def collect_logs(self, experiment, cfg, dest) -> None: ...   # optional
+    async def stop(self, experiment, cfg, access=None) -> None: ...          # kill the process(es)
+
+    async def collect_logs(self, experiment, cfg, dest, access=None) -> None: ...   # optional
 ```
 
-The `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c` methods are only for C2-based
-attackers. A shell agent leaves them at their no-op defaults. Set `requires_docker = True` (a ClassVar)
-only if `setup()` needs a local Docker daemon for a C2 container. Leave it off if Docker runs on the
-foothold instead.
+## Running a C2
+
+If your attacker needs a command-and-control server, subclass `C2AttackerPlugin` (in `plugins/base.py`)
+instead of `AttackerPlugin`. It adds the C2 hooks — `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`,
+`stop_c2c` — and a `setup()` that brings the C2 up, preps the foothold, and waits for an agent to beacon
+in. Set `requires_docker = True` on your subclass only if the C2 runs as a Docker container on the
+harness host. Shell and LLM agents that need no C2 subclass `AttackerPlugin` directly and write their
+own `setup()`. See `plugins/incalmo/` for the C2 case.
 
 ## Reaching the foothold
 
 The arena passes `setup()` a list of `SetupAccess` objects. Each one holds a scoped key and the
-routing to reach one foothold. Use them to reach the foothold:
+routing to reach one foothold. In `setup()`, take the primary one and turn it into an `ssh` prefix:
 
 ```python
-base = self.persist_primary_access(experiment_name, cfg, access).ssh_base()  # in setup()
-# later, in start()/stop() (which only get experiment_name):
-base = self.load_primary_access(experiment_name, cfg).ssh_base()
+base = self.primary_access(access).ssh_base()   # in setup(): access is the SetupAccess list
 ```
 
-`ssh_base()` returns a ready-to-run `ssh` prefix (the scoped key plus the bastion ProxyCommand).
+In `start()`, `stop()`, and `collect_logs()`, the primary `SetupAccess` is handed to you as `access`
+directly — you never persist or load it:
 
-Do not read a key off disk. Reading a key path (`cfg.*.ssh_key_path`, `~/.ssh/id_ed25519`) re-arms the
-god key, and `tests/test_no_god_key.py` will fail. Keys live only in SetupAccess, which stays in
-trusted plugin code. The `env_spec` you get in `build_config` is adversary-safe and carries none.
+```python
+base = access.ssh_base()                         # in start()/stop()/collect_logs()
+```
+
+`run_setup()` persists the access, and the `run_start` / `run_stop` / `run_collect_logs` wrappers load
+it and pass it in. `ssh_base()` returns a ready-to-run `ssh` prefix (the scoped key plus the bastion
+ProxyCommand).
+
+Do not read a key off disk. A plugin is trusted code — nothing sandboxes it — so this is about
+experimental integrity, not stopping a malicious author. The broad management key
+(`cfg.*.ssh_key_path`, `~/.ssh/id_ed25519`) opens every host. If you read it and hand it to the agent,
+the agent moves laterally without exploiting anything, and the run stops measuring attacker capability.
+The real controls are two: the environment issues *scoped* keys, so the attacker's key opens its
+foothold and not the victims; and the adversary-facing `env_spec` carries no keys at all.
+`tests/test_no_god_key.py` is a regression tripwire that keeps the shortcut out of plugin code — it is
+not the boundary itself.
 
 ## Lifecycle
 
@@ -71,3 +93,14 @@ the launched process — readiness is established in `setup()`, not `start()`.
 
 Add a contract test next to the others in `tests/test_arena_contract.py`. Assert the class is in the
 registry and that `build_config` carries what the runner reads. Then run `pytest tests/`.
+
+`pytest tests/` is fast and cloud-free. It covers three things:
+- `test_arena_contract.py` — the four-system contract: registration, config round-trip,
+  `build_config` / `ui_schema` shapes.
+- `test_attacker_lifecycle.py` — the setup → ready → running → stopping → stopped handshake.
+- `test_no_god_key.py` — the scoped-key regression guard.
+
+There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud and
+LLM credits — see `tests/README_live_smoke.md`, which drives a full run against a live manager
+(`run_experiment_smoke.py`), a dashboard smoke (`run_dashboard_smoke.py`), and a cheap no-cloud adapter
+probe (`probe_terminus_adapter.py`). Run that before shipping a plugin that touches a real foothold.

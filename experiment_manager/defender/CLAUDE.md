@@ -1,17 +1,22 @@
 # Adding a defender plugin
 
 A defender plugin runs a defensive system against the attack: detection, deception, or active
-response. It first arms — it places decoys, plants honey data, and starts its detection loop — and
-then reacts while the attacker runs.
+response. It first instruments the environment in a setup stage, and
+then can ingest telemetry and actively execute actions on the environment during the running stage.
 
 To create a defender, create a Python file in `plugins/`. Initialize a class that is subclassed under
-`DefenderPlugin` (`plugins/base.py`) with a `config_type`. The plugins package imports every file under
-it on startup, so the class registers itself. There is no list to edit.
+`DefenderPlugin` (`plugins/base.py`) with a `config_type`.
 
-Existing plugins to copy from:
-- `plugins/llm_soc/` — an LLM SOC reading telemetry (Falco/sysflow) from the defender box's ES.
-- `plugins/deception/`, `plugins/prompt_injection/` — decoy/honey-credential strategies.
-- `plugins/canary/` — a lightweight checks-only defender (a good minimal template).
+Existing plugins:
+- `plugins/incalmo/` — a C2-based agent (runs a C2 container, agents beacon in). <I actually want to create a real C2 based agent, and have incalmo be like... the incalmo work>
+- `plugins/terminus/` - shell-based agent <insert description of terminus2 here>
+- `plugins/cai/` — shell-based agent <insert relevant description of CAI agent here>
+
+Existing:
+- `plugins/llm_soc/` — an LLM SOC that ingests telemetry instrumented on the environment (Falco/Sysflow). Can dispatch agents to execute actions in response to that telemetry.
+- `plugins/deception/` - <insert description of the deception plugin here, also I haven't open sourced this repo so let's make a note that needs to be open sourced, and also like it doesn't really work in this model because it requires deploying decoys which is something it needs to request of the environment service though we could add that in right?>
+- `plugins/prompt_injection/` - <insert description of the prompt injection plugin here, also haven't open sourced this repository for the same reasons as the above>
+- `plugins/canary/` — a lightweight checks-only defender for integration testing.
 
 ## The interface
 
@@ -58,7 +63,7 @@ scoped key and bastion routing. The runner reads its hosts and access from there
 MHBench key or parse the topology for credentials yourself; `tests/test_no_god_key.py` enforces this.
 
 To read telemetry, reuse the base class method `prepare_box_es(...)`. It stands up a per-experiment
-Elasticsearch on the env-provided defender box and opens a tunnel to it. Do not point at a shared ES.
+Elasticsearch on the env-provided defender box and opens a tunnel to it for setup access.
 
 ## Box ingress — request exactly what you use
 

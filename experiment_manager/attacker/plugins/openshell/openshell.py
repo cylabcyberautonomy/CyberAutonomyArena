@@ -50,7 +50,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import ClassVar, Literal, Optional
+from typing import Literal, Optional
 
 from ....config import ExperimentManagerConfig
 from ...env_spec import AttackerEnvSpec
@@ -136,9 +136,8 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
     max_turns: int = 1000
     objective: Optional[str] = None        # override the default attack objective
 
-    # OpenShell needs a container runtime on the FOOTHOLD (Kali), not on the harness host — like the
-    # Terminus/CAI tooling — so the local-Docker preflight stays off.
-    requires_docker: ClassVar[bool] = False
+    # OpenShell needs a container runtime on the FOOTHOLD (Kali), not on the harness host, so it is a
+    # plain AttackerPlugin (no C2) and never triggers the harness-local Docker preflight.
 
     def _agent_spec(self) -> dict:
         return _AGENTS[self.agent]
@@ -208,7 +207,7 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
 
     # -- lifecycle (no C2; a pure shell agent, like Terminus/CAI) -----------------------------------
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str], access=None) -> PreparedAttacker:
-        ssh_base_cmd = self.persist_primary_access(experiment.experiment_name, cfg, access).ssh_base()  # persist so start()/stop() recover it
+        ssh_base_cmd = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
         # Install the openshell CLI + local gateway on Kali. The installer needs a container runtime
         # (Docker/Podman); ensure docker is present (the victim range has no apt mirror only on GCP —
         # on OpenStack Kali can apt-install). The install script starts the gateway; `openshell status`
@@ -230,8 +229,8 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
 
     async def start(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str,
                     cfg: ExperimentManagerConfig, c2c_url: Optional[str],
-                    agent_c2c_url: Optional[str] = None) -> asyncio.subprocess.Process:
-        base = self.load_primary_access(experiment_name, cfg).ssh_base()
+                    agent_c2c_url: Optional[str] = None, access=None) -> asyncio.subprocess.Process:
+        base = access.ssh_base()
         await self._push(base, f"{_REMOTE_DIR}/openshell_runner.sh", _RUNNER.read_text())
         await self._push(base, f"{_REMOTE_DIR}/attacker_config.json", Path(config_path).read_text())
         log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
@@ -243,10 +242,12 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
             stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True,
         )
 
-    async def stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
-        await super().stop(experiment, cfg)
+    async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
+        await super().stop(experiment, cfg, access=access)
+        if access is None:
+            return
         try:
-            base = self.load_primary_access(experiment.experiment_name, cfg).ssh_base()
+            base = access.ssh_base()
             # kill the runner, then best-effort delete the sandbox (named after the experiment).
             cleanup = (
                 "export PATH=$HOME/.local/bin:/usr/local/bin:$PATH; "
@@ -260,8 +261,8 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
         except Exception:
             pass
 
-    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        base = self.load_primary_access(experiment.experiment_name, cfg).ssh_base()
+    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
+        base = access.ssh_base()
         dest.mkdir(parents=True, exist_ok=True)
         remote = f"{_REMOTE_DIR}/logs/{experiment.experiment_name}"
         proc = await asyncio.create_subprocess_exec(

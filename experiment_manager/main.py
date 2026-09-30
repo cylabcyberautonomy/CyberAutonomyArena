@@ -573,7 +573,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
 
     if experiment.attacker:
         try:
-            await experiment.attacker.collect_logs(
+            await experiment.attacker.run_collect_logs(
                 experiment, cfg,
                 output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "attacker",
             )

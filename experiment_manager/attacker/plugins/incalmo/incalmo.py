@@ -16,7 +16,7 @@ from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
-from ..base import AttackerPlugin
+from ..base import C2AttackerPlugin
 
 
 def _require_access(access):
@@ -142,8 +142,8 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
         pass
 
 
-class _IncalmoAttacker(AttackerPlugin):
-    """Shared C2C lifecycle for all Incalmo-based attackers."""
+class _IncalmoAttacker(C2AttackerPlugin):
+    """Shared C2 lifecycle for all Incalmo-based attackers."""
 
     requires_docker: ClassVar[bool] = True  # C2 runs as a local Docker container (incalmo/c2c)
     # Opt-in (OpenStack only): run the Incalmo C2 on the in-environment Kali VM instead of a beluga
