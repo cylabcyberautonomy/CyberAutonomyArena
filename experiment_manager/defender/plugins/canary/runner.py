@@ -52,7 +52,12 @@ def _sanitize(name: str) -> str:
 # --------------------------------------------------------------------------- ssh
 def _ssh(access: dict, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
     """Run remote_cmd on a victim using its SetupAccess entry (key + routing). Returns (ok, out/err)."""
-    key = os.path.expanduser(access.get("ssh_key") or "~/.ssh/id_ed25519")
+    _k = access.get("ssh_key")
+    if not _k:
+        # Fail closed: never fall back to the management (god) key on disk — that would defeat the
+        # per-system key scoping. The harness must inject a scoped ssh_key in defender_setup_access.
+        raise RuntimeError("SetupAccess entry has no ssh_key; refusing to use the management key")
+    key = os.path.expanduser(_k)
     cmd = [
         "ssh", "-i", key,
         "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no",
