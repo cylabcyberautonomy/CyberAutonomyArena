@@ -989,6 +989,14 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # setup access (key + bastion routing), symmetric with the attacker.
                 _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
                 _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
+                # Defender-requested box ingress: open EXACTLY the ports the defender declares
+                # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
+                # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
+                # the box stays fully isolated. Guarded getattr so a defender plugin without box_ingress
+                # (pre-merge) simply requests nothing.
+                _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
+                if _ingress:
+                    await experiment.environment.program_ingress(experiment, mgmt_ip, cfg, _ingress)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,

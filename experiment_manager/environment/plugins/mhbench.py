@@ -190,6 +190,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             log(getattr(deployed, "spec", "env") or "env",
                 f"telemetry route: {r.source_channel} -> {r.dest} ({r.protocol})")
 
+    async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
+        # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay
+        # dests for telemetry ports; mgmt forward + SG for forward ports). No-op for {} — box isolated.
+        from ..deployer import request_ingress_env
+        await request_ingress_env(experiment, mgmt_ip, cfg, ingress)
+
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

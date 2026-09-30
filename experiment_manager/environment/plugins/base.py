@@ -141,3 +141,10 @@ class EnvironmentPlugin(BaseModel):
         list[TelemetryRoute], grouped by source_channel → multi-stream routing + same-stream fan-out).
         Default no-op so a backend with no relay yet is still valid."""
         return None
+
+    async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
+        """Open EXACTLY the box ingress the defender declared (ingress = {"telemetry": [ports],
+        "forward": [ports]}). telemetry → route the relay to box:port; forward → victim→mgmt:port→box:port.
+        The environment assumes NO defender port; a defender that declares {} opens nothing (box stays
+        fully isolated). Default no-op so a backend without a relay/forwarder is still valid."""
+        return None

@@ -440,6 +440,45 @@ async def configure_environment(
         None, _configure_sync, experiment.experiment_name, experiment.environment_spec, mgmt_ip, c2c_url, cfg
     )
 
+
+def _request_ingress_sync(experiment_name: str, environment_spec: str, mgmt_ip: str,
+                          cfg: ExperimentManagerConfig, ingress: dict) -> None:
+    """Provision the DEFENDER-REQUESTED box ingress by invoking `cli.py request-ingress` — exactly the
+    ports the defender declared (ingress = {"telemetry": [..], "forward": [..]}). telemetry -> relay
+    routes to box:port; forward -> victim->mgmt:port->box:port. Empty -> not called (box stays isolated)."""
+    telemetry = list(ingress.get("telemetry", []))
+    forward = list(ingress.get("forward", []))
+    if not (telemetry or forward):
+        return
+    mhbench_dir = cfg.mhbench_dir
+    topology_path = resolve_topology_path(environment_spec, cfg)
+    python = mhbench_dir / ".venv" / "bin" / "python"
+    cli = mhbench_dir / "cli.py"
+    cmd = [str(python), str(cli), *_mhb_config_args(cfg), "request-ingress", str(topology_path),
+           "--project-name", experiment_name, "--mgmt-ip", mgmt_ip]
+    for p in telemetry:
+        cmd += ["--telemetry", str(p)]
+    for p in forward:
+        cmd += ["--forward", str(p)]
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
+    mhbench_log.parent.mkdir(parents=True, exist_ok=True)
+    log(experiment_name, f"Requesting defender box ingress {ingress} via MHBench CLI...")
+    with open(mhbench_log, "a") as lf:
+        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        raise _mhbench_error("request-ingress", result.returncode, mhbench_log)
+    log(experiment_name, "Defender box ingress provisioned.")
+
+
+async def request_ingress_env(experiment: Experiment, mgmt_ip: Optional[str],
+                              cfg: ExperimentManagerConfig, ingress: dict) -> None:
+    if not mgmt_ip or not ingress:
+        return
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _request_ingress_sync,
+                               experiment.experiment_name, experiment.environment_spec, mgmt_ip, cfg, ingress)
+
+
 # NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its
 # own foothold prep (attacker plugin's prepare_foothold, via SetupAccess), so the environment never
 # runs an attacker play. (User-adjudicated; see WHAT_TO_REFACTOR_ENVIRONMENT.md.)
