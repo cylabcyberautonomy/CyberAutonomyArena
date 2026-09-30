@@ -141,6 +141,15 @@ class Experiment:
     defender = _Field("defender", "config")
     defender_started_at = _Field("defender", "started_at")
     defender_finished_at = _Field("defender", "finished_at")
+    # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the arena records
+    # each defender signal here as it drives setup->ready->running->stopping->stopped, so an observer
+    # sees which phase the defender is in (a hang shows as a stalled status, not one opaque "failed to
+    # arm"). defender_started_at doubles as the RUNNING timestamp (kept for back-compat).
+    defender_status = _Field("defender", "lifecycle_status")
+    defender_setup_started_at = _Field("defender", "setup_started_at")
+    defender_ready_at = _Field("defender", "ready_at")
+    defender_stopping_at = _Field("defender", "stopping_at")
+    defender_stopped_at = _Field("defender", "stopped_at")
     # --- traffic (third plugin class: background traffic on victim hosts) ---
     traffic = _Field("traffic", "config")
     traffic_started_at = _Field("traffic", "started_at")
@@ -174,6 +183,8 @@ class Experiment:
             },
             "defender": {
                 "config": defender, "started_at": None, "finished_at": None,
+                "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
+                "stopping_at": None, "stopped_at": None,
             },
             "traffic": {
                 "config": traffic, "started_at": None, "finished_at": None,

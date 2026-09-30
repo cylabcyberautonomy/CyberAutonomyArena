@@ -286,6 +286,51 @@ def test_defender_box_ingress_declarations():
     assert DefenderPlugin.box_ingress.__doc__  # documented contract
 
 
+# ----------------------------------------------- defender lifecycle (symmetric with the attacker)
+
+def test_defender_lifecycle_signals_and_persist():
+    """DefenderLifecycle drives SETUP_STARTED->READY->RUNNING->STOPPING->STOPPED, and the persister
+    records each onto the Experiment (defender_status + timestamps) — mirroring the attacker."""
+    import asyncio
+    from experiment_manager.defender.lifecycle import (
+        DefenderLifecycle, DefenderSignal, DefenderLifecycleError, signal_persister,
+    )
+    from experiment_manager.experiment.models import Experiment, ExperimentStatus
+
+    exp = Experiment("ci_lc", ExperimentStatus.QUEUED, ENV_STEM, defender=None)
+    lc = DefenderLifecycle(on_emit=signal_persister(exp))
+
+    async def drive():
+        for sig in (DefenderSignal.SETUP_STARTED, DefenderSignal.READY,
+                    DefenderSignal.RUNNING, DefenderSignal.STOPPING, DefenderSignal.STOPPED):
+            await lc.emit(sig)
+        await lc.wait(DefenderSignal.READY)   # already emitted -> returns
+    asyncio.run(drive())
+
+    assert exp.defender_status == "Stopped"
+    assert exp.defender_setup_started_at is not None
+    assert exp.defender_ready_at is not None
+    assert exp.defender_started_at is not None      # RUNNING timestamp (back-compat field)
+    assert exp.defender_stopping_at is not None
+    assert exp.defender_stopped_at is not None
+
+    # FAILED short-circuits a pending wait for a later signal
+    exp2 = Experiment("ci_lc2", ExperimentStatus.QUEUED, ENV_STEM, defender=None)
+    lc2 = DefenderLifecycle(on_emit=signal_persister(exp2))
+
+    async def fail():
+        await lc2.emit(DefenderSignal.SETUP_STARTED)
+        await lc2.emit(DefenderSignal.FAILED, "arming crashed")
+        try:
+            await lc2.wait(DefenderSignal.READY, timeout=1)
+        except DefenderLifecycleError as e:
+            return str(e)
+        return None
+    err = asyncio.run(fail())
+    assert err and "arming crashed" in err
+    assert exp2.defender_status == "Failed"
+
+
 # ------------------------------------------------------------------ arena-facing lifecycle
 
 def test_attacker_lifecycle_methods_present():
