@@ -51,7 +51,7 @@ _BASELINE = {
 
 
 def _plugins_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "experiment_manager"
+    return Path(__file__).resolve().parent.parent / "arena"
 
 
 def _offending_files() -> dict[str, list[str]]:

@@ -1,4 +1,4 @@
-# The arena (experiment_manager)
+# The arena
 
 The arena runs cyber-range **experiments**. An experiment pairs four pluggable systems:
 
@@ -9,7 +9,7 @@ The arena runs cyber-range **experiments**. An experiment pairs four pluggable s
 | **defender**    | the defensive system (detection / deception / active response)   | optional |
 | **traffic**     | benign background activity on the victim hosts                   | optional |
 
-The arena (`experiment_manager/main.py`) drives each system through a fixed lifecycle and **never reaches
+The arena (`arena/main.py`) drives each system through a fixed lifecycle and **never reaches
 inside a plugin**; no plugin reaches into the arena. Swapping any system is choosing a different plugin —
 no arena change. The conceptual reference lives in `docs/` (`architecture.md`, `lifecycle.md`,
 `plugins.md`, `security-model.md`); this file is the practical "how to extend" guide.
@@ -81,7 +81,7 @@ cheap no-cloud adapter probe). Run that before shipping a plugin that touches a 
 ## Layout
 
 ```
-experiment_manager/
+arena/
   main.py       the arena: the experiment lifecycle + admission/queueing
   config.py     ExperimentManagerConfig (paths, limits, backend selection)
   experiment/   the Experiment model + its persisted state

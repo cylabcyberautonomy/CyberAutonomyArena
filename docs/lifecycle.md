@@ -1,6 +1,6 @@
 # Experiment lifecycle
 
-The arena (`experiment_manager/main.py`) drives every experiment through a fixed sequence of stages,
+The arena (`arena/main.py`) drives every experiment through a fixed sequence of stages,
 calling each system only through its base-class interface. This page is the order of operations and the
 one piece of cross-system timing that matters: the defender-readiness handshake.
 
@@ -66,10 +66,10 @@ launching the defender.
 
 ## Where this lives
 
-- Lifecycle signals: `experiment_manager/environment/lifecycle.py` (`EnvironmentSignal`).
-- Readiness handshake: `experiment_manager/defender/plugins/base.py`
+- Lifecycle signals: `arena/environment/lifecycle.py` (`EnvironmentSignal`).
+- Readiness handshake: `arena/defender/plugins/base.py`
   (`ready_marker_path` / `clear_ready_marker` / `wait_until_ready`).
-- The driver that sequences all of it: `experiment_manager/main.py`.
+- The driver that sequences all of it: `arena/main.py`.
 
 See [plugins.md](plugins.md) for what each plugin must implement at each stage, and
 [architecture.md](architecture.md) for the arena/plugin boundary.

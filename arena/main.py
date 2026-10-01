@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI):
     global cfg, registry, _openstack_lock, _configure_lock, _collect_lock, _attacker_setup_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
-    logger.warning("experiment_manager starting: cloud_backend=%s (config=%s)",
+    logger.warning("arena starting: cloud_backend=%s (config=%s)",
                    cfg.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
     load_dotenv(cfg.incalmo_dir / ".env")  # LLM keys into os.environ so the Incalmo subprocess (env={**os.environ,…}) always inherits them, however the harness was launched (bare uvicorn or main.sh). override=False → an already-exported key still wins.
     os.environ["OS_CLOUD"] = cfg.os_cloud
@@ -1317,4 +1317,4 @@ async def delete_experiment(experiment_name: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("experiment_manager.main:app", reload=True)
+    uvicorn.run("arena.main:app", reload=True)

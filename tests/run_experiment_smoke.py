@@ -48,7 +48,7 @@ TERMINAL = {"Finished", "Error", "TimedOut", "Blocked"}
 OUTPUT_ROOT_CANDIDATES = [
     Path.home() / "experiment_harness" / "output",
     Path(__file__).resolve().parent.parent / "output",
-    Path(__file__).resolve().parent.parent / "experiment_manager" / "output",
+    Path(__file__).resolve().parent.parent / "arena" / "output",
 ]
 
 

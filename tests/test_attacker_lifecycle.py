@@ -6,13 +6,13 @@ import asyncio
 
 import pytest
 
-from experiment_manager.attacker.lifecycle import (
+from arena.attacker.lifecycle import (
     AttackerLifecycle,
     AttackerLifecycleError,
     AttackerSignal,
     AttackerCommand,
 )
-from experiment_manager.attacker.plugins.base import AttackerPlugin, PreparedAttacker
+from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
 
 
 class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
@@ -123,7 +123,7 @@ if __name__ == "__main__":
 async def test_run_setup_threads_scoped_access_as_a_parameter():
     """Unified with the defender: the arena passes the scoped foothold SetupAccess to run_setup as a
     PARAMETER (not via an experiment._attacker_access attribute), and it reaches setup()."""
-    from experiment_manager.attacker.env_spec import SetupAccess
+    from arena.attacker.env_spec import SetupAccess
 
     seen = {}
     class _Probe(AttackerPlugin, config_type="_probe_access_param"):
@@ -138,5 +138,5 @@ async def test_run_setup_threads_scoped_access_as_a_parameter():
 
     # and the base plugin no longer reads the old experiment._attacker_access side-channel
     import inspect
-    from experiment_manager.attacker.plugins import base
+    from arena.attacker.plugins import base
     assert "_attacker_access" not in inspect.getsource(base)

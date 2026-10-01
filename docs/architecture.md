@@ -22,7 +22,7 @@ Each is a plugin: a class that subclasses its system's base (`EnvironmentPlugin`
 
 ## The arena vs. the plugins
 
-`experiment_manager/main.py` is **the arena**. It owns the experiment lifecycle, admission/queueing, and
+`arena/main.py` is **the arena**. It owns the experiment lifecycle, admission/queueing, and
 the status stream — and it drives each system *only* through its base-class interface. It never reaches
 inside a plugin, and no plugin reaches into the arena. That boundary is the whole design: the arena is
 backend-agnostic, and a plugin is free to be as backend-specific as it needs, as long as it honours the

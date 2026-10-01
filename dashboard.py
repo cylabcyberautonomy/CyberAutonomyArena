@@ -421,10 +421,10 @@ if str(_HARNESS_DIR) not in sys.path:
 _ATTACKER_SCHEMAS: dict = {}
 _DEFENDER_SCHEMAS: dict = {}
 try:
-    import experiment_manager.attacker.plugins   # triggers __init_subclass__ registration
-    import experiment_manager.defender.plugins
-    from experiment_manager.attacker.plugins.base import AttackerPlugin as _AtkBase
-    from experiment_manager.defender.plugins.base import DefenderPlugin as _DefBase
+    import arena.attacker.plugins   # triggers __init_subclass__ registration
+    import arena.defender.plugins
+    from arena.attacker.plugins.base import AttackerPlugin as _AtkBase
+    from arena.defender.plugins.base import DefenderPlugin as _DefBase
     for _t, _cls in _AtkBase._registry.items():
         try:
             _ATTACKER_SCHEMAS[_t] = dict(_cls.ui_schema())

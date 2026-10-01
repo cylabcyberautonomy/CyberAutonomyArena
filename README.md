@@ -1,4 +1,4 @@
-# Experiment Harness
+# CyberAutonomy Arena
 
 A dashboard and backend for running attacker/defender experiments across network environments.
 
@@ -6,7 +6,7 @@ A dashboard and backend for running attacker/defender experiments across network
 
 ```
 dashboard.py          — browser UI (port 8080 by default)
-experiment_manager/   — FastAPI backend (port 8000)
+arena/   — FastAPI backend (port 8000)
   main.py             — orchestrates experiment lifecycle
   config.py           — loads config.yaml
   attacker/plugins/   — attacker plugin implementations
@@ -33,7 +33,7 @@ uv sync
 **3. Start the experiment manager** (backend)
 
 ```bash
-uv run uvicorn experiment_manager.main:app --port 8000
+uv run uvicorn arena.main:app --port 8000
 ```
 
 On startup the manager tears down any leftover OpenStack resources and clears the registry, so start it before submitting anything.
@@ -132,10 +132,10 @@ Each plugin must implement `ui_schema()`, which declares what configuration opti
 
 ### Attacker plugin
 
-Create a new package under `experiment_manager/attacker/plugins/<your_plugin>/`:
+Create a new package under `arena/attacker/plugins/<your_plugin>/`:
 
 ```
-experiment_manager/attacker/plugins/
+arena/attacker/plugins/
   my_attacker/
     __init__.py      ← leave empty or re-export the class
     my_attacker.py   ← plugin implementation
@@ -210,10 +210,10 @@ Key points:
 
 ### Defender plugin
 
-Create a new package under `experiment_manager/defender/plugins/<your_plugin>/`:
+Create a new package under `arena/defender/plugins/<your_plugin>/`:
 
 ```
-experiment_manager/defender/plugins/
+arena/defender/plugins/
   my_defender/
     __init__.py
     my_defender.py
