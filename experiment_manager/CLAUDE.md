@@ -53,7 +53,7 @@ experiment_manager/
   main.py            the arena: the experiment lifecycle + admission/queueing
   config.py          ExperimentManagerConfig (paths, limits, backend selection)
   experiment/        the Experiment model + its persisted state
-  environment/       environment plugin type + the MHBench implementation   (see environment/CLAUDE.md)
+  environment/       environment plugin type (backend-neutral); MHBench + Ludus under plugins/   (see environment/CLAUDE.md)
   attacker/          attacker plugin type + implementations                  (see attacker/CLAUDE.md)
   defender/          defender plugin type + implementations                  (see defender/CLAUDE.md)
   traffic/           traffic plugin type (implementation pending)

@@ -36,7 +36,6 @@ async def _stop_defender_process(experiment, process) -> None:
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.capacity import CapacityTracker
-from .environment.deployer import resolve_topology_path, defender_box_spec
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -817,7 +816,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     prepared = None
 
     experiment.deployed_environment = DeployedEnvironment(
-        topology_spec=str(resolve_topology_path(experiment.environment_spec, cfg)),
+        topology_spec=experiment.environment.resolve_spec(cfg),  # env plugin resolves its own spec
     )
     await registry.update(experiment)
 
@@ -893,7 +892,8 @@ async def _run_experiment(experiment: Experiment) -> None:
     # configured defender REQUIRES a defender box from the environment. A defenderless env (no defender box,
     # e.g. a non-instrumented topology) is fine when there's no defender — but pairing a defender with such
     # an env is a contract violation, so fail here before any attacker/defender work.
-    if experiment.defender is not None and defender_box_spec(experiment.deployed_environment, cfg) is None:
+    if experiment.defender is not None and not experiment.environment.provides_defender_box(
+            experiment.deployed_environment, cfg):
         await _handle_failure(
             experiment,
             "Interface contract violated: a defender is configured but the environment provides no "

@@ -42,6 +42,13 @@ class EnvironmentPlugin(BaseModel):
     def ui_schema(cls) -> PluginUISchema:
         raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
 
+    # -- what to deploy ----------------------------------------------------
+    def resolve_spec(self, cfg: ExperimentManagerConfig) -> str:
+        """The resolved, canonical identifier of the environment to deploy, which the arena stamps into
+        DeployedEnvironment.topology_spec before provisioning. Default: the raw environment_spec. A
+        backend whose spec needs resolving (MHBench resolves a topology PATH) overrides this."""
+        return getattr(self, "environment_spec", "")
+
     # -- lifecycle ---------------------------------------------------------
     async def capacity(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig
@@ -127,6 +134,13 @@ class EnvironmentPlugin(BaseModel):
         MUST provide one; it is reachable via the defender_setup_access entry of the same name, and is
         hidden from the attacker (management-plane isolation is the environment's responsibility)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_box()")
+
+    def provides_defender_box(self, deployed, cfg: ExperimentManagerConfig) -> bool:
+        """Whether this environment provisioned a REAL defender box for `deployed`. The arena gates its
+        env↔defender contract on this (a configured defender requires a box). Default: true when
+        defender_box() yields one. A backend whose defender_box() falls back to a shared host when no
+        isolated box exists overrides this to report the real box only."""
+        return self.defender_box(deployed, cfg) is not None
 
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         """Open EXACTLY the box ingress the defender declared (ingress = {"telemetry": [ports],

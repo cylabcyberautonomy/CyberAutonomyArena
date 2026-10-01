@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import subprocess
 
-from ..config import ExperimentManagerConfig
+from ....config import ExperimentManagerConfig
 from .deployer import _mhb_config_args
-from ..experiment import Experiment
+from ....experiment import Experiment
 from .deployer import resolve_topology_path
-from ..experiment_log import init_logger, log, output_root
+from ....experiment_log import init_logger, log, output_root
 
 
 def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:

@@ -45,6 +45,8 @@ class DefenderPlugin(BaseModel):
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
         mgmt_ip: Optional[str] = None,
+        defender_env_spec=None,
+        defender_access=None,
     ) -> None:
         """One-time setup this defender needs before it can run (e.g. ensuring shared
         infrastructure like Elasticsearch is up, installing Falco on the experiment's
@@ -56,7 +58,15 @@ class DefenderPlugin(BaseModel):
         `mgmt_ip` is this experiment's own bastion floating IP (from MHBench
         provisioning) - NOT the same as cfg.host_ip (the harness's own fixed
         address, used for Elasticsearch). Any AnsibleRunner use needs THIS one to
-        SSH-ProxyCommand into the experiment's internal hosts at all."""
+        SSH-ProxyCommand into the experiment's internal hosts at all.
+
+        `defender_env_spec` (agent-facing: host inventory + the defender box) and
+        `defender_access` (harness-only: scoped key + bastion routing per host, a
+        list[SetupAccess]) are produced by the ENVIRONMENT plugin and passed in so a
+        defender that needs the box/victims at setup time reads them from here instead
+        of reaching into a specific backend's deployer. They are the same values the
+        arena injects into build_config()'s output for the runner; default None for
+        defenders whose setup() doesn't need them."""
 
     async def teardown(
         self,

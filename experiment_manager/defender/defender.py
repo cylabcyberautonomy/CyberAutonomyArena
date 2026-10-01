@@ -51,7 +51,8 @@ async def run_defender(
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    await defender.setup(experiment_name, environment, cfg, mgmt_ip)
+    await defender.setup(experiment_name, environment, cfg, mgmt_ip,
+                         defender_env_spec=defender_env_spec, defender_access=defender_access)
     built = defender.build_config(experiment_name, environment)
     # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
     # routing per victim), both produced by the environment plugin. A migrated defender reads these

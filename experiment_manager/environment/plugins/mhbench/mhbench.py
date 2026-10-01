@@ -10,14 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
-from ...config import ExperimentManagerConfig
-from ...ui_schema import PluginUISchema
-from ..models import DeployedEnvironment
-from ..lifecycle import EnvironmentLifecycle, EnvironmentSignal
-from .base import EnvironmentPlugin
+from ....config import ExperimentManagerConfig
+from ....ui_schema import PluginUISchema
+from ...models import DeployedEnvironment
+from ...lifecycle import EnvironmentLifecycle, EnvironmentSignal
+from ..base import EnvironmentPlugin
 
 if TYPE_CHECKING:
-    from ...experiment import Experiment
+    from ....experiment import Experiment
 
 
 class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
@@ -30,6 +30,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     def spec(self) -> str:
         """The short env label (Incalmo's env name) — the topology file's stem."""
         return Path(self.environment_spec).stem
+
+    def resolve_spec(self, cfg: ExperimentManagerConfig) -> str:
+        """The resolved, canonical deploy identifier — MHBench's absolute topology path (the arena
+        stamps this into DeployedEnvironment.topology_spec before provisioning)."""
+        from .deployer import resolve_topology_path
+        return str(resolve_topology_path(self.environment_spec, cfg))
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -46,8 +52,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     async def capacity(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig
     ) -> list[tuple[int, int, int]]:
-        from ..capacity import count_vm_specs
-        from ..deployer import resolve_topology_path
+        from .capacity import count_vm_specs
+        from .deployer import resolve_topology_path
         topology_path = resolve_topology_path(self.environment_spec, cfg)
         return await count_vm_specs(topology_path, cfg.mhbench_dir,
                                     flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
@@ -56,7 +62,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         self, experiment: "Experiment", c2c_url: Optional[str], cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> tuple[DeployedEnvironment, Optional[str]]:
-        from ..deployer import provision_environment
+        from .deployer import provision_environment
         if lc:
             lc.emit(EnvironmentSignal.DEPLOYING)
         try:
@@ -77,8 +83,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        from ..deployer import configure_environment
-        from ..rotate import rotate_environment
+        from .deployer import configure_environment
+        from .rotate import rotate_environment
         if lc:
             lc.emit(EnvironmentSignal.CONFIGURING)
         try:
@@ -100,16 +106,16 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             lc.emit(EnvironmentSignal.CONFIGURED)
 
     async def collect(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
-        from ..collect import collect_environment
+        from .collect import collect_environment
         await collect_environment(experiment, cfg)
 
     # -- spec production (the environment is the producer of the agent-facing specs + setup access) --
     def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
-        from ..deployer import attacker_env_spec
+        from .deployer import attacker_env_spec
         return attacker_env_spec(deployed, cfg)
 
     def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import attacker_setup_access, _bastion_proxy_args
+        from .deployer import attacker_setup_access, _bastion_proxy_args
         # The env ISSUES the attacker's scoped credential (foothold-only). Both hops in SetupAccess use
         # it: the final hop opens a shell on the foothold, and the bastion hop tunnels with the SAME key
         # (forward-only on the bastion). The broad management key never enters SetupAccess — assume a
@@ -120,14 +126,14 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
                 for a in attacker_setup_access(deployed, mgmt_ip, cfg)]
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_env_spec
+        from .deployer import defender_env_spec
         spec = defender_env_spec(deployed, cfg)
         spec.box = self.defender_box(deployed, cfg)  # every env provides the defender box
         return spec
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
-        from ...attacker.env_spec import SetupAccess
+        from .deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
+        from ....attacker.env_spec import SetupAccess
         cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
         # Both hops use the scoped defender key: final hop = shell on box/victims, bastion hop = tunnel
         # with the same key (forward-only on the bastion). No management key in SetupAccess (a plugin may
@@ -163,8 +169,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
-        from ..deployer import defender_box_spec
-        from ...defender.env_spec import DefenderBox
+        from .deployer import defender_box_spec
+        from ....defender.env_spec import DefenderBox
         # Real, isolated box from the topology's defender_subnet (provisioned by MHBench, live-validated).
         box = defender_box_spec(deployed, cfg)
         if box:
@@ -172,10 +178,18 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         # Fallback for topologies without a defender_subnet: co-locate on the (attacker-hidden) mgmt host.
         return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
 
+    def provides_defender_box(self, deployed, cfg: ExperimentManagerConfig) -> bool:
+        """Whether a REAL, isolated defender box exists (the topology declared a defender_subnet). The
+        arena's env↔defender contract check gates on this. Distinct from defender_box() above, which
+        falls back to the mgmt host so a defender always has *somewhere* to run — that fallback must not
+        satisfy the contract, so this checks the real box only."""
+        from .deployer import defender_box_spec
+        return defender_box_spec(deployed, cfg) is not None
+
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay
         # dests for telemetry ports; mgmt forward + SG for forward ports). No-op for {} — box isolated.
-        from ..deployer import request_ingress_env
+        from .deployer import request_ingress_env
         await request_ingress_env(experiment, mgmt_ip, cfg, ingress)
 
     async def _teardown_decoys(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
@@ -225,7 +239,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        from ..teardown import teardown_environment
+        from .teardown import teardown_environment
         if lc:
             lc.emit(EnvironmentSignal.TEARING_DOWN)
         # Sweep stray decoy VMs on this experiment's networks first, so the network teardown below doesn't

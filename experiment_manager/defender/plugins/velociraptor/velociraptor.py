@@ -82,6 +82,8 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
         mgmt_ip: Optional[str] = None,
+        defender_env_spec=None,
+        defender_access=None,
     ) -> None:
         if mgmt_ip is None:
             raise RuntimeError("Velociraptor defender needs the experiment bastion IP (mgmt_ip).")
@@ -93,17 +95,17 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             # environment.topology_spec is the canonical path the deployer used.
             topology_path = Path(environment.topology_spec) if environment else topology_path
 
-        # The server now runs ON the defender box (not the bastion). Get the box's IP + the SCOPED
-        # defender_key + bastion routing from the environment's SetupAccess (matched by box.ip) — the
-        # same scoped access every other defender uses. The box + victims all sit behind the bastion,
-        # so the deploy reaches both via that scoped-key ProxyCommand.
-        from ....environment import deployer as _env_deployer
-        box = _env_deployer.defender_box_spec(environment, cfg)
+        # The server runs ON the defender box. Read the box + the SCOPED defender access (key + bastion
+        # routing) from the env-produced specs the arena injected (defender_env_spec / defender_access) —
+        # NOT a specific backend's deployer — so this stays environment-agnostic. The box + victims sit
+        # behind the bastion, so the deploy reaches both via that scoped-key ProxyCommand. This is the
+        # same access the other defenders read out of their injected config (see base.prepare_box_es).
+        box = getattr(defender_env_spec, "box", None)
         if not (box and box.ip):
-            raise RuntimeError("Velociraptor requires a defender box, but the environment provides none.")
+            raise RuntimeError(
+                "Velociraptor requires a defender box, but defender_env_spec provides none.")
         box_ip = str(box.ip)
-        access = _env_deployer.defender_setup_access(environment, mgmt_ip, cfg)
-        box_access = next((a for a in access if str(a.host) == box_ip), None)
+        box_access = next((a for a in (defender_access or []) if str(a.host) == box_ip), None)
         if not box_access or not box_access.ssh_key:
             raise RuntimeError(f"no SetupAccess entry with an ssh_key for the defender box {box_ip}")
         scoped_key = box_access.ssh_key

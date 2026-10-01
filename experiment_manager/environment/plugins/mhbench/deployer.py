@@ -8,10 +8,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from ..config import ExperimentManagerConfig
-from .models import DeployedEnvironment
-from ..experiment import Experiment
-from ..experiment_log import init_logger, log, output_root
+from ....config import ExperimentManagerConfig
+from ...models import DeployedEnvironment
+from ....experiment import Experiment
+from ....experiment_log import init_logger, log, output_root
 
 
 # Matches a Python exception summary line, e.g. "RuntimeError: mgmt FIP host key never matched ...".
@@ -78,7 +78,7 @@ _KALI_FOOTHOLD = "kali"  # logical name for the attacker's foothold (MHBench's k
 def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
     """Build the adversary-safe AttackerEnvSpec (objective + foothold identity only — no keys, no
     bastion routing)."""
-    from ..attacker.env_spec import AttackerEnvSpec, AttackerFoothold  # lazy: avoid import cycle
+    from ....attacker.env_spec import AttackerEnvSpec, AttackerFoothold  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     return AttackerEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
@@ -90,7 +90,7 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
     """Build the harness-only SetupAccess for the attacker's foothold (how to reach it to prep it —
     key + routing through the bastion). Never given to the adversary. ssh_common_args routes through
     the bastion via ProxyCommand; the plugin stamps in the scoped attacker key."""
-    from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     if not kali_ip:
         return []
@@ -139,7 +139,7 @@ def _defender_box_host(topology_path: Path) -> Optional[dict]:
 def defender_box_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
     """The agent-facing DefenderBox derived from the topology's defender_subnet, or None if absent.
     Single source of truth for both defender_env_spec().box and the plugin's defender_box()."""
-    from ..defender.env_spec import DefenderBox  # lazy: avoid import cycle
+    from ....defender.env_spec import DefenderBox  # lazy: avoid import cycle
     topo = deployed.topology_spec if deployed else None
     if not (topo and Path(topo).exists()):
         return None
@@ -296,7 +296,7 @@ async def inject_scoped_keys_env(experiment: Experiment, mgmt_ip: Optional[str],
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
     """Build the agent-facing DefenderEnvSpec (objective + host inventory at the defender's knowledge
     level — no creds/routing). Carries topology_spec, which the defender runners read."""
-    from ..defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
+    from ....defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
     hosts = []
     topo = deployed.topology_spec if deployed else None
     if topo and Path(topo).exists():
@@ -315,7 +315,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
 def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
     """Build the harness-only SetupAccess for each victim the defender may reach — key + bastion
     routing. Never given to the defender's brain; the plugin stamps in the scoped defender key."""
-    from ..attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
     topo = deployed.topology_spec if deployed else None
     if not (topo and Path(topo).exists()):
         return []

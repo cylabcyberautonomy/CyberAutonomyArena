@@ -3,12 +3,21 @@
 An environment plugin deploys and tears down the network an experiment runs on. It also sizes that
 network for submission (to allow for parallel experimentation), and produces everything the attacker and defender need to reach it.
 
-To create an environment, create a Python file in `plugins/`. Initialize a class that is subclassed
-under `EnvironmentPlugin` (`plugins/base.py`) with a `config_type`. 
-
+To create an environment, add a module (or package) under `plugins/`, with a class subclassed under
+`EnvironmentPlugin` (`plugins/base.py`) and a `config_type`. The environment package ROOT is
+backend-neutral — it holds only the interface (`plugins/base.py`), the config (`environment.py`), the
+shared models/lifecycle (`models.py`, `lifecycle.py`), the admission gate (`capacity.py:CapacityTracker`),
+and the factory (`__init__.py`). A backend's whole implementation lives inside ITS plugin, never at the
+root; MHBench is just one plugin, not the environment interface.
 
 Existing plugins:
-- `plugins/mhbench.py` - <put a better description of MHBench here other than wraps the existing deployer>.
+- `plugins/mhbench/` — the MHBench backend: deploys an MHBench topology (OpenStack or GCP) as the
+  experiment's network. A package, because the implementation is substantial — `deployer.py`
+  (provision/configure + spec/access production), `capacity.py` (`count_vm_specs` topology sizing),
+  `collect.py`/`rotate.py`/`teardown.py` (log collection, pre-attack log rotation, teardown), and
+  `mhbench.py` (the `EnvironmentPlugin` that delegates to them). Selected by a bare topology-path string.
+- `plugins/ludus.py` — a second backend (Ludus/Proxmox), a stub that implements the full spec/infra
+  interface offline to prove the interface is backend-agnostic. Lifecycle methods raise until wired.
 
 ## Lifecycle the arena drives
 

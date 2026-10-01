@@ -237,7 +237,7 @@ def test_foothold_access_is_harness_only_and_carries_routing():
 def test_environment_produces_both_spec_and_access():
     """The environment serves up the adversary-safe spec AND the harness-only access — the arena
     hands each to the right place; the attacker never parses topology."""
-    from experiment_manager.environment import deployer
+    from experiment_manager.environment.plugins.mhbench import deployer
     assert callable(deployer.attacker_env_spec)
     assert callable(deployer.attacker_setup_access)
 
@@ -681,9 +681,9 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
 
 
 def test_environment_module_exposes_lifecycle():
-    """The environment is not a plugin yet, but the arena drives it through these module
-    functions. The refactor should turn these into a plugin with the same lifecycle."""
-    from experiment_manager.environment import deployer, collect, teardown
+    """MHBench is one environment plugin; its deploy/collect/teardown implementation lives under
+    environment/plugins/mhbench/ (not the backend-neutral environment package root)."""
+    from experiment_manager.environment.plugins.mhbench import deployer, collect, teardown
     assert callable(deployer.provision_environment)
     assert callable(deployer.configure_environment)
     assert callable(collect.collect_environment)
@@ -742,7 +742,7 @@ def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
     """The environment's defender-relevant spec: defender_box_spec() reports the defender box (or None) in the deployed
     topology includes a defender box. The arena uses it to enforce 'a configured defender requires a
     defender box from the environment' — the check is the ARENA's, not the defender plugin's."""
-    from experiment_manager.environment.deployer import defender_box_spec
+    from experiment_manager.environment.plugins.mhbench.deployer import defender_box_spec
 
     base = {"networks": [{"name": "victims", "subnets": [
         {"name": "webserver_subnet", "cidr": "192.168.200.0/24",
@@ -765,7 +765,7 @@ def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
 def test_defender_box_spec_none_when_no_env():
     """No deployed environment (or no topology) => cannot assert a box, so the contract check will fail
     a defender run rather than assume one exists."""
-    from experiment_manager.environment.deployer import defender_box_spec
+    from experiment_manager.environment.plugins.mhbench.deployer import defender_box_spec
     assert defender_box_spec(None, None) is None
 
 
