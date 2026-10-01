@@ -87,6 +87,22 @@ def _free_local_port() -> int:
         s.close()
 
 
+def _wait_for_port(host: str, port: int, timeout: int = 60) -> bool:
+    """Poll a TCP connect until the port accepts (the ssh -L local end is bound) or timeout. The tunnel
+    supervisor's ssh takes a few seconds to connect through the bastion + bind the local port; dialing
+    the operator gRPC before that = 'Connection refused' at 127.0.0.1:<port> (observed live, run 6)."""
+    import socket
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                return True
+        except OSError:
+            _t.sleep(1)
+    return False
+
+
 async def _run_sliver_ops(cfg, subcmd: str, args: list[str], timeout: int = 300) -> tuple[int, str]:
     """Run _sliver_ops.py under the dedicated sliver venv (it has sliver-py; the manager venv does not).
     Returns (returncode, stdout)."""
@@ -169,9 +185,18 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
     cfg_json["lport"] = local_port
     cfg_json["lhost"] = "127.0.0.1"
     operator_cfg.write_text(json.dumps(cfg_json))
-    tunnel = _open_tunnel(access, local_port, _GRPC_PORT)
+    tunnel_log = work / "tunnel.log"
+    tunnel = _open_tunnel(access, local_port, _GRPC_PORT, tunnel_log)
 
     try:
+        # 4b. Wait for the ssh -L local port to come up before dialing the operator gRPC through it. The
+        #     supervisor's ssh needs a few seconds to connect through the bastion + bind the port, so
+        #     dialing immediately = "Connection refused" at 127.0.0.1:<port> (observed live, run 6).
+        loop = asyncio.get_event_loop()
+        if not await loop.run_in_executor(None, _wait_for_port, "127.0.0.1", local_port, 60):
+            tail = tunnel_log.read_text()[-500:] if tunnel_log.exists() else "(no tunnel log)"
+            raise RuntimeError(f"[sliver-c2] operator-gRPC tunnel 127.0.0.1:{local_port} never came up; tunnel log: {tail}")
+
         # 5. Via sliver-py (the helper, under the sliver venv): start the mTLS listener on the foothold
         #    and generate a session-mode implant, saved locally. VALIDATE: _sliver_ops.provision.
         implant = work / "implant"
@@ -205,9 +230,11 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
     return SliverPreparedC2(operator_cfg=str(operator_cfg), listener_addr=listener_addr, control_port=local_port)
 
 
-def _open_tunnel(access: SetupAccess, local_port: int, remote_port: int) -> subprocess.Popen:
+def _open_tunnel(access: SetupAccess, local_port: int, remote_port: int, log_path: Path) -> subprocess.Popen:
     """Resilient ssh -L 127.0.0.1:<local_port> -> 127.0.0.1:<remote_port> on the foothold, through the
-    bastion. Supervised auto-reconnect, same shape as c2.py's tunnel."""
+    bastion. Supervised auto-reconnect, same shape as c2.py's tunnel. The supervisor's stdout/stderr go
+    to log_path (NOT /dev/null) so a failing/looping ssh -L is diagnosable (ExitOnForwardFailure, a
+    rejected forward, a bad jump, etc.) — the caller reads its tail if the local port never comes up."""
     ssh_tunnel = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
                   "-o", "ServerAliveCountMax=6", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
                   "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-p", str(access.port)]
@@ -217,8 +244,11 @@ def _open_tunnel(access: SetupAccess, local_port: int, remote_port: int) -> subp
         ssh_tunnel += shlex.split(access.ssh_common_args)
     ssh_tunnel += ["-L", f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}", f"{access.user}@{access.host}"]
     supervisor = "while true; do " + " ".join(shlex.quote(a) for a in ssh_tunnel) + "; sleep 2; done"
-    return subprocess.Popen(["bash", "-c", supervisor], stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+    log_f = open(log_path, "a")
+    log_f.write("=== tunnel supervisor: " + " ".join(shlex.quote(a) for a in ssh_tunnel) + " ===\n")
+    log_f.flush()
+    return subprocess.Popen(["bash", "-c", supervisor], stdout=log_f,
+                            stderr=subprocess.STDOUT, start_new_session=True)
 
 
 def _kill_pid(pid: int) -> None:
