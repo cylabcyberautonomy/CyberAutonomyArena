@@ -89,7 +89,11 @@ perry_cfg.experiment_name = experiment_name
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
 es_url = config["es_url"]
-es_conn = Elasticsearch(es_url)
+# request_timeout=30 (not the 10s default): this run's box ES is installed + started FRESH in
+# prepare(), and its first indices.create() can take >10s while the single-node cluster finishes
+# forming (the HTTP port answers a GET before the cluster is ready for index ops). The 10s default
+# timed out a cold box ES during live validation; 30s clears the cold-start window.
+es_conn = Elasticsearch(es_url, request_timeout=30)
 falco_index = config.get("falco_index", "falco")
 sysflow_index = config.get("sysflow_index", "sysflow")
 
