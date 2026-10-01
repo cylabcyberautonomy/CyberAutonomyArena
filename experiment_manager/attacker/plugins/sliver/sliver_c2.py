@@ -127,19 +127,27 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
     if rc != 0:
         raise RuntimeError(f"[sliver-c2] sliver-server install on foothold failed (rc={rc}): {out[-500:]}")
 
-    # 2. Start the sliver-server daemon (operator gRPC up on :31337). VALIDATE: daemon flags / unit name.
+    # 2. Start the sliver-server daemon (operator gRPC up on :31337). The installer may already start it;
+    #    pgrep-guard so we don't double-run. Use the ABSOLUTE binary path: the installer drops the binary
+    #    at /root/sliver-server and does NOT put it on PATH (confirmed live).
     await _ssh_run(access,
+        'SS="$(command -v sliver-server 2>/dev/null || echo /root/sliver-server)"; '
         "pgrep -f 'sliver-server daemon' >/dev/null || "
-        "(setsid sliver-server daemon >/var/log/sliver-server.log 2>&1 < /dev/null &)", timeout=120)
+        '(setsid "$SS" daemon >/var/log/sliver-server.log 2>&1 < /dev/null &)', timeout=120)
 
-    # 3. Generate an operator config on the foothold and pull it back. VALIDATE: exact `operator` flags
-    #    + that --lhost 127.0.0.1 is accepted (we connect via the tunnel, so the config must point local).
-    await _ssh_run(access,
-        "sliver-server operator --name op --lhost 127.0.0.1 --save /tmp/op.cfg && cat /tmp/op.cfg",
+    # 3. Generate an operator config on the foothold and pull it back. Two things confirmed live and both
+    #    required: the absolute binary path (not on PATH), and `--permissions all` (without it sliver-server
+    #    errors "Must specify --permissions" and writes nothing). --lhost 127.0.0.1 is cosmetic here — step 4
+    #    overwrites lhost/lport to point the client at the tunnel. Capture the operator stderr so a future
+    #    failure shows the real cause, not just the missing-file cat.
+    rc0, out0 = await _ssh_run(access,
+        'SS="$(command -v sliver-server 2>/dev/null || echo /root/sliver-server)"; '
+        '"$SS" operator --name op --lhost 127.0.0.1 --permissions all --save /tmp/op.cfg',
         timeout=120)
     rc, cfg_text = await _ssh_run(access, "cat /tmp/op.cfg", timeout=60)
     if rc != 0 or not cfg_text.strip().startswith("{"):
-        raise RuntimeError(f"[sliver-c2] could not read operator config from foothold: {cfg_text[-300:]}")
+        raise RuntimeError(f"[sliver-c2] could not read operator config (operator rc={rc0}): "
+                           f"{out0[-300:]} | cat: {cfg_text[-200:]}")
     operator_cfg = work / "operator.cfg"
 
     # 4. Open the harness->foothold tunnel for the operator gRPC (foothold has no FIP). Rewrite the
