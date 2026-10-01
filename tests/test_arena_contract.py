@@ -40,6 +40,8 @@ import pytest
 import arena.attacker.plugins  # noqa: F401
 import arena.defender.plugins  # noqa: F401
 import arena.traffic.plugins   # noqa: F401
+import arena.environment.plugins  # noqa: F401 — populate the env registry for registry-driven params
+from arena.environment.plugins.base import EnvironmentPlugin
 from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
 from arena.attacker.plugins.incalmo.incalmo import IncalmoPreparedC2
 from arena.defender.plugins.base import DefenderPlugin
@@ -56,6 +58,17 @@ ATTACKER_PLUGIN = "incalmo_strategy"          # the (plugin, spec) pair — the 
 ATTACKER_SPEC = {"strategy": "GraphSearch"}   # inline spec dict (may also be a path to a JSON/YAML file)
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
 TRAFFIC = {"type": "caldera_human", "persona": "office_worker"}
+
+# A representative environment_spec per backend, so the env security invariants below run over EVERY
+# registered environment plugin — not just mhbench. A newly-registered backend with no sample here is
+# yielded with spec_val=None and fails the test loudly: its security coverage must be wired, never
+# silently skipped. (ENV_SPEC is defined just below; this list is built lazily in _env_security_params.)
+ENV_SAMPLE_SPECS = {"mhbench": "environments/non-generated/equifax_small.json"}
+
+
+def _env_security_params():
+    """(plugin_name, sample_spec) for every registered env plugin — the registry is the source of truth."""
+    return [(name, ENV_SAMPLE_SPECS.get(name)) for name in sorted(EnvironmentPlugin._registry)]
 
 FAKE_ENV = DeployedEnvironment(
     topology_spec="/tmp/equifax_small.json",
@@ -611,16 +624,18 @@ def _deployed_for(plugin_name):
     return None
 
 
-@pytest.mark.parametrize("plugin_name,spec_val", [
-    ("mhbench", ENV_SPEC),
-])
+@pytest.mark.parametrize("plugin_name,spec_val", _env_security_params())
 def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     """The always-provisioned defender box + the telemetry-relay routing are GENERIC environment
-    guarantees — part of the EnvironmentPlugin interface, not MHBench-specific hacks."""
+    guarantees — part of the EnvironmentPlugin interface, not MHBench-specific hacks. Runs over every
+    registered env backend."""
     from arena.environment import build_environment
     from arena.defender.env_spec import DefenderBox, DefenderEnvSpec
     from arena.attacker.env_spec import AttackerEnvSpec
 
+    if spec_val is None:
+        pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
+                    f"infra guarantees are covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
     cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"))
 
@@ -648,15 +663,16 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     assert any(a.name == box.name for a in dacc)
 
 
-@pytest.mark.parametrize("plugin_name,spec_val", [
-    ("mhbench", ENV_SPEC),
-])
+@pytest.mark.parametrize("plugin_name,spec_val", _env_security_params())
 def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     """The environment issues SEPARATE per-system credentials (no single god-key): the attacker key is
     scoped to its foothold only, the defender key to the defender box + victims (not the foothold).
     INVARIANT: no credential in a system's SetupAccess grants access that system couldn't legitimately
-    earn — attacker key opens its box and nothing else."""
+    earn — attacker key opens its box and nothing else. Runs over every registered env backend."""
     from arena.environment import build_environment
+    if spec_val is None:
+        pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
+                    f"scoped-credential invariant is covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
     cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"),
                           mhbench_config=None)

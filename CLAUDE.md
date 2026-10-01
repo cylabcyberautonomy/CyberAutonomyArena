@@ -60,6 +60,15 @@ A consequence: a non-environment plugin should be **backend-agnostic** — it co
 scoped access, and where it must act on the cloud it expresses intent the environment executes, rather
 than parsing a backend's topology or branching on the backend.
 
+**The runner-config contract (attacker + defender).** An attacker/defender plugin's `build_config()`
+emits the dict its runner reads. Declare the keys the runner REQUIRES as
+`REQUIRED_CONFIG_KEYS = frozenset({...})` on the plugin class (an un-annotated class attribute — the base
+types it as a `ClassVar`, so it is not a pydantic field). The arena calls `validate_built_config()` right
+after `build_config()` and fails the experiment early with a precise message if a key is missing (instead
+of a `KeyError` deep in the run), and `tests/test_plugin_conformance.py` enforces it generically + pins the
+per-plugin set in one data table. Declare only keys `build_config()` ALWAYS emits (not per-config-optional
+ones, and not the arena-injected defender keys like `defender_env_spec`).
+
 **Plugin self-containment.** Machinery used by *all* plugins of a type goes on the base class; machinery
 used by a *subset* is **copied into each** plugin (not put on the base, which would foist it on plugins
 that don't use it, and not shared via a cross-plugin helper module). The one exception is code shared by
@@ -70,8 +79,15 @@ standalone *runner scripts* (which can't inherit a base) — that stays a module
 pytest tests/
 ```
 - `tests/test_arena_contract.py` — the 4-system contract (registration, config round-trip,
-  `build_config`/`ui_schema` shapes).
-- `tests/test_attacker_lifecycle.py` — the setup → ready → running → stopping → stopped handshake.
+  `build_config`/`ui_schema` shapes) for the specific named baseline plugins.
+- `tests/test_plugin_conformance.py` — registry-driven smoke tests: iterates EVERY registered plugin of
+  each type and holds it to the shared base-class contract (instantiable, `ui_schema` well-formed,
+  lifecycle methods present + right async-ness, `build_config` serializable + no credential leak). A new
+  plugin is checked automatically; a failure names the plugin and lists every problem at once.
+- `tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
+- `tests/test_defender_lifecycle.py` — the defender handshake + the `wait_until_ready` readiness-marker gate
+  (returns on the marker, raises if the runner dies first or arming times out).
+- `tests/test_traffic_lifecycle.py` — the traffic no-op-default coroutines + the arena's drive order.
 - `tests/test_no_god_key.py` — the scoped-key regression guard.
 
 There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud + LLM

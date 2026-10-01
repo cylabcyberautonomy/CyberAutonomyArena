@@ -37,6 +37,7 @@ _OBJECTIVE = (
 
 class C2LLMAttacker(_IncalmoAttacker, config_type="c2_llm"):
     type: Literal["c2_llm"]
+    REQUIRED_CONFIG_KEYS = frozenset({"c2c_server", "model", "objective", "max_turns"})
     # OpenAI-compatible model name + endpoint (the runner uses the OpenAI SDK). Point api_base at
     # OpenAI, OpenRouter (serves Claude/others), a self-hosted proxy, etc.; api_key_env names the env
     # var the harness has loaded the key into (.env -> os.environ, inherited by the runner subprocess).

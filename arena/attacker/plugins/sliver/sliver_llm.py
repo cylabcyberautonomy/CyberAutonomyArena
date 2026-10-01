@@ -54,6 +54,7 @@ def _preflight_sliver_venv(cfg: ExperimentManagerConfig) -> None:
 
 class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
     type: Literal["sliver_llm"]
+    REQUIRED_CONFIG_KEYS = frozenset({"operator_cfg", "listener_addr", "model", "objective", "max_turns"})
     model: str = "gpt-5"
     api_base: Optional[str] = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -64,6 +65,11 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
     # setups currently run ungated. Revisit if concurrent Sliver bring-ups storm the bastion (the gate
     # should key on a "bastion-heavy setup" flag, not requires_docker).
     requires_docker: ClassVar[bool] = False
+
+    @classmethod
+    def example_prepared(cls) -> PreparedAttacker:
+        """build_config() reads the Sliver C2 coordinates off its own baton — fill one in for offline tests."""
+        return SliverPreparedC2(operator_cfg="/tmp/operator.cfg", listener_addr="192.0.2.1:8443")
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
         _preflight_sliver_venv(cfg)

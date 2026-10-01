@@ -148,6 +148,11 @@ class _IncalmoAttacker(AttackerPlugin):
     # The C2 image is built with Docker on the harness host before it is shipped to the foothold.
     requires_docker: ClassVar[bool] = True
 
+    @classmethod
+    def example_prepared(cls) -> PreparedAttacker:
+        """build_config() reads the C2 URLs off its own baton — hand it a filled-in one for offline tests."""
+        return IncalmoPreparedC2(local_url="http://127.0.0.1:8888", remote_url="http://foothold:8888")
+
     async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
@@ -202,6 +207,8 @@ _MSF_STRATEGIES = {"MsfBindTestStrategy"}
 
 class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
     type: Literal["incalmo_strategy"]
+    REQUIRED_CONFIG_KEYS = frozenset(
+        {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
     strategy: str  # e.g. "GraphSearch", "Darkside", "EquifaxStrategy"
     script_path: Optional[str] = None  # action_script.json path, required by OptimalReplayStrategy
 
@@ -293,6 +300,8 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
 
 class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     type: Literal["incalmo_llm"]
+    REQUIRED_CONFIG_KEYS = frozenset(
+        {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
     planning_llm: str
     # Only the agent_* abstractions consume execution_llm (see _AGENT_ABSTRACTIONS
     # and the show_when gate below).  Optional so the dashboard can omit it for

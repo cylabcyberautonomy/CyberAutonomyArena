@@ -29,6 +29,13 @@ class PreparedAttacker:
 class AttackerPlugin(BaseModel):
     _registry: ClassVar[dict[str, type["AttackerPlugin"]]] = {}
 
+    # Keys this plugin's runner REQUIRES in build_config()'s output — the plugin↔runner contract, declared
+    # as data. The arena validates build_config()'s output against this before writing the config file (so
+    # a drift fails fast with a precise message, not a KeyError deep in the run), and the conformance test
+    # (tests/test_plugin_conformance.py) checks it generically. Empty = no declared contract (only
+    # well-formedness is checked). Declare only ALWAYS-emitted keys; per-config-optional keys stay out.
+    REQUIRED_CONFIG_KEYS: ClassVar[frozenset[str]] = frozenset()
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -37,6 +44,30 @@ class AttackerPlugin(BaseModel):
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
         raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
+
+    @classmethod
+    def example_prepared(cls) -> "PreparedAttacker":
+        """A representative PreparedAttacker for exercising build_config() OFFLINE — without running
+        setup() or a cloud/C2. The default bare baton suits attackers whose build_config() ignores
+        `prepared`; an attacker that reads setup state off its own PreparedAttacker subclass (e.g. a
+        C2's URLs) overrides this to return a filled-in instance, so that the coupling is discoverable
+        and conformance tests (tests/test_plugin_conformance.py) can build its config without setup()."""
+        return PreparedAttacker()
+
+    @classmethod
+    def validate_built_config(cls, built: dict) -> None:
+        """Assert build_config()'s output carries every key the runner requires (REQUIRED_CONFIG_KEYS).
+        Called by the arena right after build_config(), so a plugin whose config drifts from what its
+        runner reads fails the experiment immediately with a precise message."""
+        if not cls.REQUIRED_CONFIG_KEYS:
+            return
+        if not isinstance(built, dict):
+            raise ValueError(f"{cls.__name__}.build_config() returned {type(built).__name__}, not a dict")
+        missing = cls.REQUIRED_CONFIG_KEYS - built.keys()
+        if missing:
+            raise ValueError(
+                f"{cls.__name__}.build_config() omitted required key(s) {sorted(missing)} declared in "
+                f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
 
     @abstractmethod
     def build_config(

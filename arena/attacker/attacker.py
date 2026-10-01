@@ -54,6 +54,7 @@ async def run_attacker(
     # The arena never inspects `prepared`: a C2 attacker reads its own C2 URLs off it inside
     # build_config()/run(); a shell agent ignores it. No C2 plumbing threads through the arena.
     built = attacker.build_config(experiment_name, env_spec, prepared)
+    type(attacker).validate_built_config(built)  # fail fast if the config drifts from the runner contract
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
     # run_start launches the process AND emits RUNNING (attacker-emitted; the arena waits for it).

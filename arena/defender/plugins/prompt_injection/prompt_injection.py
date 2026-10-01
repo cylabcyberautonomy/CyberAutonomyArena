@@ -41,6 +41,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     """
 
     type: Literal["prompt_injection"]
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
     # StaticLayeredAll, not AIAttackerDetection. AIAttackerDetection is reactive -
     # it waits on a burst of Falco events and only then deploys - which confounds
     # "all four injection channels" with "reactive timing", so it cannot serve as

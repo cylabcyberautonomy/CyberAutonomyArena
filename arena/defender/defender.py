@@ -54,6 +54,7 @@ async def run_defender(
     await defender.setup(experiment_name, environment, cfg, mgmt_ip,
                          defender_env_spec=defender_env_spec, defender_access=defender_access)
     built = defender.build_config(experiment_name, environment)
+    type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
     # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
     # routing per victim), both produced by the environment plugin. A migrated defender reads these
     # instead of computing its own SSH key / parsing the topology.

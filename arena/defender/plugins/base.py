@@ -16,6 +16,13 @@ from ...ui_schema import PluginUISchema
 class DefenderPlugin(BaseModel):
     _registry: ClassVar[dict[str, type["DefenderPlugin"]]] = {}
 
+    # Keys this plugin's runner REQUIRES in build_config()'s output — the plugin↔runner contract, declared
+    # as data (symmetric with AttackerPlugin). The arena validates build_config()'s output against this
+    # (before it injects the arena-provided keys like defender_env_spec), and the conformance test checks
+    # it generically. Empty = no declared contract. Declare only keys build_config() itself always emits —
+    # NOT the arena-injected ones (defender_env_spec / defender_setup_access / management_ip / …).
+    REQUIRED_CONFIG_KEYS: ClassVar[frozenset[str]] = frozenset()
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -24,6 +31,21 @@ class DefenderPlugin(BaseModel):
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
         raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
+
+    @classmethod
+    def validate_built_config(cls, built: dict) -> None:
+        """Assert build_config()'s output carries every key the runner requires (REQUIRED_CONFIG_KEYS).
+        Called by the arena right after build_config() — before it injects the arena-provided keys — so a
+        plugin whose config drifts from what its runner reads fails fast with a precise message."""
+        if not cls.REQUIRED_CONFIG_KEYS:
+            return
+        if not isinstance(built, dict):
+            raise ValueError(f"{cls.__name__}.build_config() returned {type(built).__name__}, not a dict")
+        missing = cls.REQUIRED_CONFIG_KEYS - built.keys()
+        if missing:
+            raise ValueError(
+                f"{cls.__name__}.build_config() omitted required key(s) {sorted(missing)} declared in "
+                f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
 
     def box_ingress(self) -> dict[str, list[int]]:
         """The defender-requested box-ingress this plugin needs the ENVIRONMENT to open, by kind:

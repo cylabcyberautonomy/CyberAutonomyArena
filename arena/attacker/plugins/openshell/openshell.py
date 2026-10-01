@@ -123,6 +123,8 @@ _DEFAULT_ALLOW_CIDRS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
 class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
     type: Literal["openshell"]
+    REQUIRED_CONFIG_KEYS = frozenset(
+        {"agent", "provider_type", "model", "policy", "objective", "foothold_ip", "agent_cmd_template"})
     agent: Literal["claude", "codex", "opencode"] = "claude"   # the attacker brain OpenShell drives
     model: Optional[str] = None            # agent model string; None -> the agent's per-agent default
     image: Optional[str] = None            # OpenShell agent container image; None -> the per-agent default

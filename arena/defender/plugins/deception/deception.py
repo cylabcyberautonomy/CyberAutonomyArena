@@ -17,6 +17,7 @@ from ..base import DefenderPlugin
 
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     type: Literal["deception"]
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
     strategy: str  # e.g. "DoNothing", "StaticLayered", "ReactiveLayered"
     arsenal: dict[str, int] = {}
 

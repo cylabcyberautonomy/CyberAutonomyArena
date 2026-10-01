@@ -63,6 +63,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     """Velociraptor endpoint DFIR/EDR defender: detection + active response."""
 
     type: Literal["velociraptor"]
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "topology_spec", "response_mode"})
     # off | kill | quarantine | both  — what to do when a kill-chain rule fires.
     response_mode: str = "kill"
     poll_interval: float = 15.0

@@ -40,6 +40,7 @@ _OBJECTIVE = (
 
 class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     type: Literal["terminus_llm"]
+    REQUIRED_CONFIG_KEYS = frozenset({"model", "objective", "foothold_ip", "max_turns"})
     # LiteLLM-style model name (harbor's terminus-2 uses litellm), e.g. "anthropic/claude-opus-4-1".
     model: str = "anthropic/claude-sonnet-4-5"
     api_base: Optional[str] = None   # OpenAI-compatible base URL; None for the model's default provider

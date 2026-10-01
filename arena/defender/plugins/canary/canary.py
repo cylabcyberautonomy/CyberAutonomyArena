@@ -43,6 +43,7 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
     """Diagnostic defender: verifies defender<->environment connectivity end to end."""
 
     type: Literal["canary"]
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "checks", "fail_closed"})
     checks: list[str] = list(_ALL_CHECKS)
     canary_host: Optional[str] = None       # victim name/role for the canary_event read; None = first victim
     telemetry_port: int = 9200

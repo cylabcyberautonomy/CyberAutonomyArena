@@ -27,6 +27,7 @@ _OBJECTIVE = (
 
 class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     type: Literal["cai_llm"]
+    REQUIRED_CONFIG_KEYS = frozenset({"model", "objective", "foothold_ip"})
     model: str = "claude-sonnet-4-5"
     api_base: Optional[str] = None  # OpenAI-compatible base URL (e.g. glm); None for Anthropic
 

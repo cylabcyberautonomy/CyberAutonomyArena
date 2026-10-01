@@ -68,6 +68,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
     """
 
     type: Literal["llm_soc"]
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "llm_model"})
     strategy: str  # "FalcoLLM" or "FalcoLLMC2Block"
     # Default to Sonnet-5 on OpenRouter so it shares a route with the 4.5
     # comparison arm (openrouter/anthropic/claude-sonnet-4.5). See
