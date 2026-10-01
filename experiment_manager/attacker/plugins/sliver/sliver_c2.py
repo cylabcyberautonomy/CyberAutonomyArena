@@ -57,7 +57,7 @@ def _ssh(access: SetupAccess) -> list[str]:
     if access.ssh_key:
         args += ["-i", os.path.expanduser(access.ssh_key)]
     args += ["-p", str(access.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-             "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=15",
              "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
     if access.ssh_common_args:
         args += shlex.split(access.ssh_common_args)
@@ -145,9 +145,19 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
         '"$SS" operator --name op --lhost 127.0.0.1 --permissions all --save /tmp/op.cfg',
         timeout=120)
     rc, cfg_text = await _ssh_run(access, "cat /tmp/op.cfg", timeout=60)
-    if rc != 0 or not cfg_text.strip().startswith("{"):
+    # The SSH transport merges stderr into stdout, so "Permanently added ... to known hosts" warnings
+    # (UserKnownHostsFile=/dev/null over the bastion hop) can PREPEND the config in cfg_text — cat itself
+    # succeeds and the config is intact at the tail. Extract the JSON from the first brace (the config is
+    # one {...} object; the warnings contain no braces) so residual SSH noise can't break parsing.
+    # (LogLevel=ERROR on _ssh suppresses most of it; this is the reliable belt.)
+    brace = cfg_text.find("{")
+    if rc != 0 or brace < 0:
         raise RuntimeError(f"[sliver-c2] could not read operator config (operator rc={rc0}): "
-                           f"{out0[-300:]} | cat: {cfg_text[-200:]}")
+                           f"{out0[-300:]} | cat tail: {cfg_text[-200:]}")
+    try:
+        cfg_json = json.loads(cfg_text[brace:])
+    except ValueError as e:
+        raise RuntimeError(f"[sliver-c2] operator config from foothold is not valid JSON ({e}): {cfg_text[brace:][:200]}")
     operator_cfg = work / "operator.cfg"
 
     # 4. Open the harness->foothold tunnel for the operator gRPC (foothold has no FIP). Rewrite the
@@ -156,7 +166,6 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
     #    must still validate (CA-based). If sliver-py enforces hostname, the config/cert needs a SAN or
     #    an InsecureSkipVerify-equivalent; this is the single riskiest point of the integration.
     local_port = _free_local_port()
-    cfg_json = json.loads(cfg_text)
     cfg_json["lport"] = local_port
     cfg_json["lhost"] = "127.0.0.1"
     operator_cfg.write_text(json.dumps(cfg_json))
