@@ -3,7 +3,7 @@
 
 An environment plugin deploys and tears down the network an experiment runs on, sizes it for
 admission, and produces the agent-facing specs (plus the harness-only access) the attacker and
-defender need. See ``CLAUDE.md`` in this package for how to add one.
+defender need. See the repo-root ``CLAUDE.md`` ("Adding an ENVIRONMENT plugin") for how to add one.
 
 Lifecycle the arena drives:
     capacity(experiment, cfg)                    -> [(vcpus, ram_mb, disk_gb), ...]  # admission sizing

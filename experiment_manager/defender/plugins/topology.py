@@ -1,11 +1,17 @@
-"""Shared MHBench-topology -> Perry-network translation for the defender runners.
+"""MHBench-topology -> Perry-network translation for the DECOY defender runners (deception,
+prompt_injection).
 
-Each defender plugin (deception / llm_soc / prompt_injection) spawns its own standalone runner
-script; all three import this one translation so decoy placement, host user lists, the Neutron
-network-name prefix, and the attacker-subnet flag stay consistent across plugins.
+TECH DEBT / env coupling (Stage-1 shim): this parses MHBench's topology JSON directly, so a defender
+that uses it is NOT environment-agnostic. It survives only for the decoy defenders, which genuinely need
+MHBench's Neutron network/security-group NAMES + per-host user lists to drive DeployDecoy (attach a decoy
+VM, plant honey-credentials) — things a neutral host inventory can't express. llm_soc no longer uses it:
+it builds its Perry Network from the environment-provided DefenderEnvSpec.hosts (see llm_soc/runner.py),
+because its actuators (BlockIP = iptables on hosts; RestoreServer = cloud rebuild behind the orchestrator)
+need only host IPs + the defendable set. Removing this entirely is the deferred Stage-2.4 work: have the
+environment expose decoy deployment as a capability so the decoy defenders express intent instead of
+reaching into Neutron naming.
 
-Perry's Network/Subnet/Host are plain classes (not pydantic models), so they're built by hand from
-MHBench's topology JSON.
+Perry's Network/Subnet/Host are plain classes (not pydantic models), so they're built by hand.
 """
 from __future__ import annotations
 
