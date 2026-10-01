@@ -112,12 +112,18 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Opti
     work = _STATE_DIR / experiment_name
     work.mkdir(parents=True, exist_ok=True)
 
-    # 1. Install sliver-server on the foothold (self-contained; idempotent). VALIDATE: the one-liner
-    #    installer footprint + that `sliver-server` lands on PATH; a fresh victim-range foothold has
-    #    apt egress (same assumption as c2.py's docker install).
+    # 1. Install sliver-server on the foothold (self-contained; idempotent). The official installer
+    #    apt-installs build-essential + minisign (Sliver needs build-essential for implant compilation),
+    #    so `apt-get update` MUST run first: the baked Kali image ships stale/empty apt lists, which is
+    #    the only reason the first live run failed ("Unable to locate package minisign / build-essential
+    #    has no installation candidate"). Egress + update + the deps all resolve after an update
+    #    (verified live on the foothold). The "configured multiple times" warnings from the image's
+    #    duplicate sources are cosmetic. DEBIAN_FRONTEND=noninteractive avoids prompts during the install.
     rc, out = await _ssh_run(access,
-        "command -v sliver-server >/dev/null || (curl -fsSL %s | sudo bash)" % shlex.quote(_SLIVER_INSTALL),
-        timeout=900)
+        "command -v sliver-server >/dev/null || ("
+        "export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && curl -fsSL %s | sudo bash)"
+        % shlex.quote(_SLIVER_INSTALL),
+        timeout=1200)
     if rc != 0:
         raise RuntimeError(f"[sliver-c2] sliver-server install on foothold failed (rc={rc}): {out[-500:]}")
 
