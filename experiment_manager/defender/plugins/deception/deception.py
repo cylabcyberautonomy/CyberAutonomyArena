@@ -95,26 +95,18 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             "topology_spec": environment.topology_spec if environment else None,
         }
 
-    async def setup(
+    # No setup() override: ES is per-experiment on the defender box, stood up in run() via the base
+    # prepare_box_es(). There is no shared Elasticsearch to bootstrap.
+
+    async def teardown(
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str] = None,
     ) -> None:
-        """Ensure the shared Elasticsearch instance is up (see setup.py) - this
-        defender doesn't need Falco (SimpleTelemetryAnalysis doesn't consume it),
-        so mgmt_ip (the experiment's bastion IP) isn't needed here."""
-        await self._run_deception_setup_script(
-            Path(__file__).parent,
-            {"deception_dir": str(cfg.deception_dir), "management_ip": cfg.host_ip},
-            experiment_name,
-            cfg,
-        )
-
-    # This plugin's strategies (Static*/Reactive*/NaiveDecoy*/...) deploy decoy VMs via DeployDecoy;
-    # the environment reaps any that outlive the run as part of its own teardown, so no teardown override
-    # is needed here (base no-op).
+        # Kill the harness-host->box ES ssh -L tunnel. (Stray decoy VMs this plugin's strategies deploy
+        # via DeployDecoy are reaped by the environment's own teardown, not here.)
+        self._teardown_box_es_tunnel(experiment_name, cfg)
 
     async def run(
         self,
@@ -122,6 +114,10 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
+        # Stand up the per-experiment ES on the defender box + tunnel to it (blocking SSH work, so off
+        # the event loop); the runner then reads es_url from the config.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.prepare_box_es, config_path, experiment_name, cfg)
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         return await self._run_deception_script(
             Path(__file__).parent / "runner.py", config_path, cfg, log_path

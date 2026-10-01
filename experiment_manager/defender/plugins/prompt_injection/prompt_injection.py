@@ -122,34 +122,18 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
             "topology_spec": environment.topology_spec if environment else None,
         }
 
-    async def setup(
+    # No setup() override: ES is per-experiment on the defender box, stood up in run() via the base
+    # prepare_box_es(). There is no shared Elasticsearch to bootstrap.
+
+    async def teardown(
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str] = None,
     ) -> None:
-        """Ensure the shared Elasticsearch instance is up before the runner starts.
-
-        This plugin's runner connects to Elasticsearch immediately (its
-        TelemetryAnalysis calls indices.exists() in __init__) and installs Falco
-        pointed at the same address, so ES has to already be listening. It had no
-        setup() at all and so silently depended on some *other* experiment - in
-        practice a Deception run - having started the container first; on a fresh
-        host the runner just died on connection refused. Reuses the Deception
-        plugin's setup.py rather than duplicating it: the script only bootstraps
-        the shared ES container (idempotent, safe under concurrent experiments)
-        and is not deception-specific.
-        """
-        await self._run_deception_setup_script(
-            Path(__file__).parent.parent / "deception",
-            {"deception_dir": str(cfg.deception_dir), "management_ip": cfg.host_ip},
-            experiment_name,
-            cfg,
-        )
-
-    # AIAttackerDetection deploys decoy hosts directly (see class docstring); the environment reaps any
-    # that outlive the run as part of its own teardown, so no teardown override is needed here (base no-op).
+        # Kill the harness-host->box ES ssh -L tunnel. (Decoy hosts AIAttackerDetection deploys are
+        # reaped by the environment's own teardown, not here.)
+        self._teardown_box_es_tunnel(experiment_name, cfg)
 
     async def run(
         self,
@@ -157,6 +141,10 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
+        # Stand up the per-experiment ES on the defender box + tunnel to it (blocking SSH work, off the
+        # event loop); the runner then reads es_url from the config.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.prepare_box_es, config_path, experiment_name, cfg)
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")

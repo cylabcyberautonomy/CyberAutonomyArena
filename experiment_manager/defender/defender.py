@@ -61,24 +61,20 @@ async def run_defender(
         built["defender_env_spec"] = defender_env_spec.model_dump()
     built["defender_setup_access"] = [a.model_dump() for a in (defender_access or [])]
     built["deception_dir"] = str(cfg.deception_dir)
-    # "management_ip" here is the harness's own fixed host (Elasticsearch's address -
-    # see host_ip in config.yaml). Deliberately NOT the same thing as `mgmt_ip`/
-    # `bastion_ip` below, which is this experiment's own ephemeral bastion floating
-    # IP - Perry's AnsibleRunner needs THAT one to SSH-ProxyCommand into the
-    # experiment's internal 192.168.x.x hosts at all (ssh -W %h:%p ... root@<bastion>).
-    # These two got conflated under one "management_ip" name for a while, which
-    # silently broke any AnsibleRunner.run_playbook() call (Falco install, decoy
-    # deployment, ...) the moment it was actually exercised - passing the harness
-    # host where the bastion IP belongs, since the harness host can't proxy into a
-    # random experiment's private OpenStack subnet.
+    # "management_ip" is the harness's own fixed host (cfg.host_ip). It is NOT an Elasticsearch address
+    # any more — every defender reads its OWN per-experiment ES on the defender box (see
+    # DefenderPlugin.prepare_box_es). It is kept so a defender's self-protection knows not to block the
+    # harness/manager host. Deliberately NOT the same as `mgmt_ip`/`bastion_ip` below, which is this
+    # experiment's own ephemeral bastion floating IP - Perry's AnsibleRunner needs THAT one to
+    # SSH-ProxyCommand into the experiment's internal 192.168.x.x hosts at all (ssh -W %h:%p ...
+    # root@<bastion>). These two got conflated under one "management_ip" name for a while, which silently
+    # broke any AnsibleRunner.run_playbook() call the moment it was exercised.
     built["management_ip"] = cfg.host_ip
     built["bastion_ip"] = mgmt_ip
-    # The address victim sensors ship telemetry to when they can't reach the consumer directly. The
-    # ENVIRONMENT decides this — it is backend-specific, and the defender is backend-agnostic. `relay_ip`
-    # comes from environment.telemetry_relay_ip(): None means victims reach the consumer directly (e.g.
-    # OpenStack); a value means route through that relay (e.g. the GCP socat relay on the mgmt host,
-    # which forwards to the harness ES). The runner uses it only for the sensor target (falcosidekick);
-    # the defender itself still reads ES at management_ip.
+    # The telemetry relay's address (environment.telemetry_relay_ip(); None = no relay). In box mode the
+    # ENVIRONMENT points victim sensors at the relay, so the defender no longer uses this to target
+    # sensors; it is passed through only so the defender's self-protection knows not to block the relay IP
+    # (severing its own telemetry). Backend-specific, hence the environment's to decide.
     if relay_ip:
         built["falco_relay_ip"] = relay_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")

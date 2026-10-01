@@ -108,23 +108,16 @@ perry_cfg.experiment_name = experiment_name
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
 openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
-# http, not https, and no api_key: this is the harness's own Elasticsearch
-# container (see the deception plugin's setup.py), which runs plain HTTP with
-# xpack.security.enabled=false. Connecting with https raised
-# "TlsError: WRONG_VERSION_NUMBER" on the very first indices.exists() call in
-# TelemetryAnalysis.__init__, killing this runner before it ever armed.
-# BOX MODE: when the environment provides a defender box, the plugin installed ES on it and
-# opened an ssh -L tunnel; it wrote es_url (http://127.0.0.1:<port>) + plain index names into the
-# config. Read the box's OWN per-experiment ES over the tunnel. Sensors already ship there via the
-# env relay (victim -> relay -> box:9200), so this run needs NO InstallFalco / sysflow-repoint.
-# No box (older env) -> legacy path: the shared harness ES at management_ip.
-box_mode = bool(config.get("es_url"))
-es_url = config["es_url"] if box_mode else f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+# The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel
+# the plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow"
+# indices). There is NO shared harness ES: es_url is always injected (prepare_box_es fails closed if
+# the box is missing), and the env relay already ships sensors to the box (victim -> relay -> box:9200),
+# so this runner does NO InstallFalco / sysflow-repoint. http, not https, no api_key: box ES runs plain
+# HTTP with security disabled (https raised "TlsError: WRONG_VERSION_NUMBER" on the first query).
+es_url = config["es_url"]
 es_conn = Elasticsearch(es_url)
-# In box mode the box holds plain per-experiment indices (isolation is by-box, so no falco-<exp>
-# suffix); otherwise fall back to Perry's scoped index names.
-falco_index = config.get("falco_index", "falco") if box_mode else perry_cfg.falco_index
-sysflow_index = config.get("sysflow_index", "sysflow") if box_mode else perry_cfg.sysflow_index
+falco_index = config.get("falco_index", "falco")
+sysflow_index = config.get("sysflow_index", "sysflow")
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -161,68 +154,12 @@ if topology_spec:
     # Kali attacker has no telemetry stack, so it is excluded.
     telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
 
-if network is not None and box_mode:
-    # Box mode: the environment owns sensor shipping (falcosidekick + sf-processor -> relay ->
-    # box:9200), so the defender does NOT install Falco or repoint sysflow. Telemetry is already
-    # flowing to the box ES this runner reads over the tunnel. Nothing to do here.
+# The environment owns sensor shipping: victim falcosidekick + sf-processor ship to the mgmt-host relay,
+# which forwards to the defender box (victim -> relay -> box:9200). So the defender does NOT install
+# Falco or repoint sysflow — telemetry is already flowing to the box ES this runner reads over the tunnel.
+if network is not None:
     print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
           f"skipping InstallFalco / sysflow-repoint.", flush=True)
-elif network is not None:
-    # es_url above already uses this experiment's actual management_ip rather
-    # than whatever's baked into config/config.json on disk - keep InstallFalco
-    # (which reads config.external_ip internally) consistent with that.
-    #
-    # external_ip is what falcosidekick ON THE VICTIMS ships Falco alerts to (InstallFalco
-    # writes it into each host's /etc/falcosidekick/config.yaml hostport). On OpenStack that
-    # is management_ip (the harness ES) directly. On GCP the victim egress firewall blocks the
-    # on-prem harness ES, so ship to the management-host socat relay (falco_relay_ip:9200),
-    # which forwards over a reverse SSH tunnel to the harness ES. The defender's OWN reads still
-    # use es_url=management_ip above (it runs on the harness, which reaches ES directly).
-    # Whether victim sensors need a relay to reach the telemetry consumer is the ENVIRONMENT's
-    # decision, not the defender's: the env's telemetry_relay_ip() is threaded here as
-    # config["falco_relay_ip"] (present -> route sensors through that relay; absent -> victims reach
-    # management_ip directly). No backend check here — the defender is backend-agnostic.
-    # MHB_FALCO_RELAY_IP stays a manual override for ad-hoc runs.
-    relay_ip = config.get("falco_relay_ip") or os.environ.get("MHB_FALCO_RELAY_IP")
-    perry_cfg.external_ip = relay_ip or management_ip
-    print(f"[{experiment_name}] Installing Falco on all hosts...", flush=True)
-    # install_falco.yml's tasks are creates:-guarded, so this is safe to run
-    # even if Falco is already present (e.g. baked into a *_instrumented image).
-    # Left uncaught deliberately: if Falco can't be installed, this defender
-    # can never trigger, so failing fast here beats a silently-idle defender.
-    # Not get_all_host_ips(): that includes the attacker's own box, which the
-    # defender does not own and could never instrument. See
-    # topology.defendable_host_ips.
-    ansible_runner.run_playbook(
-        InstallFalco(defendable_host_ips(topology_data["networks"][0]), perry_cfg)
-    )
-    print(f"[{experiment_name}] Falco install complete.", flush=True)
-
-    # Both halves of this defender read Elasticsearch, and each half needs its
-    # own telemetry stream pointed here:
-    #
-    #   detection - Falco, handled by InstallFalco above (its falcosidekick
-    #   config task now notifies a restart handler, without which a baked host's
-    #   already-running sidekick kept shipping to MHBench's own ES);
-    #
-    #   investigation - SysFlow. On a SuspiciousHost, FalcoLLM hands the host's
-    #   IP to SysFlowAgent, which does five Elasticsearch queries against the
-    #   "sysflow" index to decide whether that host is compromised. Real
-    #   *_instrumented hosts boot with sysflow already running against the
-    #   Elasticsearch baked into their image (MHBench's aux_files/
-    #   pipeline.local.json -> http://10.81.1.25:9200), so that index held
-    #   nothing for any host in this experiment and the agent would have been
-    #   reasoning over an empty result set no matter how good the detection got.
-    #   The deception plugin's runner already does exactly this before arming;
-    #   this one never did.
-    if telemetry_hosts:
-        print(
-            f"[{experiment_name}] Pointing sysflow on {len(telemetry_hosts)} host(s) "
-            f"at {es_url}: {', '.join(telemetry_hosts)}",
-            flush=True,
-        )
-        ansible_runner.run_playbook(ReconfigureSysFlow(telemetry_hosts, perry_cfg))
-        print(f"[{experiment_name}] SysFlow reconfigure complete.", flush=True)
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:

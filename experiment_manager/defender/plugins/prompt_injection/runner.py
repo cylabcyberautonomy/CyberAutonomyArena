@@ -142,13 +142,14 @@ perry_cfg.experiment_name = experiment_name
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
 openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
-# http, not https, and no api_key: this is the harness's own Elasticsearch
-# container (see the deception plugin's setup.py), which runs plain HTTP with
-# xpack.security.enabled=false. Connecting with https raised
-# "TlsError: WRONG_VERSION_NUMBER" on the very first indices.exists() call in
-# TelemetryAnalysis.__init__, killing this runner before it ever armed.
-es_url = f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+# The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel the
+# plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
+# No shared harness ES. The env relay already ships sensors to the box (victim -> relay -> box:9200), so
+# this runner does NO InstallFalco. Plain HTTP, security disabled (https raised WRONG_VERSION_NUMBER).
+es_url = config["es_url"]
 es_conn = Elasticsearch(es_url)
+falco_index = config.get("falco_index", "falco")
+sysflow_index = config.get("sysflow_index", "sysflow")
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -179,22 +180,10 @@ if topology_spec:
     network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
 
 if network is not None and strategy_name in _NEEDS_FALCO:
-    # es_url above already uses this experiment's actual management_ip rather
-    # than whatever's baked into config/config.json on disk - keep InstallFalco
-    # (which reads config.external_ip internally) consistent with that.
-    perry_cfg.external_ip = management_ip
-    print(f"[{experiment_name}] Installing Falco on all hosts...", flush=True)
-    # install_falco.yml's tasks are creates:-guarded, so this is safe to run
-    # even if Falco is already present (e.g. baked into a *_instrumented image).
-    # Left uncaught deliberately: if Falco can't be installed, this defender
-    # can never trigger, so failing fast here beats a silently-idle defender.
-    # Not get_all_host_ips(): that includes the attacker's own box, which the
-    # defender does not own and could never instrument. See
-    # topology.defendable_host_ips.
-    ansible_runner.run_playbook(
-        InstallFalco(defendable_host_ips(topology_data["networks"][0]), perry_cfg)
-    )
-    print(f"[{experiment_name}] Falco install complete.", flush=True)
+    # Box mode: the environment owns sensor shipping (falcosidekick -> relay -> box:9200), so the
+    # defender does NOT install Falco. Telemetry is already flowing to the box ES this runner reads.
+    print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
+          f"skipping InstallFalco.", flush=True)
 
 arsenal = CountArsenal(config.get("arsenal", {}))
 # A static strategy subscribes to nothing, so polling Falco for it is not merely
@@ -207,11 +196,11 @@ arsenal = CountArsenal(config.get("arsenal", {}))
 # into a 19-minute run, for alerts no subscriber would have read anyway.
 if strategy_name in _NEEDS_FALCO:
     telemetry_analysis = FalcoBasicAnalysis(
-        es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+        es_conn, network, falco_index, sysflow_index
     )
 else:
     telemetry_analysis = NoTelemetry(
-        es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+        es_conn, network, falco_index, sysflow_index
     )
 print(
     f"[{experiment_name}] Telemetry analysis: {type(telemetry_analysis).__name__}",

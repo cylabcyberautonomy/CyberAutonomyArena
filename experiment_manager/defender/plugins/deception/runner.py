@@ -83,15 +83,16 @@ perry_cfg = Config(**perry_config_data)
 # (database0-23 among them) and restored its own host0 off the back of that.
 perry_cfg.experiment_name = experiment_name
 
-# Elasticsearch is shared, persistent infrastructure (see host_ip in
-# experiment_harness/config.yaml / management_ip below - this is the harness host
-# itself, not an ephemeral experiment VM) that DeceptionDefenderPlugin.setup()
-# (see setup.py) already ensured is up before this script ever started - runs
-# security-disabled/plain HTTP (see setup.py for why).
+# The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel the
+# plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
+# No shared harness ES. The env relay already ships sensors to the box (victim -> relay -> box:9200), so
+# this runner does NO sysflow-repoint. Plain HTTP, security disabled (https raised WRONG_VERSION_NUMBER).
 openstack_conn = openstack.connect()
 management_ip = config["management_ip"]
-es_url = f"http://{management_ip}:{perry_cfg.elastic_config.port}"
+es_url = config["es_url"]
 es_conn = Elasticsearch(es_url)
+falco_index = config.get("falco_index", "falco")
+sysflow_index = config.get("sysflow_index", "sysflow")
 
 # bastion_ip is THIS experiment's own bastion floating IP (from MHBench
 # provisioning) - not the same as management_ip above (the harness's own fixed
@@ -159,7 +160,7 @@ _ANALYSIS_MAP = {
 analysis_cls = _ANALYSIS_MAP.get(config["strategy"], SimpleTelemetryAnalysis)
 print(f"[{experiment_name}] Telemetry analysis: {analysis_cls.__name__}", flush=True)
 telemetry_analysis = analysis_cls(
-    es_conn, network, perry_cfg.falco_index, perry_cfg.sysflow_index
+    es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
 orchestrator = OpenstackOrchestrator(
@@ -227,21 +228,11 @@ def _sigkill_watchdog():
 
 threading.Thread(target=_sigkill_watchdog, daemon=True, name="sigkill-watchdog").start()
 
-# Real hosts boot with sysflow already running, exporting to the Elasticsearch
-# baked into their image (MHBench's aux_files/pipeline.local.json - a different,
-# auth-protected instance), NOT to the one this defender queries. That left the
-# defender able to see only its own decoys, while every rule it evaluates keys
-# off the SOURCE host's events: ReactiveCredentials spots a decoy username in an
-# ssh command line on the host that ran it, and SimpleTelemetryAnalysis's netcat
-# rule reads the connecting host's process/network events. Point them here
-# before the strategy arms, so the detection half has anything at all to read.
+# Box mode: the environment owns sensor shipping (sf-processor -> relay -> box:9200), so the defender
+# does NOT repoint sysflow. Telemetry is already flowing to the box ES this runner reads over the tunnel.
 if telemetry_hosts:
-    print(
-        f"[{experiment_name}] Pointing sysflow on {len(telemetry_hosts)} host(s) "
-        f"at {es_url}: {', '.join(telemetry_hosts)}",
-        flush=True,
-    )
-    ansible_runner.run_playbook(ReconfigureSysFlow(telemetry_hosts, perry_cfg))
+    print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
+          f"skipping sysflow-repoint.", flush=True)
 
 print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", flush=True)
 defender.start()
