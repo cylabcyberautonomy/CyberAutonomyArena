@@ -356,14 +356,15 @@ def test_attacker_never_blacklists_victim_ips(cfg):
 # ------------------------------------------------- defender -> runner build_config contract
 
 def test_defender_llm_soc_build_config_contract():
-    """What the FalcoLLM runner reads out of build_config must stay stable, and the
-    environment's topology_spec must flow through to it (env -> defender contract)."""
+    """What the FalcoLLM runner reads out of build_config must stay stable. The host inventory no longer
+    flows via topology_spec: the runner builds its Perry network from the arena-injected defender_env_spec
+    (env -> defender contract), so build_config carries NO topology_spec — the defender is env-agnostic."""
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
     built = dfn.build_config("ci_exp", FAKE_ENV)
     assert built["experiment_name"] == "ci_exp"
     assert built["strategy"] == "FalcoLLM"
-    assert built["topology_spec"] == FAKE_ENV.topology_spec
     assert "llm_model" in built
+    assert "topology_spec" not in built  # migrated to the injected defender_env_spec (hosts)
 
 
 def test_defender_canary_build_config_contract():

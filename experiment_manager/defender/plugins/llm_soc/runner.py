@@ -17,7 +17,7 @@ even when it's baked into the image (only *_instrumented vm_types do), so
 relying on that would leave the "falco" index empty.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
-  experiment_name, strategy, llm_model, topology_spec,
+  experiment_name, strategy, llm_model, defender_env_spec (host inventory),
   deception_dir, management_ip, log_dir
 """
 import json
@@ -34,19 +34,6 @@ config = json.loads(Path(sys.argv[1]).read_text())
 _deception_dir = config.get("deception_dir", "")
 if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
-
-# The three defender runners are standalone scripts, not package modules, so the
-# plugins/ directory (which holds the shared topology builder) has to go on
-# sys.path explicitly - the same way deception_dir does above.
-_plugins_dir = str(Path(__file__).resolve().parent.parent)
-if _plugins_dir not in sys.path:
-    sys.path.insert(0, _plugins_dir)
-
-from topology import (
-    build_network,
-    host_users,
-    telemetry_host_ips,
-)
 
 import openstack
 from elasticsearch import Elasticsearch
@@ -140,23 +127,25 @@ ansible_runner = AnsibleRunner(
 )
 
 
-topology_spec = config.get("topology_spec")
-network = None
-telemetry_hosts: list[str] = []
-if topology_spec:
-    topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
-    # Hosts that actually run sysflow - the "*_instrumented" vm_types MHBench's
-    # online registry attaches start_sysflow/start_defender_services to. The
-    # Kali attacker has no telemetry stack, so it is excluded.
-    telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
+# Build Perry's Network from the ENVIRONMENT-provided DefenderEnvSpec (agent-facing host inventory:
+# {name, ip, role}, victims only — the attacker foothold and the defender box are excluded by the env,
+# see deployer._iter_victims). No MHBench topology-JSON parsing: this defender is environment-agnostic.
+# Everything every host in the spec is one the defender owns, so RestoreServer's defendable-host guard is
+# exactly "is this IP in my estate". sec_group / management_sg are unused here (BlockIP needs only host
+# IPs; RestoreServer rebuilds via the orchestrator's cloud handle) — decoy placement, which needs the
+# Neutron names, is a decoy-defender concern (deception/prompt_injection), not this one.
+spec_hosts = (config.get("defender_env_spec") or {}).get("hosts") or []
+victims = [Host(name=h["name"], ip=h["ip"]) for h in spec_hosts if h.get("ip")]
+network = Network(
+    name=experiment_name,
+    subnets=[Subnet(name=f"{experiment_name}-victims", hosts=victims, sec_group="", attacker=False)],
+)
 
 # The environment owns sensor shipping: victim falcosidekick + sf-processor ship to the mgmt-host relay,
 # which forwards to the defender box (victim -> relay -> box:9200). So the defender does NOT install
 # Falco or repoint sysflow — telemetry is already flowing to the box ES this runner reads over the tunnel.
-if network is not None:
-    print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
-          f"skipping InstallFalco / sysflow-repoint.", flush=True)
+print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
+      f"skipping InstallFalco / sysflow-repoint. Estate: {len(victims)} host(s).", flush=True)
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:

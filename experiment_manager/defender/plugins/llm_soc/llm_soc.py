@@ -121,7 +121,8 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "llm_model": self.llm_model,
-            "topology_spec": environment.topology_spec if environment else None,
+            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec
+            # (injected as defender_env_spec by run_defender), not from the MHBench topology JSON.
         }
 
     # No setup() override: ES is per-experiment on the defender box, stood up in run() via the base
