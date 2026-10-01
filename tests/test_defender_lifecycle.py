@@ -103,7 +103,8 @@ def test_full_defender_handshake_with_readiness_gate(tmp_path):
     SETUP_STARTED -> wait_until_ready (a concurrent 'runner' writes the marker) -> READY -> RUNNING ->
     STOPPING -> STOPPED. Assert the recorded history + that the persister stamped status/timestamps."""
     cfg = _cfg(tmp_path)
-    exp = Experiment("def_handshake", ExperimentStatus.QUEUED, "equifax_small", defender=None)
+    exp = Experiment("def_handshake", ExperimentStatus.QUEUED,
+                     {"environment_plugin": "mhbench", "environment_spec": "equifax_small"}, defender=None)
     lc = DefenderLifecycle(on_emit=signal_persister(exp))
     process = SimpleNamespace(returncode=None)
 
@@ -134,7 +135,8 @@ def test_full_defender_handshake_with_readiness_gate(tmp_path):
 def test_failed_short_circuits_a_pending_wait(tmp_path):
     """FAILED before the awaited signal raises DefenderLifecycleError carrying the error — a crashed
     defender must not leave the arena blocked waiting for READY forever."""
-    exp = Experiment("def_failed", ExperimentStatus.QUEUED, "equifax_small", defender=None)
+    exp = Experiment("def_failed", ExperimentStatus.QUEUED,
+                     {"environment_plugin": "mhbench", "environment_spec": "equifax_small"}, defender=None)
     lc = DefenderLifecycle(on_emit=signal_persister(exp))
 
     async def drive():

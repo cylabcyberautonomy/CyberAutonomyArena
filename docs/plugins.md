@@ -23,7 +23,7 @@ list to edit**.
 
 | System       | Selection shape in the experiment spec |
 |--------------|----------------------------------------|
-| environment  | `{"environment_plugin": "...", "environment_spec": "..."}` (a bare path string coerces to `mhbench`) |
+| environment  | `{"environment_plugin": "...", "environment_spec": "..."}` (explicit; `environment_plugin` must name a registered plugin) |
 | attacker     | `"attacker_plugin": "..."` + `"attacker_spec": <inline dict \| path to a JSON/YAML file>` |
 | defender     | `"defender": {"type": "...", ...}` |
 | traffic      | `"traffic": {"type": "...", ...}` |

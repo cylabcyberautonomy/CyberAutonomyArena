@@ -57,8 +57,8 @@ class ExperimentStatus(str, Enum):
 
 class ExperimentSpecs(BaseModel):
     experiment_name: str
-    # environment (the 4th selectable system): {environment_plugin: mhbench, environment_spec: ...},
-    # or a bare env-name string (→ mhbench). Explicit plugin+spec shape (environment only).
+    # environment (the 4th selectable system): the explicit {environment_plugin, environment_spec} shape
+    # (environment_plugin names a registered plugin; environment_spec is a path). No bare-string shorthand.
     environment: EnvironmentConfig
     # attacker as a (plugin, spec) pair. attacker_plugin selects the implementation; attacker_spec holds
     # that plugin's bespoke fields, either inline as a dict or as a PATH to a JSON/YAML file. Resolved
@@ -77,10 +77,17 @@ class ExperimentSpecs(BaseModel):
 
     @field_validator("environment", mode="before")
     @classmethod
-    def _coerce_environment(cls, v):
-        # Accept the explicit {environment_plugin, environment_spec} shape, a bare env-name string, or
-        # the legacy {type, spec} dict — all coerce to EnvironmentConfig.
-        return EnvironmentConfig.coerce(v)
+    def _require_explicit_environment(cls, v):
+        # environment must be the explicit {environment_plugin, environment_spec} (or an EnvironmentConfig).
+        # No coercion: the bare-string and legacy {type, spec} shorthands were removed. pydantic then
+        # builds EnvironmentConfig and its validator checks environment_plugin against the registry.
+        if isinstance(v, EnvironmentConfig):
+            return v
+        if isinstance(v, dict) and "environment_plugin" in v:
+            return v
+        raise ValueError(
+            "environment must be {environment_plugin, environment_spec} — environment_plugin names a "
+            f"registered plugin and environment_spec is a path. Got: {v!r}")
 
     @model_validator(mode="after")
     def _resolve_attacker_plugin_spec(self):
@@ -210,9 +217,9 @@ class Experiment:
     def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
                  traffic=None, trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
-        # `environment` is an EnvironmentConfig, a dict, or a bare env-name string; coerce to the config
-        # and derive the resolved name for the many internal readers of environment_spec.
-        env_config = EnvironmentConfig.coerce(environment)
+        # `environment` is an EnvironmentConfig or the explicit {environment_plugin, environment_spec}
+        # dict; validate to the config and derive the resolved name for the internal readers of the spec.
+        env_config = environment if isinstance(environment, EnvironmentConfig) else EnvironmentConfig.model_validate(environment)
         self.metadata = {
             "experiment": {
                 "name": experiment_name, "trial": trial, "status": status, "error": None,

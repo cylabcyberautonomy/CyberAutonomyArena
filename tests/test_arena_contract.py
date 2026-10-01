@@ -51,7 +51,7 @@ from arena.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAcce
 from arena.experiment.models import ExperimentSpecs
 
 ENV_SPEC = "environments/non-generated/equifax_small.json"  # path (relative to mhbench_dir)
-ENV_NAME = ENV_SPEC  # alias: any mhbench-accepted env identifier (bare name or path) coerces the same
+ENV = {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC}  # the explicit environment selection (no coercion)
 ENV_STEM = "equifax_small"  # the short label = path stem
 ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}  # for direct plugin model_validate
 ATTACKER_PLUGIN = "incalmo_strategy"          # the (plugin, spec) pair — the only way to select an attacker
@@ -118,12 +118,12 @@ def test_named_combo_experimentspecs_validates():
     This is the arena's single entry contract: one spec naming all four systems."""
     specs = ExperimentSpecs(
         experiment_name="ci_contract_smoke",
-        environment=ENV_SPEC,
+        environment=ENV,
         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
         defender=DEFENDER,
         traffic=TRAFFIC,
     )
-    # environment is a validated EnvironmentConfig (bare string → mhbench).
+    # environment is a validated EnvironmentConfig (explicit plugin+spec).
     assert specs.environment.environment_plugin == "mhbench"
     assert specs.environment.environment_spec == ENV_SPEC
     dumped = specs.model_dump()
@@ -134,24 +134,29 @@ def test_named_combo_experimentspecs_validates():
     assert dumped["traffic"]["persona"] == "office_worker"
 
 
-def test_environmentconfig_selectable_and_backcompat():
-    """ExperimentSpecs.environment is a selectable config: accepts the explicit
-    {environment_plugin, environment_spec} shape, a bare env-name string, and the legacy {type, spec}
-    dict (all back-compat); each validates to the same EnvironmentConfig."""
+def test_environmentconfig_requires_explicit_shape():
+    """ExperimentSpecs.environment must be the EXPLICIT {environment_plugin, environment_spec}:
+    environment_plugin names a registered plugin, environment_spec is a path. The bare-string and legacy
+    {type, spec} shorthands are no longer coerced — they're rejected — and an unknown plugin is rejected."""
     explicit = ExperimentSpecs(experiment_name="ci_env_explicit",
                                environment={"environment_plugin": "mhbench", "environment_spec": ENV_SPEC},
                                attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
     assert explicit.environment.environment_plugin == "mhbench"
     assert explicit.environment.environment_spec == ENV_SPEC
-    bare = ExperimentSpecs(experiment_name="ci_env_bare", environment=ENV_SPEC,
-                           attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
-    legacy = ExperimentSpecs(experiment_name="ci_env_legacy",
-                             environment={"type": "mhbench", "spec": ENV_SPEC},
-                             attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
-    assert (explicit.model_dump()["environment"]
-            == bare.model_dump()["environment"]
-            == legacy.model_dump()["environment"]
-            == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC})
+    assert explicit.model_dump()["environment"] == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC}
+    # a bare string is no longer accepted (was back-compat coercion)
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment=ENV_SPEC,
+                        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
+    # the legacy {type, spec} dict is no longer accepted
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x", environment={"type": "mhbench", "spec": ENV_SPEC},
+                        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
+    # an unknown plugin is rejected
+    with pytest.raises(Exception):
+        ExperimentSpecs(experiment_name="x",
+                        environment={"environment_plugin": "nope", "environment_spec": ENV_SPEC},
+                        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
 
 
 def test_attacker_plugin_plus_spec_file(tmp_path):
@@ -161,7 +166,7 @@ def test_attacker_plugin_plus_spec_file(tmp_path):
     spec_file.write_text(json.dumps({"strategy": "GraphSearch", "script_path": "/tmp/replay.json"}))
     specs = ExperimentSpecs(
         experiment_name="ci_plugin_spec",
-        environment=ENV_NAME,
+        environment=ENV,
         attacker_plugin="incalmo_strategy",
         attacker_spec=str(spec_file),
         defender=DEFENDER,
@@ -173,7 +178,7 @@ def test_attacker_plugin_plus_spec_file(tmp_path):
     # a YAML spec works too, and an absent spec file means plugin defaults
     yspec = tmp_path / "atk.yaml"
     yspec.write_text("strategy: Darkside\n")
-    s2 = ExperimentSpecs(experiment_name="x", environment=ENV_NAME,
+    s2 = ExperimentSpecs(experiment_name="x", environment=ENV,
                          attacker_plugin="incalmo_strategy", attacker_spec=str(yspec))
     assert s2.attacker.strategy == "Darkside"
 
@@ -182,19 +187,19 @@ def test_embedded_attacker_is_rejected():
     """The attacker is selected only by attacker_plugin (+ attacker_spec). Passing an embedded
     'attacker' block is rejected ('attacker' is a derived field, not an input)."""
     with pytest.raises(Exception):
-        ExperimentSpecs(experiment_name="x", environment=ENV_NAME, attacker=ATTACKER)
+        ExperimentSpecs(experiment_name="x", environment=ENV, attacker=ATTACKER)
 
 
 def test_attacker_plugin_unknown_name_rejected():
     with pytest.raises(Exception):
-        ExperimentSpecs(experiment_name="x", environment=ENV_NAME, attacker_plugin="no_such_plugin")
+        ExperimentSpecs(experiment_name="x", environment=ENV, attacker_plugin="no_such_plugin")
 
 
 def test_experimentspecs_without_traffic_still_valid():
     """Traffic is optional: a plain attacker-vs-defender run must not require it."""
     specs = ExperimentSpecs(
         experiment_name="ci_no_traffic",
-        environment=ENV_SPEC,
+        environment=ENV,
         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
         defender=DEFENDER,
     )
@@ -206,7 +211,7 @@ def test_experiment_base_is_environment_plus_attacker():
     only environment + attacker (no defender, no traffic) must validate, with both left None."""
     specs = ExperimentSpecs(
         experiment_name="ci_base_only",
-        environment=ENV_NAME,
+        environment=ENV,
         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
     )
     assert specs.defender is None
@@ -217,7 +222,7 @@ def test_experimentspecs_requires_an_attacker():
     """environment + attacker are the required base: a spec with no attacker (neither the plugin pair
     nor the embedded form) must be rejected, not fail later mid-run."""
     with pytest.raises(Exception, match="requires attacker_plugin"):
-        ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV_NAME)
+        ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV)
 
 
 def test_experimentspecs_requires_an_environment():
@@ -415,7 +420,7 @@ def test_defender_lifecycle_signals_and_persist():
     )
     from arena.experiment.models import Experiment, ExperimentStatus
 
-    exp = Experiment("ci_lc", ExperimentStatus.QUEUED, ENV_STEM, defender=None)
+    exp = Experiment("ci_lc", ExperimentStatus.QUEUED, ENV, defender=None)
     lc = DefenderLifecycle(on_emit=signal_persister(exp))
 
     async def drive():
@@ -433,7 +438,7 @@ def test_defender_lifecycle_signals_and_persist():
     assert exp.defender_stopped_at is not None
 
     # FAILED short-circuits a pending wait for a later signal
-    exp2 = Experiment("ci_lc2", ExperimentStatus.QUEUED, ENV_STEM, defender=None)
+    exp2 = Experiment("ci_lc2", ExperimentStatus.QUEUED, ENV, defender=None)
     lc2 = DefenderLifecycle(on_emit=signal_persister(exp2))
 
     async def fail():
@@ -493,15 +498,19 @@ def test_environment_is_a_plugin():
     assert EnvironmentPlugin._registry["mhbench"].ui_schema()["config_type"] == "mhbench"
 
 
-def test_build_environment_coerces_bare_string():
-    """A bare environment-name string coerces to the mhbench plugin (back-compat), a dict validates
-    by type, and an unknown type raises."""
+def test_build_environment_requires_explicit_shape():
+    """build_environment takes the explicit {environment_plugin, environment_spec} (or an
+    EnvironmentConfig) and returns the plugin instance. A bare string and the legacy {type, spec} dict
+    are no longer coerced, and an unknown plugin raises."""
     from arena.environment import build_environment
-    env = build_environment(ENV_SPEC)
+    env = build_environment({"environment_plugin": "mhbench", "environment_spec": ENV_SPEC})
     assert env.type == "mhbench" and env.spec == ENV_STEM and env.environment_spec == ENV_SPEC
-    assert build_environment({"type": "mhbench", "spec": "x"}).spec == "x"
-    with pytest.raises(ValueError):
-        build_environment({"type": "nope"})
+    with pytest.raises(Exception):
+        build_environment(ENV_SPEC)                                    # bare string: no longer accepted
+    with pytest.raises(Exception):
+        build_environment({"type": "mhbench", "spec": "x"})            # legacy {type, spec}: not accepted
+    with pytest.raises(Exception):
+        build_environment({"environment_plugin": "nope", "environment_spec": "x"})  # unknown plugin
 
 
 def test_environment_plugin_lifecycle_and_signals():
@@ -510,7 +519,7 @@ def test_environment_plugin_lifecycle_and_signals():
     import inspect
     from arena.environment.plugins.base import EnvironmentPlugin
     from arena.environment import EnvironmentLifecycle, EnvironmentSignal, build_environment
-    env = build_environment(ENV_SPEC)  # → MHBenchEnvironment
+    env = build_environment(ENV)  # → MHBenchEnvironment
     for m in ("capacity", "provision", "configure", "collect", "teardown"):
         assert callable(getattr(env, m)), f"environment plugin missing {m}()"
     for m in ("provision", "configure", "teardown"):
@@ -545,9 +554,9 @@ def test_environment_commands_arena_to_env():
 
 
 def test_experiment_environment_property_returns_plugin():
-    """experiment.environment derives the plugin from environment_spec (path → mhbench)."""
+    """experiment.environment derives the plugin from the explicit {environment_plugin, environment_spec}."""
     from arena.experiment.models import Experiment, ExperimentStatus
-    exp = Experiment("ci_env_prop", ExperimentStatus.QUEUED, ENV_SPEC)
+    exp = Experiment("ci_env_prop", ExperimentStatus.QUEUED, ENV)
     assert exp.environment.type == "mhbench"
     assert exp.environment.spec == ENV_STEM
     assert exp.environment_spec == ENV_SPEC
@@ -569,7 +578,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     if not topo.exists():
         pytest.skip(f"{ENV_SPEC} not found")
 
-    env = build_environment(ENV_SPEC)
+    env = build_environment(ENV)
     deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM)
     cfg = SimpleNamespace(mhbench_dir=md, mhbench_config=None)
 

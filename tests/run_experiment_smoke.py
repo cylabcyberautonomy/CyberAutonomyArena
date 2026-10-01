@@ -200,7 +200,7 @@ def main() -> int:
     attacker_spec_path.write_text(json.dumps({"strategy": args.attacker}))
     specs: dict = {
         "experiment_name": args.name,
-        "environment": args.environment,
+        "environment": {"environment_plugin": "mhbench", "environment_spec": args.environment},
         "attacker_plugin": "incalmo_strategy",
         "attacker_spec": str(attacker_spec_path),
         "teardown": not args.keep,

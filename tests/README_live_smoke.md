@@ -67,7 +67,7 @@ curl -sS -X POST http://localhost:8000/experiments \
   -H 'content-type: application/json' \
   -d '{
         "experiment_name": "smoke_arena_contract",
-        "environment": "environments/instrumented/equifax_small_instrumented.json",
+        "environment": {"environment_plugin": "mhbench", "environment_spec": "environments/instrumented/equifax_small_instrumented.json"},
         "attacker_plugin": "incalmo_strategy",
         "attacker_spec": "/tmp/atk_spec.json",
         "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"},

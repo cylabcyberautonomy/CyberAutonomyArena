@@ -122,7 +122,7 @@ def main() -> int:
         _captured.clear()
         payload = {
             "experiment_name": "dash_smoke",
-            "environment": "equifax_small",
+            "environment": {"environment_plugin": "mhbench", "environment_spec": "equifax_small"},
             "attacker_plugin": "incalmo_strategy",
             "attacker_spec": {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"},
             "defender": {"type": "canary"},

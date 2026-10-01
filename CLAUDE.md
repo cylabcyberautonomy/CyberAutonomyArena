@@ -43,8 +43,8 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
 ```
 - **attacker** — a `(plugin, spec)` pair: `attacker_plugin` + `attacker_spec` (an inline dict **or** a
   path to a JSON/YAML file). This is the only attacker form.
-- **environment** — the explicit `{environment_plugin, environment_spec}` (a bare path string coerces to
-  the `mhbench` plugin).
+- **environment** — the explicit `{environment_plugin, environment_spec}` (`environment_plugin` names a
+  registered plugin, `environment_spec` is a path; no bare-string shorthand).
 - **defender** / **traffic** — the embedded `{type, ...}` form.
 
 **Two invariants every plugin must respect** (full rationale in `docs/security-model.md`):

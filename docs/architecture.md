@@ -37,8 +37,8 @@ A concrete illustration: the environment may *know* it's running on OpenStack vs
 A matchup is a spec naming one plugin per system. The selection *shapes* differ by system (see the
 repo-root `CLAUDE.md` for the exact form):
 
-- **environment** — `{environment_plugin, environment_spec}` (a bare topology path coerces to the mhbench
-  plugin).
+- **environment** — the explicit `{environment_plugin, environment_spec}` (`environment_plugin` names a
+  registered plugin, `environment_spec` is a path; no bare-string shorthand).
 - **attacker** — a `(plugin, spec)` pair: `attacker_plugin` + `attacker_spec` (an inline dict *or* a path
   to a JSON/YAML file). This is the only attacker form.
 - **defender** / **traffic** — the embedded `{type, ...}` form.
@@ -46,7 +46,7 @@ repo-root `CLAUDE.md` for the exact form):
 ```json
 {
   "experiment_name": "demo",
-  "environment": "environments/instrumented/equifax_small_instrumented.json",
+  "environment": {"environment_plugin": "mhbench", "environment_spec": "environments/instrumented/equifax_small_instrumented.json"},
   "attacker_plugin": "incalmo_strategy",
   "attacker_spec": {"strategy": "GraphSearch"},
   "defender": {"type": "llm_soc", "strategy": "FalcoLLM"}
