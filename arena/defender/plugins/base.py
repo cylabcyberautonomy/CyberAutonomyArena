@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 from abc import abstractmethod
@@ -11,6 +12,20 @@ from ...config import ExperimentManagerConfig
 from ...experiment_log import output_root
 from ...environment import DeployedEnvironment
 from ...ui_schema import PluginUISchema
+
+
+class PreparedDefender(BaseModel):
+    """Opaque handoff from prepare() to run(), symmetric with the attacker's PreparedAttacker.
+    prepare() does a defender's EXTERNAL arming (stand up the box ES, deploy decoys / plant
+    honey-creds for a strategy that arms in setup) to completion and returns this; run() then
+    just launches the reactive loop.
+
+    `armed_in_setup` is True when the strategy's arming FULLY completed in prepare() (Perry's
+    Strategy.ARMS_IN_SETUP — the static/naive deception strategies): the environment is already
+    armed, so the attacker may be released on prepare() returning, with no need to wait on the
+    readiness marker. It is False for strategies that arm inside the loop (llm_soc, prompt_injection,
+    Reactive*); those still touch the marker and the arena waits on it, as before."""
+    armed_in_setup: bool = False
 
 
 class DefenderPlugin(BaseModel):
@@ -89,6 +104,24 @@ class DefenderPlugin(BaseModel):
         of reaching into a specific backend's deployer. They are the same values the
         arena injects into build_config()'s output for the runner; default None for
         defenders whose setup() doesn't need them."""
+
+    async def prepare(
+        self,
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+    ) -> "PreparedDefender":
+        """EXTERNAL arming phase — the arena calls this AFTER build_config()/config-write and BEFORE
+        run(), and blocks on it. A telemetry/deception defender overrides it to stand up its box ES and
+        run its strategy's external arming (deploy decoys / plant honey-creds) to completion, so the
+        slow, failure-prone arming finishes — and raises HERE if it fails — before the attacker starts,
+        mirroring the attacker's setup()→run() split. It returns a PreparedDefender; run() then only
+        launches the reactive loop.
+
+        Default: no-op (an empty baton) for defenders with no external arming (e.g. canary). Whether any
+        arming actually happens is the strategy's call (Perry's Strategy.ARMS_IN_SETUP): a strategy that
+        arms inside its loop makes this a no-op and keeps using the readiness marker."""
+        return PreparedDefender()
 
     async def teardown(
         self,
@@ -187,11 +220,13 @@ class DefenderPlugin(BaseModel):
         config_path: Path,
         cfg: ExperimentManagerConfig,
         log_path: Path,
+        mode: str = "run",
     ) -> asyncio.subprocess.Process:
         """Spawn the plugin's runner.py in deception_dir's own venv, with deception_dir on PYTHONPATH so
         its packages are importable. Shared by every DefenderPlugin subclass backed by that repo
-        (deception/prompt_injection) for their run() (the long-running defender loop). Does not wait for
-        exit - run() hands the live process back to the harness."""
+        (deception/prompt_injection). `mode` is passed as argv[2]: "run" (default) launches the
+        long-running reactive loop and hands the live process back WITHOUT waiting; "prepare" runs the
+        strategy's external arming to completion and exits (see _run_prepare_and_wait)."""
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         python = str(cfg.get_deception_python())
@@ -204,8 +239,40 @@ class DefenderPlugin(BaseModel):
             python,
             str(script_path),
             str(config_path),
+            mode,
             cwd=str(cfg.deception_dir),
             env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
+
+    @staticmethod
+    def prepared_marker_path(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        """Sidecar the prepare-mode runner writes its PreparedDefender baton to (JSON), read back by
+        prepare() in the arena process — the only channel across the prepare→run process boundary."""
+        return output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_prepared.json"
+
+    @classmethod
+    async def _run_prepare_and_wait(
+        cls,
+        script_path: Path,
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        log_path: Path,
+    ) -> "PreparedDefender":
+        """Run the plugin's runner.py in "prepare" mode (external arming) to completion, in the deception
+        venv, and return its PreparedDefender baton. Unlike run(), this WAITS: the external arming (decoy
+        deploy etc.) must finish — and a failure must surface as an exception — before the attacker starts.
+        Raises if the prepare process exits non-zero or writes no baton."""
+        marker = cls.prepared_marker_path(experiment_name, cfg)
+        marker.unlink(missing_ok=True)  # drop any stale baton from a prior run of this name
+        proc = await cls._run_deception_script(script_path, config_path, cfg, log_path, mode="prepare")
+        rc = await proc.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"Defender prepare (external arming) exited {rc} — see {log_path}")
+        if not marker.exists():
+            raise RuntimeError(
+                f"Defender prepare exited 0 but wrote no baton at {marker} — see {log_path}")
+        return PreparedDefender.model_validate_json(marker.read_text())

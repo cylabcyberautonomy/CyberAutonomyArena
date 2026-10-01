@@ -12,7 +12,7 @@ from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
-from ..base import DefenderPlugin
+from ..base import DefenderPlugin, PreparedDefender
 
 
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
@@ -98,8 +98,26 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             "topology_spec": environment.topology_spec if environment else None,
         }
 
-    # No setup() override: ES is per-experiment on the defender box, stood up in run() via the base
-    # prepare_box_es(). There is no shared Elasticsearch to bootstrap.
+    async def prepare(
+        self,
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+    ) -> PreparedDefender:
+        # 1) Stand up this run's OWN per-experiment ES on the defender box + the ssh -L tunnel
+        #    (prepare_box_es, copied per plugin); injects es_url into the config the subprocesses read.
+        #    Blocking SSH work, so off the event loop.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.prepare_box_es, config_path, experiment_name, cfg)
+        # 2) EXTERNAL arming: run the strategy's prepare phase in the deception venv to completion. For a
+        #    static/naive strategy (Perry Strategy.ARMS_IN_SETUP) this DEPLOYS the decoys + plants
+        #    honey-creds/fake data now; for a reactive strategy it is a no-op (it arms inside its loop).
+        #    Blocks and RAISES if the deploy fails, so an undefended environment is never handed to the
+        #    attacker — the slow decoy deploy no longer races the attacker inside the run loop.
+        log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
+        return await self._run_prepare_and_wait(
+            Path(__file__).parent / "runner.py", config_path, experiment_name, cfg, log_path
+        )
 
     async def teardown(
         self,
@@ -117,10 +135,8 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
-        # Stand up the per-experiment ES on the defender box + tunnel to it (blocking SSH work, so off
-        # the event loop); the runner then reads es_url from the config.
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.prepare_box_es, config_path, experiment_name, cfg)
+        # The box ES + the strategy's external arming happened in prepare(); here we only launch the
+        # long-running reactive loop ("run" mode -> runner.py calls defender.start(prepared=True)).
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         return await self._run_deception_script(
             Path(__file__).parent / "runner.py", config_path, cfg, log_path

@@ -221,13 +221,17 @@ print(
     f"(strategy={config['strategy']}, llm_model={config.get('llm_model')})",
     flush=True,
 )
-defender.start()
+# prepared=True: the arena ran the defender's prepare() phase (box ES stand-up; and for a
+# strategy that arms in setup, its external decoy/cred deploy) before launching this loop.
+# FalcoLLM/C2Block are ARMS_IN_SETUP=False, so start() still runs their in-process arming
+# (subscribe to Falco telemetry) here; prepared=True only suppresses a re-run of external
+# arming for the static strategies (not these), so it is safe + explicit for the contract.
+defender.start(prepared=True)
 
-# Signal the harness that this strategy is fully armed (initialize() has
-# deployed its decoys and planted its credentials/fake data). main.py blocks on
-# this file before starting the attacker - see DefenderPlugin.wait_until_ready.
-# Written after start() returns, so it means "armed", not merely "process
-# alive"; the harness's own log_dir is used so no extra config key is needed.
+# Signal the harness that this strategy is armed (for llm_soc, subscribed to telemetry).
+# main.py blocks on this file before starting the attacker - see DefenderPlugin.wait_until_ready.
+# Written after start() returns, so it means "armed", not merely "process alive"; the harness's
+# own log_dir is used so no extra config key is needed.
 (log_dir / "defender_ready").write_text(str(time.time()))
 print(f"[{experiment_name}] Defender running", flush=True)
 

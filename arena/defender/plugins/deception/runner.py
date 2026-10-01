@@ -233,14 +233,33 @@ if telemetry_hosts:
     print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
           f"skipping sysflow-repoint.", flush=True)
 
-print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", flush=True)
-defender.start()
+# mode is argv[2]: "prepare" (external arming only, then exit) or "run" (the reactive loop). The arena
+# runs a "prepare" pass first (DefenderPlugin.prepare -> _run_prepare_and_wait) so the slow decoy deploy
+# COMPLETES before the attacker starts, then a "run" pass (DefenderPlugin.run). See base.PreparedDefender.
+mode = sys.argv[2] if len(sys.argv) > 2 else "run"
 
-# Signal the harness that this strategy is fully armed (initialize() has
-# deployed its decoys and planted its credentials/fake data). main.py blocks on
-# this file before starting the attacker - see DefenderPlugin.wait_until_ready.
-# Written after start() returns, so it means "armed", not merely "process
-# alive"; the harness's own log_dir is used so no extra config key is needed.
+if mode == "prepare":
+    # EXTERNAL arming ONLY. For a static/naive strategy (Perry Strategy.ARMS_IN_SETUP) this deploys the
+    # decoys + plants honey-creds/fake data and exits; for a reactive strategy it is a no-op (it arms in
+    # its loop). Write the PreparedDefender baton the arena reads back, then exit so the arming is COMPLETE
+    # (and any failure is a non-zero exit the arena raises on) before the attacker is released.
+    print(f"[{experiment_name}] Defender preparing (strategy={config['strategy']})", flush=True)
+    defender.prepare()
+    (log_dir / "defender_prepared.json").write_text(
+        json.dumps({"armed_in_setup": bool(defender.strategy.ARMS_IN_SETUP)}))
+    print(f"[{experiment_name}] Defender prepared "
+          f"(armed_in_setup={defender.strategy.ARMS_IN_SETUP})", flush=True)
+    sys.exit(0)
+
+print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", flush=True)
+# prepared=True: the arena already ran prepare() (external arming for ARMS_IN_SETUP strategies), so
+# start() does NOT re-deploy those; a reactive/in-process strategy still does its full arming here.
+defender.start(prepared=True)
+
+# Signal the harness that this strategy is armed. For a reactive strategy its decoy/cred deploy +
+# subscriptions happened here in start(); for a static strategy they happened in the prepare pass and
+# start() only began monitoring. Either way the marker means "armed" and gates the attacker (see
+# DefenderPlugin.wait_until_ready). Written after start() returns, in the harness's own log_dir.
 (log_dir / "defender_ready").write_text(str(time.time()))
 print(f"[{experiment_name}] Defender running", flush=True)
 

@@ -72,7 +72,15 @@ async def run_defender(
     built["bastion_ip"] = mgmt_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
-    log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")
+    log(experiment_name, f"Preparing defender ({defender.type}), config: {config_path}")
+    # EXTERNAL arming phase, symmetric with the attacker's setup(): stand up the box ES and run any
+    # arming that completes before the scenario (decoy / honey-cred deploy for a strategy that arms in
+    # setup). This BLOCKS and raises on failure, so the slow, failure-prone arming finishes — and fails
+    # the experiment — before the attacker starts, instead of racing inside the run loop. run() below
+    # then only launches the reactive loop.
+    prepared = await defender.prepare(config_path, experiment_name, cfg)
+    log(experiment_name,
+        f"Defender prepared (armed_in_setup={prepared.armed_in_setup}); starting run loop")
     process = await defender.run(config_path, experiment_name, cfg)
     log(experiment_name, f"Defender process started (pid={process.pid})")
     return process

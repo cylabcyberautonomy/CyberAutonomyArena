@@ -278,23 +278,33 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
         inventory) and `defender_setup_access` (harness-only scoped key + routing per victim + the box)."""
 
     async def run(self, config_path, experiment_name, cfg) -> asyncio.subprocess.Process:
-        """Spawn the defender runner and return the process. It MUST write the readiness marker once
-        armed (see below)."""
+        """Spawn the defender runner (the reactive loop) and return the process. External arming already
+        ran in prepare(); a loop-armed strategy still writes the readiness marker once armed (see below)."""
 
     # optional:
+    async def prepare(self, config_path, experiment_name, cfg) -> PreparedDefender:
+        """EXTERNAL arming — run BEFORE run() and blocked on: stand up the box ES, and deploy decoys /
+        plant honey-creds for a strategy that arms in setup. Return a PreparedDefender. Default: no-op."""
     def box_ingress(self) -> dict[str, list[int]]: ...   # ports the env should open to the box
     async def setup(self, experiment_name, environment, cfg, mgmt_ip=None) -> None: ...
     async def teardown(self, experiment_name, environment, cfg) -> None: ...
 ```
 
-**The readiness marker — required.** `run()` only spawns the runner; arming (decoys, fake data, detection
-loop init) then takes minutes. The arena blocks on `wait_until_ready` before letting the attacker in, so
-the runner must touch the marker once actually armed:
-```python
-DefenderPlugin.ready_marker_path(experiment_name, cfg)   # touch from inside the runner once armed
-```
-If the runner crashes before writing it, the experiment fails — an undefended run must never be reported
-as defended.
+**Arming: prepare() then the marker.** A defender's arming splits in two, mirroring the attacker's
+setup()→start():
+- **EXTERNAL arming** (deploy decoy VMs, plant honey-creds/fake data) runs in **`prepare()`**, which the
+  arena drives after `build_config()` and **before** `run()`, and **blocks on**. It runs to completion and
+  returns a `PreparedDefender`; a failure raises there and fails the experiment, so the slow decoy deploy
+  finishes before the attacker starts instead of racing it inside the loop. (On the Perry side this is
+  `Strategy.ARMS_IN_SETUP` + `Defender.prepare()`.)
+- **In-loop arming** (subscribing to telemetry; strategies that deploy reactively or whose placement can't
+  leave the loop process — llm_soc, prompt_injection, Reactive*) stays in the run loop. For those, `run()`
+  spawns the runner and the runner **must touch the readiness marker once actually armed**:
+  ```python
+  DefenderPlugin.ready_marker_path(experiment_name, cfg)   # touch from inside the runner once armed
+  ```
+  The arena blocks on `wait_until_ready` before letting the attacker in. If the runner crashes before
+  writing it, the experiment fails — an undefended run must never be reported as defended.
 
 **Reaching victims + the box.** The arena injects `defender_setup_access` (a `SetupAccess` list, scoped
 key + routing per host) into your config; the runner reads its hosts and access from there — never resolve
@@ -303,8 +313,9 @@ a key or parse the topology yourself.
 **Box ES (telemetry).** A telemetry-consuming defender stands up a per-experiment Elasticsearch on the
 env-provided box and tunnels to it. The machinery (`prepare_box_es` + the tunnel helpers +
 `box_es_install.sh`) is **copied into each telemetry defender** (`llm_soc`/`deception`/`prompt_injection`)
-— it is per-plugin, not a base method, so `canary`/other defenders don't inherit it. Call it in `run()`;
-it injects `es_url` into the config the runner reads.
+— it is per-plugin, not a base method, so `canary`/other defenders don't inherit it. Call it in
+`prepare()` (before the external arming that reads the box ES); it injects `es_url` into the config the
+runner reads.
 
 **Box ingress — request exactly what you use:**
 ```python

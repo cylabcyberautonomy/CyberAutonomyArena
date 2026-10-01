@@ -279,14 +279,32 @@ def _sigkill_watchdog():
 
 threading.Thread(target=_sigkill_watchdog, daemon=True, name="sigkill-watchdog").start()
 
-print(f"[{experiment_name}] Defender starting (strategy={strategy_name})", flush=True)
-defender.start()
+# mode is argv[2]: "prepare" (external arming only, then exit) or "run" (the reactive loop). The arena
+# runs a "prepare" pass first (DefenderPlugin.prepare -> _run_prepare_and_wait) so any external arming
+# COMPLETES before the attacker starts, then a "run" pass (DefenderPlugin.run). See base.PreparedDefender.
+mode = sys.argv[2] if len(sys.argv) > 2 else "run"
 
-# Signal the harness that this strategy is fully armed (initialize() has
-# deployed its decoys and planted its credentials/fake data). main.py blocks on
-# this file before starting the attacker - see DefenderPlugin.wait_until_ready.
-# Written after start() returns, so it means "armed", not merely "process
-# alive"; the harness's own log_dir is used so no extra config key is needed.
+if mode == "prepare":
+    # EXTERNAL arming ONLY. The static StaticLayered* channels (Perry Strategy.ARMS_IN_SETUP) deploy their
+    # decoys + plant payloads and exit; AIAttackerDetection is reactive, so for it this is a no-op (it arms
+    # in its loop). Write the PreparedDefender baton the arena reads back, then exit so the arming is
+    # COMPLETE (a failure is a non-zero exit the arena raises on) before the attacker is released.
+    print(f"[{experiment_name}] Defender preparing (strategy={strategy_name})", flush=True)
+    defender.prepare()
+    (log_dir / "defender_prepared.json").write_text(
+        json.dumps({"armed_in_setup": bool(defender.strategy.ARMS_IN_SETUP)}))
+    print(f"[{experiment_name}] Defender prepared "
+          f"(armed_in_setup={defender.strategy.ARMS_IN_SETUP})", flush=True)
+    sys.exit(0)
+
+print(f"[{experiment_name}] Defender starting (strategy={strategy_name})", flush=True)
+# prepared=True: the arena already ran prepare() (external arming for ARMS_IN_SETUP strategies), so
+# start() does NOT re-deploy those; AIAttackerDetection (reactive) still does its full arming here.
+defender.start(prepared=True)
+
+# Signal the harness that this strategy is armed. main.py blocks on this file before starting the
+# attacker - see DefenderPlugin.wait_until_ready. Written after start() returns, so it means "armed",
+# not merely "process alive"; the harness's own log_dir is used so no extra config key is needed.
 (log_dir / "defender_ready").write_text(str(time.time()))
 print(f"[{experiment_name}] Defender running", flush=True)
 

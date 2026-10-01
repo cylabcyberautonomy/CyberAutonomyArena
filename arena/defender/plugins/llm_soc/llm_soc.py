@@ -12,7 +12,7 @@ from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
-from ..base import DefenderPlugin
+from ..base import DefenderPlugin, PreparedDefender
 
 # Model names Perry's own LangChainRegistry (defender/agents/langchain_registry.py)
 # knows how to build — a separate, simpler registry from Incalmo's, used only by
@@ -126,8 +126,20 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             # (injected as defender_env_spec by run_defender), not from the MHBench topology JSON.
         }
 
-    # No setup() override: ES is per-experiment on the defender box, stood up in run() via the base
-    # prepare_box_es(). There is no shared Elasticsearch to bootstrap.
+    async def prepare(
+        self,
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+    ) -> PreparedDefender:
+        # llm_soc's strategies (FalcoLLM / FalcoLLMC2Block) arm IN the loop — they subscribe to Falco
+        # telemetry and deploy nothing — so there is NO external decoy/cred arming to run here, and the
+        # readiness marker still gates the attacker. The one external-prep step is standing up this run's
+        # OWN per-experiment ES on the defender box + the ssh -L tunnel (prepare_box_es, copied per
+        # plugin), which injects es_url into the config the runner reads. Blocking SSH work, so off-loop.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.prepare_box_es, config_path, experiment_name, cfg)
+        return PreparedDefender(armed_in_setup=False)
 
     async def teardown(
         self,
@@ -156,14 +168,13 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
         pythonpath = os.pathsep.join(pythonpath_parts)
-        # Stand up the per-experiment ES on the defender box and tunnel to it (base.prepare_box_es),
-        # so this run reads its OWN ES. Blocking (SSH install + wait), so run it off the event loop.
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.prepare_box_es, config_path, experiment_name, cfg)
+        # The box ES + tunnel were stood up in prepare(); here we only launch the reactive loop
+        # ("run" mode -> runner.py calls defender.start(prepared=True) and polls the box ES).
         return await asyncio.create_subprocess_exec(
             python,
             str(Path(__file__).parent / "runner.py"),
             str(config_path),
+            "run",
             cwd=str(cfg.deception_dir),
             env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,

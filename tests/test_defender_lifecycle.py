@@ -18,7 +18,8 @@ import pytest
 from arena.defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_persister,
 )
-from arena.defender.plugins.base import DefenderPlugin
+from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
+from arena.defender.defender import run_defender
 from arena.experiment.models import Experiment, ExperimentStatus
 
 
@@ -144,6 +145,94 @@ def test_failed_short_circuits_a_pending_wait(tmp_path):
 
     asyncio.run(drive())
     assert exp.defender_status == "Failed"
+
+
+# --------------------------------------------------------- the prepare phase (external arming, setup side)
+#
+# External arming (deploy decoys / plant honey-creds for a strategy that arms in setup) now runs in
+# prepare(), which the arena drives BEFORE run() and blocks on — symmetric with the attacker's setup()
+# producing a PreparedAttacker before start(). prepare() returns a PreparedDefender baton; the marker gate
+# above still covers strategies that arm inside the run loop (llm_soc, prompt_injection, Reactive*).
+
+_ORDER_CALLS: list[str] = []
+
+
+class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
+    """Records the order the arena drives prepare() vs run(), and returns an 'armed in setup' baton."""
+    type: str = "_order_defender_test"
+
+    @classmethod
+    def ui_schema(cls):
+        return {"config_type": "_order_defender_test", "label": "order", "fields": [], "cartesian_product": False}
+
+    def build_config(self, experiment_name, environment):
+        return {"experiment_name": experiment_name}
+
+    async def prepare(self, config_path, experiment_name, cfg):
+        _ORDER_CALLS.append("prepare")
+        return PreparedDefender(armed_in_setup=True)
+
+    async def run(self, config_path, experiment_name, cfg):
+        _ORDER_CALLS.append("run")
+        return SimpleNamespace(returncode=None, pid=4321)
+
+
+class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender_test"):
+    """prepare() (external arming) fails -> run_defender must raise and NEVER reach run()."""
+    type: str = "_prepare_fails_defender_test"
+
+    @classmethod
+    def ui_schema(cls):
+        return {"config_type": "_prepare_fails_defender_test", "label": "pfail", "fields": [], "cartesian_product": False}
+
+    def build_config(self, experiment_name, environment):
+        return {"experiment_name": experiment_name}
+
+    async def prepare(self, config_path, experiment_name, cfg):
+        raise RuntimeError("decoy deploy failed")
+
+    async def run(self, config_path, experiment_name, cfg):
+        _ORDER_CALLS.append("run-should-not-run")
+        return SimpleNamespace(returncode=None, pid=1)
+
+
+def _run_cfg(tmp_path: Path):
+    # the attrs run_defender touches: output_dir, deception_dir, host_ip.
+    return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, host_ip="10.0.0.1",
+                           defender_ready_timeout_seconds=30.0)
+
+
+def test_base_prepare_is_noop_baton(tmp_path):
+    """A defender with no external arming (the base default) returns an empty baton, armed_in_setup=False:
+    its arming, if any, happens in the loop and still uses the readiness marker."""
+    prepared = asyncio.run(_FakeDefender().prepare(tmp_path / "c.json", "p", _cfg(tmp_path)))
+    assert isinstance(prepared, PreparedDefender)
+    assert prepared.armed_in_setup is False
+
+
+def test_prepared_defender_baton_roundtrips():
+    """The baton crosses the prepare->run process boundary as JSON (the prepare-mode runner writes it,
+    the arena reads it back in _run_prepare_and_wait)."""
+    back = PreparedDefender.model_validate_json(PreparedDefender(armed_in_setup=True).model_dump_json())
+    assert back.armed_in_setup is True
+
+
+def test_run_defender_runs_prepare_before_run(tmp_path):
+    """The external-arming contract: run_defender calls prepare() (deploy decoys / plant creds to
+    completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
+    _ORDER_CALLS.clear()
+    proc = asyncio.run(run_defender(_OrderDefender(), None, "ord", _run_cfg(tmp_path)))
+    assert _ORDER_CALLS == ["prepare", "run"]
+    assert proc.pid == 4321
+
+
+def test_run_defender_aborts_when_prepare_fails(tmp_path):
+    """Prepare (external arming) failing must fail the experiment and NEVER launch the run loop — an
+    undefended environment is never handed to the attacker (why prepare() blocks and raises)."""
+    _ORDER_CALLS.clear()
+    with pytest.raises(RuntimeError, match="decoy deploy failed"):
+        asyncio.run(run_defender(_PrepareFailsDefender(), None, "ordfail", _run_cfg(tmp_path)))
+    assert "run-should-not-run" not in _ORDER_CALLS
 
 
 if __name__ == "__main__":

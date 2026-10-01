@@ -475,10 +475,13 @@ def test_attacker_lifecycle_methods_present():
 
 def test_defender_lifecycle_methods_present():
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
-    for m in ("setup", "run", "teardown", "build_config"):
+    for m in ("setup", "prepare", "run", "teardown", "build_config"):
         assert callable(getattr(dfn, m)), f"defender missing {m}()"
     # the arena blocks the attacker on this readiness gate
     assert callable(getattr(DefenderPlugin, "wait_until_ready"))
+    # external arming (decoy/cred deploy) runs in prepare() and returns a PreparedDefender baton,
+    # mirroring the attacker's setup()->PreparedAttacker; run() then only launches the loop.
+    assert callable(getattr(DefenderPlugin, "prepare"))
 
 
 def test_traffic_lifecycle_methods_present():
