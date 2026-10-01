@@ -56,14 +56,14 @@ repo-root `CLAUDE.md` for the exact form):
 ## The environment is the producer
 
 The environment is the source of truth for everything the other systems need to reach the network. For
-each system it produces **two** things, split by audience — a distinction enforced throughout:
+each system it produces **two** things, split by *when* they're used:
 
-- an **agent-facing spec** (objective + identity/inventory), safe to hand the model; and
-- a **harness-only `SetupAccess`** (scoped key + bastion routing), used only by trusted plugin setup
-  code and never given to an agent.
+- a **run spec** (objective + identity/inventory) — the runtime information the agent acts on; and
+- a **`SetupAccess`** (scoped key + bastion routing) — the setup-time information the plugin uses to
+  stand the system up.
 
-This is what lets the attacker and defender be written against neutral specs instead of parsing a
-particular backend's topology.
+The split is by purpose (runtime vs setup), not secrecy. This is what lets the attacker and defender be
+written against neutral specs instead of parsing a particular backend's topology.
 
 ## Lifecycle, in one line
 
@@ -71,7 +71,7 @@ particular backend's topology.
 readiness handshake gating the attacker on the defender being armed. See
 [lifecycle.md](lifecycle.md) for the full flow and the handshake, [plugins.md](plugins.md) for how to add
 a plugin of each type, and [security-model.md](security-model.md) for the no-god-key and
-agent-safe-vs-harness-only invariants that the whole design rests on.
+run-spec-vs-setup-access invariants that the whole design rests on.
 
 ## Backends
 

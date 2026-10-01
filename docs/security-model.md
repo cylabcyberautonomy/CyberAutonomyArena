@@ -6,7 +6,8 @@ its access by playing, the defender must not peek at or tamper with its own grou
 reach the harness's own control plane. Two invariants carry almost all of that weight:
 
 1. **No god key** — the environment issues a separate, scoped credential per system.
-2. **Adversary-safe vs harness-only** — what the agent sees never contains a credential or a route.
+2. **Run spec vs setup access** — each system's runtime spec (what the agent acts on) is produced
+   separately from its setup-time access (the keys + routing the plugin uses to stand it up).
 
 Plus one **management-plane isolation** requirement that address-hiding alone cannot satisfy.
 
@@ -25,8 +26,8 @@ issues exactly three credentials, each scoped to only its own hosts:
 | Credential            | Opens                                   | Who holds it                        | In a spec? |
 |-----------------------|-----------------------------------------|-------------------------------------|------------|
 | **env / management**  | the environment's own VMs (deploy/configure) | the harness (environment plugin)    | **never**  |
-| **attacker key**      | the attacker's foothold box **only**    | injected into the attacker's `SetupAccess` | harness-only |
-| **defender key**      | the defender box **+ the victims** it may act on | injected into the defender's `SetupAccess`  | harness-only |
+| **attacker key**      | the attacker's foothold box **only**    | injected into the attacker's `SetupAccess` | in `SetupAccess` (setup) |
+| **defender key**      | the defender box **+ the victims** it may act on | injected into the defender's `SetupAccess`  | in `SetupAccess` (setup) |
 
 The management key stays inside the environment plugin's deploy path and is **never** placed in any spec
 or `SetupAccess`, so it has no accessor on the plugin interface. The attacker and defender keys are minted
@@ -57,20 +58,24 @@ Shrink the baseline as those land; it must never grow.
 
 ---
 
-## 2. Adversary-safe spec vs harness-only `SetupAccess`
+## 2. Run spec vs setup access
 
-The environment produces **two** things per system, split by audience:
+The environment produces **two** things per system, split by **when they're used** — runtime vs setup —
+not by secrecy:
 
-- **Agent-facing spec** (`AttackerEnvSpec` / `DefenderEnvSpec`) — objective + identity/knowledge only
-  (the attacker's own foothold `{name, host, user}`; the defender's host inventory `{name, ip, role}`).
-  Safe to hand the model via `build_config`. **No keys, no bastion, no routing.**
-- **Harness-only `SetupAccess`** — a list of `{name, host, user, port, ssh_key, ssh_common_args}`, one per
-  reachable host, carrying the scoped key and the bastion ProxyCommand. Consumed only by trusted plugin
-  setup code; **never** reaches an agent.
+- **Run spec** (`AttackerEnvSpec` / `DefenderEnvSpec`) — the runtime information the agent acts on:
+  objective + identity/knowledge (the attacker's own foothold `{name, host, user}`; the defender's host
+  inventory `{name, ip, role}`). Handed to the agent via `build_config`. **No keys, no bastion, no
+  routing** — the agent doesn't need them at runtime.
+- **`SetupAccess`** — the setup-time information: a list of `{name, host, user, port, ssh_key,
+  ssh_common_args}`, one per reachable host, carrying the scoped key and the bastion ProxyCommand. Used by
+  trusted plugin setup code to stand the system up.
 
-Enforceable rule: **anything with a credential or a route is setup-facing and never enters
-`build_config`.** Because creds live only in `SetupAccess`, agent-facing specs may even carry IPs — the
-control is credential isolation + management-plane isolation, **not address secrecy** (see §3).
+Credentials and routes live in `SetupAccess` because that's where setup uses them — the split is by
+purpose, not a rule that they must be hidden from the agent. The security doesn't rest on that secrecy: it
+rests on credential **scoping** (§1 — a leaked scoped key only opens what that system could already reach)
+plus **management-plane isolation** (§3). So agent-facing specs may even carry IPs — the control is
+scoping + isolation, **not address secrecy** (see §3).
 
 ---
 

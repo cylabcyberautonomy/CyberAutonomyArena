@@ -52,9 +52,12 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
    foothold only, the defender key its box + victims only. A plugin gets its key from the injected
    `SetupAccess` and must **never** read the broad management key off disk. `tests/test_no_god_key.py`
    enforces this.
-2. **Adversary-safe vs harness-only.** The environment produces an **agent-facing spec** (objective +
-   identity/inventory — safe to hand the model) and a **harness-only `SetupAccess`** (scoped key + bastion
-   routing — stays in trusted plugin code, never given to an agent).
+2. **Run spec vs setup access.** The environment produces two things per system, split by *when* they're
+   used: a **run spec** (objective + identity/inventory — the runtime info the agent acts on, handed to it
+   via `build_config`) and a **`SetupAccess`** (scoped key + bastion routing — the setup-time info the
+   plugin uses to stand the system up). The split is by purpose, not secrecy: credentials live in
+   `SetupAccess` because that's where setup needs them, and a leaked scoped key only opens what that system
+   could already reach (invariant 1).
 
 A consequence: a non-environment plugin should be **backend-agnostic** — it consumes the neutral spec +
 scoped access, and where it must act on the cloud it expresses intent the environment executes, rather
@@ -141,10 +144,10 @@ async def teardown(self, experiment, cfg, lc=None) -> None: # tear the network d
 
 **Spec production — you are the producer.** Keep the two audiences strictly separate:
 ```python
-# ADVERSARY-SAFE (objective + identity, intended for the agent):
+# RUN SPEC (objective + identity — the runtime info the agent acts on):
 def attacker_spec(self, deployed, cfg) -> AttackerEnvSpec
 def defender_spec(self, deployed, cfg) -> DefenderEnvSpec    # host inventory {name, ip, role}
-# HARNESS-ONLY (scoped key + bastion routing):
+# SETUP ACCESS (scoped key + bastion routing — used at setup time):
 def attacker_setup_access(self, deployed, mgmt_ip, cfg) -> list[SetupAccess]
 def defender_setup_access(self, deployed, mgmt_ip, cfg) -> list[SetupAccess]
 ```
@@ -209,11 +212,11 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
     def ui_schema(cls) -> PluginUISchema: ...
 
     def build_config(self, experiment_name, env_spec, c2c_url) -> dict:
-        """Run config the agent reads. env_spec is the ADVERSARY-SAFE AttackerEnvSpec (objective +
+        """Run config the agent reads. env_spec is the AttackerEnvSpec run spec (objective +
         foothold identity, no keys) — safe to serialize and hand the agent."""
 
     async def setup(self, experiment, cfg, mgmt_ip, access=None) -> PreparedAttacker:
-        """Prepare the foothold. `access` is the harness-only SetupAccess list. Reach the foothold with
+        """Prepare the foothold. `access` is the SetupAccess list (setup-time key + routing). Reach the foothold with
         self.primary_access(access).ssh_base(). Return PreparedAttacker()."""
 
     async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None, access=None):
@@ -275,7 +278,7 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
 
     def build_config(self, experiment_name, environment) -> dict:
         """Run config the runner reads. The arena injects `defender_env_spec` (agent-facing host
-        inventory) and `defender_setup_access` (harness-only scoped key + routing per victim + the box)."""
+        inventory) and `defender_setup_access` (the setup-time scoped key + routing per victim + the box)."""
 
     async def run(self, config_path, experiment_name, cfg) -> asyncio.subprocess.Process:
         """Spawn the defender runner (the reactive loop) and return the process. External arming already

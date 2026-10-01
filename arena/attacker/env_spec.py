@@ -2,19 +2,21 @@
 
 Two deliberately separate objects:
 
-  AttackerEnvSpec  — ADVERSARY-SAFE. You could hand this to the adversary under evaluation and
-                     nothing bad happens: it carries only the objective and the foothold IDENTITY
-                     (name/host/user — the box's own in-env address and account, which the adversary
-                     already knows about itself). NO keys, NO bastion, NO routing. This is what
-                     build_config() consumes and what conceptually "the attacker gets".
+  AttackerEnvSpec  — the RUN SPEC: the runtime information the attacker acts on. It carries only the
+                     objective and the foothold IDENTITY (name/host/user — the box's own in-env address
+                     and account, which the adversary already knows about itself). NO keys, NO bastion,
+                     NO routing — the agent doesn't need them at runtime. This is what build_config()
+                     consumes and what conceptually "the attacker gets".
 
-  SetupAccess   — HARNESS-ONLY. How the trusted attacker *plugin* reaches a foothold to set it up
-                     (ssh key + routing, e.g. a bastion ProxyCommand). Produced by the environment,
-                     handed to the plugin's prepare_foothold(), and NEVER given to the adversary.
+  SetupAccess   — the SETUP ACCESS: how the trusted attacker *plugin* reaches a foothold to set it up
+                     (ssh key + routing, e.g. a bastion ProxyCommand). Produced by the environment and
+                     handed to the plugin's prepare_foothold(). It carries the key because that's what
+                     SETUP needs — the split is setup vs runtime, not a secret the agent must never see.
 
-Keeping them separate makes the invariant checkable: AttackerEnvSpec has no field that would matter
-if it leaked. The management plane's safety does not rest on hiding it here — it rests on the
-environment decoupling the bastion's ingress from the environment (see docs/security-model.md).
+They're separate because they're used at different times, not because the run spec is secret: it carries
+nothing that would matter if it leaked anyway. The management plane's safety rests on credential scoping
+(no god key) + the environment decoupling the bastion's ingress — not on hiding the spec (see
+docs/security-model.md).
 
 Both are provider-agnostic DTOs the ENVIRONMENT produces (MHBench today via
 environment/deployer.py; other env plugins later).
@@ -29,14 +31,14 @@ from pydantic import BaseModel, Field
 
 
 class AttackerFoothold(BaseModel):
-    """Adversary-safe identity of a box the attacker starts on / operates from."""
+    """Identity of a box the attacker starts on / operates from (part of the run spec)."""
     name: str = "foothold"
     host: Optional[str] = None   # the box's own in-env IP (the adversary knows its own address)
     user: str = "root"
 
 
 class AttackerEnvSpec(BaseModel):
-    """Adversary-safe. objective + foothold identities only."""
+    """The run spec: objective + foothold identities only."""
     objective: str = "none"
     footholds: list[AttackerFoothold] = Field(default_factory=list)
 
@@ -46,9 +48,7 @@ class AttackerEnvSpec(BaseModel):
 
 
 class SetupAccess(BaseModel):
-    """Harness-only: how the trusted plugin reaches one foothold to prep it. Never given to the
-    adversary. Routing (bastion/relay/direct/IAP) is opaque in ssh_common_args and owned by the
-    environment; ssh_key should be scoped to user@host."""
+    """Setup access: how the trusted plugin reaches one foothold to prep it (setup-time key + routing)."""
     name: str = "foothold"
     host: str
     user: str = "root"

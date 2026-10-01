@@ -2,7 +2,7 @@
 (environment / attacker / defender / traffic).
 
 An environment plugin deploys and tears down the network an experiment runs on, sizes it for
-admission, and produces the agent-facing specs (plus the harness-only access) the attacker and
+admission, and produces the run specs (plus the setup access) the attacker and
 defender need. See the repo-root ``CLAUDE.md`` ("Adding an ENVIRONMENT plugin") for how to add one.
 
 Lifecycle the arena drives:
@@ -88,13 +88,14 @@ class EnvironmentPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement teardown()")
 
     # -- spec production (the env is the producer of the agent-facing specs + setup access) ------
-    # Agent-facing (safe to hand the LLM); Setup-facing (harness-only, creds+routing, never to the agent).
+    # Run spec (objective + identity, the runtime info the agent acts on); Setup access (creds+routing the
+    # plugin uses at setup time). Split by purpose (runtime vs setup), not secrecy.
     def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
         """AGENT-FACING AttackerEnvSpec: objective + foothold identity (no creds/routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement attacker_spec()")
 
     def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        """HARNESS-ONLY list[SetupAccess] for the attacker's foothold(s) (key + routing)."""
+        """SETUP ACCESS: list[SetupAccess] for the attacker's foothold(s) (setup-time key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement attacker_setup_access()")
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
@@ -102,7 +103,7 @@ class EnvironmentPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement defender_spec()")
 
     def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
-        """HARNESS-ONLY list[SetupAccess] for the victims (+ the defender box) the defender may reach
+        """SETUP ACCESS: list[SetupAccess] for the victims (+ the defender box) the defender may reach
         (key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
 

@@ -6,10 +6,11 @@
                     routing. (Later stages add the common-telemetry source channels + the defender
                     box's own identity.)
 
-  SetupAccess    — HARNESS-ONLY (the SAME shared type the attacker uses, from attacker/env_spec.py):
+  SetupAccess    — the SETUP ACCESS (the SAME shared type the attacker uses, from attacker/env_spec.py):
                     how the trusted defender *plugin* reaches a host to set itself up / install
-                    bespoke sensors (ssh key + routing). Produced by the environment, never given to
-                    the defender's brain.
+                    bespoke sensors (ssh key + routing). Produced by the environment, used at setup time
+                    by the plugin — it carries the key because that's what setup needs, not because it's
+                    kept from the defender's brain.
 
 Both are provider-agnostic DTOs the environment produces (MHBench via environment/deployer.py).
 DefenderEnvSpec also carries `topology_spec` (a path); the defender runners build Perry's network

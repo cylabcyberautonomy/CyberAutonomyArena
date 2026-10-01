@@ -100,7 +100,7 @@ class DefenderPlugin(BaseModel):
         SSH-ProxyCommand into the experiment's internal hosts at all.
 
         `defender_env_spec` (agent-facing: host inventory + the defender box) and
-        `defender_access` (harness-only: scoped key + bastion routing per host, a
+        `defender_access` (setup-time: scoped key + bastion routing per host, a
         list[SetupAccess]) are produced by the ENVIRONMENT plugin and passed in so a
         defender that needs the box/victims at setup time reads them from here instead
         of reaching into a specific backend's deployer. They are the same values the

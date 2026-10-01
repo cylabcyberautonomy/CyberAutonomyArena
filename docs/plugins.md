@@ -39,10 +39,11 @@ These are the load-bearing rules (full rationale in [security-model.md](security
 1. **No god key.** The environment issues a *scoped* credential per system (attacker key → its foothold
    only; defender key → its box + victims only). A plugin gets its key from the injected `SetupAccess`
    and must **never** read the broad management key off disk. `tests/test_no_god_key.py` enforces this.
-2. **Adversary-safe vs harness-only.** The environment produces an agent-facing spec (objective +
-   identity/inventory — safe to hand the model) and a harness-only `SetupAccess` (keys + routing — stays
-   in trusted plugin code). Anything with a credential or a route is setup-facing and never reaches the
-   agent.
+2. **Run spec vs setup access.** The environment produces, per system, a run spec (objective +
+   identity/inventory — the runtime info the agent acts on) and a `SetupAccess` (keys + routing — the
+   setup-time info the plugin uses to stand the system up). The split is by purpose (runtime vs setup):
+   credentials and routes live in `SetupAccess` because that's where setup needs them, not because they're
+   kept from the agent.
 
 A consequence worth internalizing: a non-environment plugin should be **backend-agnostic**. It consumes
 the neutral spec + scoped access and, where it needs to act on the cloud (restore a host, open a port),
