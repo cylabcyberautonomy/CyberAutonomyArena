@@ -17,8 +17,8 @@ An experiment pairs four pluggable systems. Two are required, two optional:
 | **traffic**     | benign background activity on the victim hosts                    | optional |
 
 Each is a plugin: a class that subclasses its system's base (`EnvironmentPlugin` / `AttackerPlugin` /
-`DefenderPlugin` / `TrafficPlugin`) and registers itself with a `config_type`. See the `CLAUDE.md` in
-each `experiment_manager/<system>/` package for how to write one.
+`DefenderPlugin` / `TrafficPlugin`) and registers itself with a `config_type`. See the repo-root
+`CLAUDE.md` (one section per system) for how to write one.
 
 ## The arena vs. the plugins
 
@@ -34,8 +34,8 @@ A concrete illustration: the environment may *know* it's running on OpenStack vs
 
 ## How a matchup is specified
 
-A matchup is a spec naming one plugin per system. The selection *shapes* differ by system (see each
-`CLAUDE.md` for the exact form):
+A matchup is a spec naming one plugin per system. The selection *shapes* differ by system (see the
+repo-root `CLAUDE.md` for the exact form):
 
 - **environment** — `{environment_plugin, environment_spec}` (a bare topology path coerces to the mhbench
   plugin).

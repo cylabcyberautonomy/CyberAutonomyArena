@@ -1,12 +1,8 @@
 # Adding a plugin
 
 Every swappable system is a plugin. This page is the cross-cutting mechanics shared by all four types;
-the per-type specifics live in the `CLAUDE.md` of each package:
-
-- `experiment_manager/environment/CLAUDE.md`
-- `experiment_manager/attacker/CLAUDE.md`
-- `experiment_manager/defender/CLAUDE.md`
-- (traffic: implementation pending)
+the per-type specifics (what each must implement + its gotchas) live in the **repo-root `CLAUDE.md`**,
+one section per system (environment / attacker / defender / traffic).
 
 ## The shape of a plugin
 
