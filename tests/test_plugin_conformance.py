@@ -397,7 +397,6 @@ def test_environment_plugin_conforms(name):
 _EXPECTED_ATTACKER_CONFIG_KEYS = {
     "incalmo_strategy": {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"},
     "incalmo_llm":      {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"},
-    "c2_llm":           {"c2c_server", "model", "objective", "max_turns"},
     "cai_llm":          {"model", "objective", "foothold_ip"},
     "terminus_llm":     {"model", "objective", "foothold_ip", "max_turns"},
     "sliver_llm":       {"operator_cfg", "listener_addr", "model", "objective", "max_turns"},
