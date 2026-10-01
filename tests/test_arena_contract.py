@@ -93,7 +93,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "c2_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
@@ -324,6 +324,22 @@ def test_openshell_build_config_contract():
     assert oc["provider_type"] == "openrouter" and oc["model"] == "openrouter/anthropic/claude-sonnet-5"
     assert oc["image"] == "ghcr.io/anomalyco/opencode:latest" and oc["cred_envs"] == ["OPENROUTER_API_KEY"]
     assert atk.ui_schema()["config_type"] == "openshell"
+
+
+def test_c2_llm_build_config_contract():
+    """The bare LLM+C2 attacker: reuses Incalmo's C2 (requires_docker, inherited from _IncalmoAttacker)
+    but drives it with a plain LLM loop. build_config carries the C2 URL (from its OWN prepared baton) +
+    model routing + objective; it never reaches into the arena for a C2 URL."""
+    atk = AttackerPlugin._registry["c2_llm"].model_validate(
+        {"type": "c2_llm", "model": "openrouter/anthropic/claude-sonnet-5", "api_base": "https://openrouter.ai/api/v1"})
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC,
+                             IncalmoPreparedC2(local_url="http://127.0.0.1:40807", remote_url="http://kali:8888"))
+    assert built["c2c_server"] == "http://127.0.0.1:40807"   # its own prepared.local_url (the tunnel)
+    assert built["model"] == "openrouter/anthropic/claude-sonnet-5"
+    assert built["api_base"] == "https://openrouter.ai/api/v1"
+    assert "objective" in built and "max_turns" in built
+    assert atk.requires_docker is True                       # it is a C2 attacker (inherited)
+    assert atk.ui_schema()["config_type"] == "c2_llm"
 
 
 def test_attacker_graphsearch_build_config_contract():

@@ -6,9 +6,11 @@ To create an attacker, create a Python file in `plugins/`. Initialize a class th
 `AttackerPlugin` (`plugins/base.py`) with a `config_type`. 
 
 Existing plugins:
-- `plugins/incalmo/` — the Incalmo integration: an LLM attacker that runs a C2 (sandcat agents beacon
-  in from the victims) and drives it either through fixed strategies (GraphSearch, ...) or a free-form
-  LLM planning loop. The only C2-based attacker; see it for the C2 pattern.
+- `plugins/incalmo/` — the C2-based attackers (sandcat agents beacon in from the victims). Three
+  `config_type`s share its C2 lifecycle (`_IncalmoAttacker`): `incalmo_strategy` (fixed strategies —
+  GraphSearch, ...), `incalmo_llm` (Incalmo's free-form LLM planning loop over its abstractions), and
+  `c2_llm` (a BARE LLM given the raw C2 — it reuses the C2 but drives it with a minimal
+  run-command loop, no Incalmo framework; the C2 analog of the shell agents). See it for the C2 pattern.
 - `plugins/terminus/` — Terminus-2, Terminal-Bench 2.0's reference shell agent (from the `harbor`
   framework): an LLM that drives a real shell in a read-terminal → think → type-command loop, run on
   the foothold.
