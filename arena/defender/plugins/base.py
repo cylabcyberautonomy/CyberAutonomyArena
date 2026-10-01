@@ -21,10 +21,12 @@ class PreparedDefender(BaseModel):
     just launches the reactive loop.
 
     `armed_in_setup` is True when the strategy's arming FULLY completed in prepare() (Perry's
-    Strategy.ARMS_IN_SETUP — the static/naive deception strategies): the environment is already
-    armed, so the attacker may be released on prepare() returning, with no need to wait on the
-    readiness marker. It is False for strategies that arm inside the loop (llm_soc, prompt_injection,
-    Reactive*); those still touch the marker and the arena waits on it, as before."""
+    Strategy.ARMS_IN_SETUP — the static/naive deception strategies). It is informational/diagnostic:
+    the arena keeps waiting on the readiness marker uniformly (so a crashed run-mode process is still
+    surfaced), but for an armed_in_setup run that wait is near-instant — the run-mode start() only begins
+    monitoring, the slow deploy already happened in prepare() — so no separate "skip the marker" path is
+    needed. It is False for strategies that arm inside the loop (llm_soc, prompt_injection, Reactive*),
+    whose full arming the marker covers."""
     armed_in_setup: bool = False
 
 

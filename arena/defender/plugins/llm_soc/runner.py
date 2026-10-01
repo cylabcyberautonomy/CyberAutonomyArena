@@ -221,6 +221,11 @@ print(
     f"(strategy={config['strategy']}, llm_model={config.get('llm_model')})",
     flush=True,
 )
+# This runner is only ever launched in "run" mode (argv[2]=="run"): llm_soc's prepare() is an
+# in-plugin box-ES stand-up (DefenderPlugin.prepare on the plugin), NOT the deception "prepare"-mode
+# runner — llm_soc strategies have no external arming to run here. So there is deliberately no
+# prepare-mode branch below (unlike the deception/prompt_injection runners).
+#
 # prepared=True: the arena ran the defender's prepare() phase (box ES stand-up; and for a
 # strategy that arms in setup, its external decoy/cred deploy) before launching this loop.
 # FalcoLLM/C2Block are ARMS_IN_SETUP=False, so start() still runs their in-process arming
