@@ -1,33 +1,29 @@
+# Python
 **/__pycache__/
-__pycache__/
 *.pyc
-.venv/
-output/
 
+# Virtualenvs
+.venv/
+
+# Experiment output trees (base, plus per-backend / scratch: output_gcp, output_gcp_arena, ...)
+output/
+output_*/
+
+# Local configs — never committed. The base config.yaml plus every per-backend /
+# per-run variant (config.gcp.yaml, config.gcp.arena.yaml, config.openstack.arena.yaml, ...).
 config.yaml
-# logs and local ops artifacts
+config.*.yaml
+
+# Runtime registry state (default experiment_registry.yaml + per-backend variants)
+experiment_registry*.yaml
+
+# Local ops artifacts: logs and editor/backup droppings
 *.log
 *.bak
 *.bak.*
-config.gcp2.yaml
-config.gcp2.yaml.bak
-config.gcp.arena.yaml
-experiment_registry_gcp_arena.yaml
-run_dashboard_8080.sh
-prewarm_cache.sh
 
-# alternate/backend output trees and scratch
-output_gcp/
-output_gcp2/
-output_gcp_arena/
-Equifax_small_instrumented_trial_1/
-archive/
-
-# stray editor backups
-*.py.bak
-
-# dashboard-written attacker spec files (submission-time artifacts)
+# Dashboard-written attacker spec files (submission-time artifacts)
 submitted_specs/
 
-# Offline scoring/analysis tools — parked here, not shipped for now
+# Offline scoring/analysis tools — parked locally, not shipped (for now)
 /scoring/
