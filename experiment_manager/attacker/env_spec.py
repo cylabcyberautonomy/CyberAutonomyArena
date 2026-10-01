@@ -14,7 +14,7 @@ Two deliberately separate objects:
 
 Keeping them separate makes the invariant checkable: AttackerEnvSpec has no field that would matter
 if it leaked. The management plane's safety does not rest on hiding it here — it rests on the
-environment decoupling the bastion's ingress from the environment (see WHAT_TO_REFACTOR.md).
+environment decoupling the bastion's ingress from the environment (see docs/security-model.md).
 
 Both are provider-agnostic DTOs the ENVIRONMENT produces (MHBench today via
 environment/deployer.py; other env plugins later).

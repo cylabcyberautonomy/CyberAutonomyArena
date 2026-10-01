@@ -2,7 +2,7 @@
 Arena cross-component contract test — the CI/CD regression guard for the refactor.
 
 WHY THIS EXISTS
-    The refactor (see ../WHAT_TO_REFACTOR.md) turns environment / attacker / defender /
+    The arena (see docs/architecture.md) turns environment / attacker / defender /
     background-traffic into four independent systems. This file pins the contract each
     system exposes to the others, so refactoring one can't silently break what another
     reads from it — WITHOUT deploying anything to the cloud or spending LLM credits.
@@ -633,7 +633,7 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
         assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
 
     # always-provisioned defender box, in an isolated subnet (egress/ingress is a design requirement the
-    # arena may verify later, not a self-reported field — see ARENA_PLUGIN_REQUIREMENTS.md)
+    # arena may verify later, not a self-reported field — see docs/security-model.md)
     box = env.defender_box(None, cfg)
     assert isinstance(box, DefenderBox) and box.ip and box.subnet
 

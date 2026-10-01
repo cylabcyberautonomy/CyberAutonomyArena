@@ -35,8 +35,8 @@ class DefenderBox(BaseModel):
     (the defender knows its own box); the harness reaches it via a SetupAccess entry of the same name.
 
     REQUIREMENT (design, not a self-reported field): the environment MUST give this box internet EGRESS
-    (outbound-only, for the LLM API) and NO ingress from the internet. Tracked in
-    ARENA_PLUGIN_REQUIREMENTS.md; the arena may verify it at runtime later (not a flag a plugin can set)."""
+    (outbound-only, for the LLM API) and NO ingress from the internet. See docs/security-model.md
+    (management-plane isolation); the arena may verify it at runtime later (not a flag a plugin can set)."""
     name: str = "defender_box"
     ip: Optional[str] = None       # the box's in-env address
     subnet: Optional[str] = None   # the isolated subnet it lives on

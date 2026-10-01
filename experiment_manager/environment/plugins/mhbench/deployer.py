@@ -479,4 +479,4 @@ async def request_ingress_env(experiment: Experiment, mgmt_ip: Optional[str],
 
 # NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its
 # own foothold prep (attacker plugin's prepare_foothold, via SetupAccess), so the environment never
-# runs an attacker play. (User-adjudicated; see WHAT_TO_REFACTOR_ENVIRONMENT.md.)
+# runs an attacker play. (User-adjudicated: the attacker owns its own foothold prep.)
