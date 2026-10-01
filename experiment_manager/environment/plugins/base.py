@@ -127,7 +127,7 @@ class EnvironmentPlugin(BaseModel):
 
     # -- generic infra guarantees every environment provides (backend-agnostic) ------------------
     # These make "always-provisioned defender box" and "open the box ingress the defender asked for"
-    # part of the ENVIRONMENT interface, not an MHBench-specific hack — a second plugin (ludus) must
+    # part of the ENVIRONMENT interface, not an MHBench-specific hack — any backend plugin must
     # implement them too.
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         """The always-provisioned DefenderBox (isolated subnet) the defender runs on. Every environment

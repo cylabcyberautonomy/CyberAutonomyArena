@@ -4,7 +4,7 @@ Same identity as c2_llm (a minimal LLM + a run-command primitive, no framework/a
 C2 is Sliver instead of Incalmo's sandcat/Caldera. It does NOT subclass _IncalmoAttacker — Sliver has
 its own server, implant, and operator API, so it brings up its own C2 via sliver_c2.py. Everything above
 the C2 is the shared arena contract: the opaque baton, build_config(prepared), teardown by name, no god
-key. See SLIVER_C2_DESIGN.md.
+key.
 
 NOT LIVE-VALIDATED — the sliver_c2 lifecycle + the runner's sliver-py loop need a pass against an
 installed Sliver (same bar as terminus). The arena-contract surface here (fields, ui_schema,

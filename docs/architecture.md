@@ -75,7 +75,7 @@ agent-safe-vs-harness-only invariants that the whole design rests on.
 
 ## Backends
 
-The environment plugin owns the cloud backend. `mhbench` is the primary environment plugin; it deploys an
-MHBench topology and supports OpenStack (default) and GCP. `ludus` exists as a second environment plugin
-that implements the same interface without MHBench — proof that the environment contract is genuinely
-backend-neutral, not an MHBench-shaped hole.
+The environment plugin owns the cloud backend. `mhbench` is the environment plugin; it deploys an
+MHBench topology and supports OpenStack (default) and GCP. The environment package root holds only the
+backend-neutral interface + the arena-facing machinery, so a second backend is added as its own
+`EnvironmentPlugin` under `plugins/` — with no change to the arena or the interface.

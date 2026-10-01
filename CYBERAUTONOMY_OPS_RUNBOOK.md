@@ -138,11 +138,6 @@ timeout rate (Qwen ~58%, GLM ~46%) is **model pacing** — thorough/verbose mode
 ## 3. Standing automation (cron + background)
 
 - **`~/o46_mobile/dump.py`** — cron `* * * * *`; snapshots :8000/:8001/:8002 → `status.json`.
-- **`~/experiment_harness/es_index_cleanup.py`** — cron `*/30 * * * *`; reaps `falco-<exp>`/`sysflow-<exp>`
-  indices for terminal runs. Safety: never deletes an index whose run is active in any reachable
-  registry; deletes only confirmed-terminal runs older than a **6h grace** (keeps recent runs' Falco
-  alerts queryable) or unknown-to-all indices older than 2h; **aborts if :8000 is unreachable**. Log:
-  `es_index_cleanup.log`. Run with `--dry-run` to preview.
 - **`knownhosts_janitor.sh`** (scratch-launched, no self-limit) — truncates `~/.ssh/known_hosts` every
   20s. TEMPORARY bridge for §2.1 until the ProxyCommand fix is live via a restart.
 
@@ -208,7 +203,6 @@ curl-able at `http://100.81.48.61:8199/<file>` (no resume — http.server ignore
 | `MHBench/src/deployment/ansible_runner.py` | Kali MaxStartups raise; Kali SSH-readiness gate at end of configure |
 | `Incalmo/incalmo/api/server_api.py` | C2 client retry Session + per-request timeout + `[c2-retry]` logging |
 | `Incalmo/incalmo/c2server/c2server.py` | `_purge_stale_dynamic_payloads()` on C2 startup |
-| `experiment_harness/es_index_cleanup.py` | NEW — automated ES index reaper (+ cron) |
 | `o46_mobile/dump.py` | `qm_` on :8000 source + dedup; `localhost`→`127.0.0.1` |
 | `o46_mobile/index.html` | c2b grids: k3 shell, GLM inc, GLM shell, Qwen inc, Qwen shell |
 

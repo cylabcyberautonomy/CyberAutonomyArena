@@ -603,7 +603,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
 
 def _deployed_for(plugin_name):
     """A minimal DeployedEnvironment so attacker_spec can produce a foothold. mhbench derives the
-    foothold (kali) from the topology + kali IP; ludus's stub returns a mock regardless."""
+    foothold (kali) from the topology + kali IP."""
     if plugin_name == "mhbench":
         md = _mhbench_dir()
         topo = str(md / ENV_SPEC) if md else "/tmp/x.json"
@@ -613,12 +613,10 @@ def _deployed_for(plugin_name):
 
 @pytest.mark.parametrize("plugin_name,spec_val", [
     ("mhbench", ENV_SPEC),
-    ("ludus", "ranges/example.yaml"),
 ])
 def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     """The always-provisioned defender box + the telemetry-relay routing are GENERIC environment
-    guarantees — a second, non-MHBench backend (ludus) implements the same interface. Proving these
-    aren't MHBench-shaped hacks."""
+    guarantees — part of the EnvironmentPlugin interface, not MHBench-specific hacks."""
     from experiment_manager.environment import build_environment
     from experiment_manager.defender.env_spec import DefenderBox, DefenderEnvSpec
     from experiment_manager.attacker.env_spec import AttackerEnvSpec
@@ -652,7 +650,6 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
 
 @pytest.mark.parametrize("plugin_name,spec_val", [
     ("mhbench", ENV_SPEC),
-    ("ludus", "ranges/example.yaml"),
 ])
 def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     """The environment issues SEPARATE per-system credentials (no single god-key): the attacker key is

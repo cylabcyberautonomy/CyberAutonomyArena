@@ -32,25 +32,6 @@ python3 tests/run_experiment_smoke.py --defender canary --environment environmen
 
 If the canary passes, a real telemetry defender can connect on that environment.
 
-## Terminus adapter probe (cheap, no LLM, no cloud)
-
-The terminus attacker (`attacker_plugin: terminus_llm`) drives harbor's Terminus-2 against a local
-shell through a minimal `LocalShellEnvironment(BaseEnvironment)` adapter. harbor's `BaseEnvironment`
-is a heavy abstract class, so before trusting a live run, `tests/probe_terminus_adapter.py` confirms
-the exact slice Terminus-2/TmuxSession touch is satisfied — it runs the real `agent.setup(env)` and
-drives one command through the tmux session (the agent types `echo` and reads it back), **without**
-the model. Needs a venv with `harbor` and `tmux` on the box:
-
-```bash
-uv venv /tmp/harbor-venv --python 3.12 && uv pip install --python /tmp/harbor-venv/bin/python harbor
-sudo mkdir -p /logs/agent /logs/verifier && sudo chmod 777 /logs/agent /logs/verifier  # harbor's fixed in-env path
-/tmp/harbor-venv/bin/python tests/probe_terminus_adapter.py    # exit 0 = PROBE_OK
-```
-
-Validated on beluga (2026-09-29): `env.start` → `agent.setup` → `send_keys`/`get_incremental_output`
-all pass; the in-env pane log is written. Still unvalidated: the `agent.run()` LLM loop (needs a key
-+ is an attack loop, so run only on a real foothold) and a live Kali deploy of the plugin end to end.
-
 ## ⚠ Before you run
 
 - A manager's **startup clean-slate wipes the OpenStack cloud (all projects)**. Do NOT start a

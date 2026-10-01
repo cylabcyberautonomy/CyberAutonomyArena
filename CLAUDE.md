@@ -85,7 +85,7 @@ experiment_manager/
   main.py       the arena: the experiment lifecycle + admission/queueing
   config.py     ExperimentManagerConfig (paths, limits, backend selection)
   experiment/   the Experiment model + its persisted state
-  environment/  environment plugin type (backend-neutral interface); plugins/ holds MHBench + Ludus
+  environment/  environment plugin type (backend-neutral interface); plugins/mhbench/ is the MHBench backend
   attacker/     attacker plugin type + implementations
   defender/     defender plugin type + implementations
   traffic/      traffic plugin type + caldera_human
@@ -108,9 +108,9 @@ Existing: `plugins/mhbench/` — the MHBench backend as a PACKAGE: `deployer.py`
 spec/access production), `capacity.py` (`count_vm_specs` topology sizing), `collect.py`/`rotate.py`/
 `teardown.py`, and `mhbench.py` (the `EnvironmentPlugin` that delegates to them). Deploys a multi-host
 MHBench topology (e.g. the Equifax-breach scenarios) on OpenStack (default) or GCP; issues the per-system
-scoped keys during `configure` and produces the agent-facing specs + `SetupAccess`. `plugins/ludus.py` is
-a second, non-MHBench environment implementing the same interface, fully self-contained — proof the
-contract is genuinely backend-neutral.
+scoped keys during `configure` and produces the agent-facing specs + `SetupAccess`. The environment root
+is backend-neutral: a second backend implements the same `EnvironmentPlugin` interface as its own plugin,
+with no change to the arena.
 
 **Lifecycle the arena drives:**
 ```python
