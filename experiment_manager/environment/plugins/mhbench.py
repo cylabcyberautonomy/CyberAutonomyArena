@@ -172,25 +172,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         # Fallback for topologies without a defender_subnet: co-locate on the (attacker-hidden) mgmt host.
         return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
 
-    def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
-        from ..telemetry import TelemetryIngest
-        # Fixed bake target = the relay on the mgmt host, constant across runs.
-        return TelemetryIngest(host=self._mgmt_internal_ip(cfg), port=9200, scheme="tcp")
-
     def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig):
         # On GCP the victim egress firewall blocks the on-prem harness ES, so victim sensors ship to a
         # socat relay on the mgmt host (which forwards to the harness ES). On OpenStack victims reach
         # the harness directly -> no relay. This backend decision lives here (the environment), not in
         # the defender.
         return self._mgmt_internal_ip(cfg) if getattr(cfg, "cloud_backend", "openstack") == "gcp" else None
-
-    async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
-        # Record the intended telemetry routes to the experiment log. (Grouping by source_channel gives
-        # multi-stream routing and same-stream fan-out.)
-        from ...experiment_log import log
-        for r in (routes or []):
-            log(getattr(deployed, "spec", "env") or "env",
-                f"telemetry route: {r.source_channel} -> {r.dest} ({r.protocol})")
 
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay

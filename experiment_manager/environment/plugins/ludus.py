@@ -23,9 +23,8 @@ from .base import EnvironmentPlugin
 if TYPE_CHECKING:
     from ...experiment import Experiment
 
-# A Ludus range keeps its own private mgmt network; the defender box + relay live there, reachable by
-# range hosts but hidden from the attacker. Constant per deployment so sensors can bake the relay addr.
-_LUDUS_MGMT = "10.99.99.1"        # the range router / mgmt host (fixed relay/bake target)
+# A Ludus range keeps its own private mgmt network; the defender box lives there, reachable by
+# range hosts but hidden from the attacker.
 _LUDUS_DEFENDER_IP = "10.99.99.10"
 _LUDUS_KALI_IP = "10.99.1.100"
 
@@ -105,14 +104,7 @@ class LudusEnvironment(EnvironmentPlugin, config_type="ludus"):
     def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return "~/.ludus/defender_key"
 
-    # -- generic infra guarantees (defender box + telemetry relay) --------------------------------
+    # -- generic infra guarantees (defender box) --------------------------------------------------
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         from ...defender.env_spec import DefenderBox
         return DefenderBox(name="defender_box", ip=_LUDUS_DEFENDER_IP, subnet="ludus-mgmt")
-
-    def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
-        from ..telemetry import TelemetryIngest
-        return TelemetryIngest(host=_LUDUS_MGMT, port=9200, scheme="tcp")
-
-    async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
-        return None  # a real Ludus relay would be configured here

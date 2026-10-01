@@ -102,26 +102,32 @@ First, two names that collide across the repos:
 
 ### What already works (telemetry *flow* isolation)
 
-The decided design (`WHAT_TO_REFACTOR_ENVIRONMENT.md`, "relay hybrid") routes victim telemetry through a
-transparent forwarder on the mgmt host instead of letting sensors ship to the harness ES. In the arena
-this is **implemented** (MHBench-side), as **box mode**:
+Victim telemetry is routed through a transparent forwarder (the relay) on the mgmt host instead of letting
+sensors ship to the harness ES. In the arena this is **implemented** (MHBench-side), as **box mode**:
 
 - MHBench runs `telemetry_relay.py` (`telemetry_relay.service`) on the per-experiment mgmt host
   (`10.0.1.10:9200`), forwarding byte-for-byte to a dest from `/etc/telemetry_relay/dests.json`.
-- When the environment provides a **defender box**, the defender's ES lives on that isolated box and the
-  relay is pointed at it (`request-ingress --telemetry`, driven harness-side by
-  `MHBenchEnvironment.program_ingress()`). Victim sensors ship to the relay → box ES; the harness runner
-  **skips** installing/repointing sensors (`llm_soc/runner.py` "box mode"), and attacker↔box is severed.
+- When the environment provides a **defender box**, the defender's ES lives on that isolated box. The
+  defender declares the box port it needs via `DefenderPlugin.box_ingress()` (`{"telemetry": [9200]}`),
+  and `MHBenchEnvironment.program_ingress()` both opens that port and points the relay at the box
+  (`request-ingress --telemetry`). Victim sensors ship to the relay → box ES; the harness runner **skips**
+  installing/repointing sensors (`llm_soc/runner.py` "box mode"), and attacker↔box is severed.
 - **Legacy mode** (no defender box) is the old path: sensors ship straight to the harness ES at
   `management_ip` (= `cfg.host_ip`).
 
-So in box mode the harness ES is out of the victim telemetry path. The generic arena interface for this —
-`EnvironmentPlugin.telemetry_ingest()` (the fixed bake target) and `program_telemetry()` (relay
-forward-rules) — is **declared but unused**: MHBench provisions the relay through its own ansible and the
-box repoint goes through `program_ingress()`, so these two methods are redundant-with-MHBench, not the
-live path. (`program_telemetry` is a log-only stub; neither is called from `main.py`.) Keep them as the
-documented generic interface, or wire the relay address to flow from `telemetry_ingest()` — don't delete
-them as "dead."
+**Why the relay is necessary (and sufficient).** The defender box is on an isolated subnet and victims
+**cannot initiate** connections to it (one-way isolation: box→victims allowed, victim→box blocked). So
+victims can't ship to the box directly; the mgmt-host relay — which victims *can* reach and which *can*
+reach the box — bridges that gap. One interface expresses the whole need: the defender names a port
+(`box_ingress()`), the environment opens it and routes the relay there (`program_ingress()`). There is no
+separate `telemetry_ingest()`/`program_telemetry()`/`TelemetryRoute` interface — that was unbuilt
+fan-out scaffolding with no consumers, and it was **removed**; the relay address a defender's sensors use
+on the legacy path comes from `telemetry_relay_ip()`.
+
+**The shared harness ES still exists** for the two decoy defenders (`deception`, `prompt_injection`),
+which bind `http://{cfg.host_ip}:9200` directly and were **not** migrated to box mode — that migration is
+deferred because it needs a richer environment interface (a defender asking the environment for *a decoy*).
+Only `llm_soc` uses box mode today. Eliminating the shared ES entirely is blocked on that deferred work.
 
 ### What does NOT work (network *reachability*)
 

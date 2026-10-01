@@ -119,29 +119,19 @@ class EnvironmentPlugin(BaseModel):
     # NEVER placed in any spec — so it has no accessor here (it stays internal to the plugin's deploy path).
 
     # -- generic infra guarantees every environment provides (backend-agnostic) ------------------
-    # These make "always-provisioned defender box" and "relay telemetry" part of the ENVIRONMENT
-    # interface, not an MHBench-specific hack — a second plugin (ludus) must implement them too.
+    # These make "always-provisioned defender box" and "open the box ingress the defender asked for"
+    # part of the ENVIRONMENT interface, not an MHBench-specific hack — a second plugin (ludus) must
+    # implement them too.
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         """The always-provisioned DefenderBox (isolated subnet) the defender runs on. Every environment
         MUST provide one; it is reachable via the defender_setup_access entry of the same name, and is
         hidden from the attacker (management-plane isolation is the environment's responsibility)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_box()")
 
-    def telemetry_ingest(self, deployed, cfg: ExperimentManagerConfig):
-        """The fixed TelemetryIngest target (the relay's ingest endpoint) sensors bake to — constant
-        across runs for this backend so it can be baked into the sensor images."""
-        raise NotImplementedError(f"{type(self).__name__} must implement telemetry_ingest()")
-
     def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig) -> Optional[str]:
         """The relay address victim sensors ship telemetry to when they can't reach the consumer
         directly (a backend-specific decision — this is the environment's to make, not the defender's).
         Default None = victims reach the consumer directly; a value routes them through that relay."""
-        return None
-
-    async def program_telemetry(self, deployed, cfg: ExperimentManagerConfig, routes) -> None:
-        """Program the relay to deliver each source stream to the consumers' endpoints (routes =
-        list[TelemetryRoute], grouped by source_channel → multi-stream routing + same-stream fan-out).
-        Default no-op so a backend with no relay yet is still valid."""
         return None
 
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
