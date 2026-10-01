@@ -128,12 +128,6 @@ class EnvironmentPlugin(BaseModel):
         hidden from the attacker (management-plane isolation is the environment's responsibility)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_box()")
 
-    def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig) -> Optional[str]:
-        """The relay address victim sensors ship telemetry to when they can't reach the consumer
-        directly (a backend-specific decision — this is the environment's to make, not the defender's).
-        Default None = victims reach the consumer directly; a value routes them through that relay."""
-        return None
-
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         """Open EXACTLY the box ingress the defender declared (ingress = {"telemetry": [ports],
         "forward": [ports]}). telemetry → route the relay to box:port; forward → victim→mgmt:port→box:port.

@@ -20,7 +20,7 @@ class ExperimentManagerConfig(BaseModel):
     os_cloud: str = "openstack"
     cloud_backend: str = "openstack"  # "openstack" (default) or "gcp"; gcp routes MHBench via mhbench_config and skips OpenStack clean-slate
     mhbench_config: Optional[str] = None  # passed to MHBench cli as --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"; None = MHBench default (OpenStack)
-    gcp_relay_ip: str = "10.0.1.10"  # GCP-only: internal IP of the management/bastion host on the victim-reachable management CIDR (10.0.1.0/24) where a socat ES relay (falco-es-relay.service) listens on :9200. GCP victims' egress firewall blocks the on-prem harness ES (host_ip 10.81.1.20) but permits the management host, so falcosidekick on GCP victims ships to this relay, which forwards over a reverse SSH tunnel to the harness ES. Unused on OpenStack (victims reach host_ip directly).
+    gcp_relay_ip: str = "10.0.1.10"  # Internal IP of the management/bastion host on the victim-reachable management CIDR (10.0.1.0/24), constant across runs. The per-experiment telemetry relay runs here, and it's the fallback defender-box location for topologies without a defender_subnet (see MHBenchEnvironment._mgmt_internal_ip). Named gcp_relay_ip for historical reasons.
     max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
     max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_concurrent_collects: int = 2         # concurrent post-attacker host-log COLLECT. Collect fans a per-host SSH burst out over the experiment's bastion; many large collects finishing together storm the shared FIP/L3 datapath (which the vCPU/VM trackers don't model) and wedge (observed: collects hung >1.5h). Gate it like configure so the storm never forms. Non-fatal + holds no other slot, so a small cap only briefly delays teardown.
@@ -55,12 +55,23 @@ class ExperimentManagerConfig(BaseModel):
     # bastion (server) and victim hosts (clients). None (default) = the velociraptor
     # defender is unavailable; selecting it then fails fast with a clear message.
     velociraptor_dir: Optional[Path] = None
+    # Dedicated venv on the harness host for the Sliver attacker's operator client (sliver-py + openai),
+    # isolated from Incalmo's deps. sliver_dir holds the .venv; the sliver_c2 preflight builds it if
+    # missing. Defaults to <output_dir>/.sliver when unset.
+    sliver_dir: Optional[Path] = None
+    sliver_python: Optional[Path] = None
 
     def get_incalmo_python(self) -> Path:
         return self.incalmo_python or (self.incalmo_dir / ".venv" / "bin" / "python")
 
     def get_deception_python(self) -> Path:
         return self.deception_python or (self.deception_dir / ".venv" / "bin" / "python")
+
+    def get_sliver_dir(self) -> Path:
+        return self.sliver_dir or (self.output_dir / ".sliver")
+
+    def get_sliver_python(self) -> Path:
+        return self.sliver_python or (self.get_sliver_dir() / ".venv" / "bin" / "python")
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ExperimentManagerConfig":

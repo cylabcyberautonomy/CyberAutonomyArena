@@ -156,10 +156,10 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "defender_key")
 
-    # -- generic infra guarantees (defender box + telemetry relay) --------------------------------
+    # -- generic infra guarantees (defender box) --------------------------------------------------
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
         # The management host's internal IP is constant across runs (management.host_ip); reuse the
-        # gcp_relay_ip default which already names it. This is the fixed relay/bake address.
+        # gcp_relay_ip default which already names it.
         return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
@@ -171,13 +171,6 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             return box
         # Fallback for topologies without a defender_subnet: co-locate on the (attacker-hidden) mgmt host.
         return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
-
-    def telemetry_relay_ip(self, deployed, cfg: ExperimentManagerConfig):
-        # On GCP the victim egress firewall blocks the on-prem harness ES, so victim sensors ship to a
-        # socat relay on the mgmt host (which forwards to the harness ES). On OpenStack victims reach
-        # the harness directly -> no relay. This backend decision lives here (the environment), not in
-        # the defender.
-        return self._mgmt_internal_ip(cfg) if getattr(cfg, "cloud_backend", "openstack") == "gcp" else None
 
     async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay

@@ -126,9 +126,11 @@ reach the box — bridges that gap. One interface expresses the whole need: the 
 separate `telemetry_ingest()`/`program_telemetry()`/`TelemetryRoute` interface — that was unbuilt
 fan-out scaffolding with no consumers, and it was **removed**.
 
-Note: `telemetry_relay_ip()` survives but is now nearly vestigial — in box mode the *environment* points
-victim sensors at the relay, so the defender no longer uses it to target sensors; it is passed through
-only as a self-protection hint (so a defender does not block the relay IP and sever its own telemetry).
+`telemetry_relay_ip()` was also **removed**: in box mode the environment's own relay provisioning points
+victim sensors at the relay, so the defender never needs a relay address — it does no sensor install and
+reads only its box ES over the tunnel. (A consequence: the relay's internal IP is no longer in the
+defender's self-protection set; the mgmt/bastion host it runs on is still protected via `bastion_ip`.)
+
 The decoy *deployment* path (the defender asking the environment for *a decoy*) is a separate, richer
 interface that remains deferred; only the *ES consumption* of the decoy defenders was moved to box mode.
 

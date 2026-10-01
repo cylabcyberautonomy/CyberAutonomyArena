@@ -989,8 +989,6 @@ async def _run_experiment(experiment: Experiment) -> None:
                     mgmt_ip,
                     defender_env_spec=_dfn_env_spec,
                     defender_access=_dfn_access,
-                    # The env owns the backend-specific telemetry-relay decision, not the defender.
-                    relay_ip=experiment.environment.telemetry_relay_ip(experiment.deployed_environment, cfg),
                 )
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)

@@ -48,7 +48,6 @@ async def run_defender(
     mgmt_ip: Optional[str] = None,
     defender_env_spec=None,
     defender_access=None,
-    relay_ip: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,12 +70,6 @@ async def run_defender(
     # broke any AnsibleRunner.run_playbook() call the moment it was exercised.
     built["management_ip"] = cfg.host_ip
     built["bastion_ip"] = mgmt_ip
-    # The telemetry relay's address (environment.telemetry_relay_ip(); None = no relay). In box mode the
-    # ENVIRONMENT points victim sensors at the relay, so the defender no longer uses this to target
-    # sensors; it is passed through only so the defender's self-protection knows not to block the relay IP
-    # (severing its own telemetry). Backend-specific, hence the environment's to decide.
-    if relay_ip:
-        built["falco_relay_ip"] = relay_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting defender ({defender.type}), config: {config_path}")

@@ -641,10 +641,10 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
     cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"))
 
-    # the generic infra methods are on the base contract. There is no telemetry_ingest/program_telemetry:
-    # the defender declares the box port it needs via box_ingress(), and program_ingress() both opens it
-    # and points the relay at the box — one path, not two.
-    for m in ("defender_box", "telemetry_relay_ip", "program_ingress"):
+    # the generic infra methods are on the base contract. There is no telemetry_ingest/program_telemetry/
+    # telemetry_relay_ip: the defender declares the box port it needs via box_ingress(), and
+    # program_ingress() both opens it and points the relay at the box — one path, not two.
+    for m in ("defender_box", "program_ingress"):
         assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
 
     # always-provisioned defender box, in an isolated subnet (egress/ingress is a design requirement the
@@ -654,10 +654,6 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
 
     # the attacker box is guaranteed too — always SERVED via the attacker spec (footholds non-empty)
     assert env.attacker_spec(_deployed_for(plugin_name), cfg).footholds
-
-    # the backend's telemetry-relay decision is the environment's to make: None (direct) or an address
-    relay = env.telemetry_relay_ip(None, cfg)
-    assert relay is None or isinstance(relay, str)
 
     # agent-facing specs are the right types; the defender spec carries the box
     assert isinstance(env.attacker_spec(None, cfg), AttackerEnvSpec)

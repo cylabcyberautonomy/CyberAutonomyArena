@@ -63,18 +63,16 @@ def defender_box(self, deployed, cfg) -> DefenderBox:
     """A bare, isolated box the defender runs on (own subnet), hidden from the attacker.
     The environment provides ONLY the bare box; the defender stands up its own ES/tooling."""
 
-def telemetry_relay_ip(self, deployed, cfg) -> Optional[str]:
-    """Where victim sensors ship telemetry when they can't reach the consumer directly (backend-
-    specific). None = direct; a value routes through that relay. Threaded to the defender runner."""
-
 async def program_ingress(self, experiment, mgmt_ip, cfg, ingress) -> None:
     """Open EXACTLY the box ports the defender requested (from its box_ingress()); {} opens nothing.
     This is also what points the telemetry relay at the box (victim -> relay -> box:port)."""
 ```
 
-`program_ingress` defaults to a no-op, so a backend without a relay/forwarder is still valid. There is
-no separate `program_telemetry`/`telemetry_ingest`: the defender declares the box port it needs via
-`box_ingress()`, and `program_ingress()` both opens it and routes the relay there — one path, not two.
+`program_ingress` defaults to a no-op, so a backend without a relay/forwarder is still valid. The defender
+declares the box port it needs via `box_ingress()`, and `program_ingress()` both opens it and routes the
+relay there — one path. (There is no `telemetry_ingest`/`program_telemetry`/`telemetry_relay_ip`: in box
+mode the environment's relay provisioning points victim sensors at the relay, so the defender never needs
+a relay address.)
 
 ## Selection
 

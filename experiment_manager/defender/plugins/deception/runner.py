@@ -34,7 +34,6 @@ import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
-from ansible.defender import ReconfigureSysFlow
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender

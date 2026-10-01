@@ -57,9 +57,7 @@ if _plugins_dir not in sys.path:
 
 from topology import (
     build_network,
-    defendable_host_ips,
     host_users,
-    telemetry_host_ips,
 )
 
 import openstack
@@ -107,7 +105,6 @@ STRATEGY_MAP = {
 # for them is pure cost: several minutes of arming time and a large failure
 # surface (apt on freshly booted hosts) in exchange for events nobody reads.
 _NEEDS_FALCO = {"AIAttackerDetection"}
-from ansible.defender.falco.install_falco import InstallFalco
 
 experiment_name = config["experiment_name"]
 strategy_name = config.get("strategy", "StaticLayeredAll")

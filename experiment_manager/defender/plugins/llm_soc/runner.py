@@ -44,7 +44,6 @@ if _plugins_dir not in sys.path:
 
 from topology import (
     build_network,
-    defendable_host_ips,
     host_users,
     telemetry_host_ips,
 )
@@ -53,7 +52,6 @@ import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
 from ansible.AnsibleRunner import AnsibleRunner
-from ansible.defender import ReconfigureSysFlow
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
@@ -69,7 +67,6 @@ from defender.telemetry import FalcoBasicAnalysis, FalcoAgressiveAnalysis
 from defender.telemetry.telemetry_service import TelemetryService
 from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import FalcoLLM, FalcoLLMC2Block
-from ansible.defender.falco.install_falco import InstallFalco
 
 STRATEGY_MAP = {
     "FalcoLLM": FalcoLLM,
@@ -102,9 +99,9 @@ perry_cfg.experiment_name = experiment_name
 # PERRY SEAM (cross-repo, not harness-side): the concrete orchestrator (OpenstackOrchestrator vs
 # GCPOrchestrator) and its cloud handle live in Defense-MHBench-compatible, so selecting between them
 # is the one place the runner still reads the backend. Everything else the defender does is now
-# backend-agnostic (telemetry routing comes from the env via config["falco_relay_ip"]). A future
-# cross-repo change would have the environment hand the defender an orchestrator/backend handle,
-# removing this read too. Defaults to 'openstack' so that path is byte-for-byte unchanged.
+# backend-agnostic (it reads its own box ES; the env owns sensor shipping). A future cross-repo change
+# would have the environment hand the defender an orchestrator/backend handle, removing this read too.
+# Defaults to 'openstack' so that path is byte-for-byte unchanged.
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
 openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
 management_ip = config["management_ip"]
@@ -174,7 +171,7 @@ if strategy_cls is None:
 # self_protect.py). Defender-local invariant — no attacker knowledge needed; replaces the old
 # MHB_C2_ON_KALI gate that coupled the defender to an attacker config flag.
 from self_protect import SelfProtectingOrchestrator  # noqa: E402 — runner adds deception_dir dirs to path above
-_PROTECTED_IPS = {ip for ip in (management_ip, config.get("bastion_ip"), config.get("falco_relay_ip")) if ip}
+_PROTECTED_IPS = {ip for ip in (management_ip, config.get("bastion_ip")) if ip}
 
 arsenal = CountArsenal(config.get("arsenal", {}))
 telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
