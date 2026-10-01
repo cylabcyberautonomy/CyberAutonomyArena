@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -122,3 +124,104 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         return await self._run_deception_script(
             Path(__file__).parent / "runner.py", config_path, cfg, log_path
         )
+
+    # -- per-experiment Elasticsearch on the defender box -----------------------------------------
+    # The environment provisions a bare, isolated box (defender_subnet) and ships sensor telemetry to it
+    # via its relay (victim -> relay(mgmt:9200) -> box:9200) under plain "falco"/"sysflow" indices. This
+    # defender stands up ES on the box (bare box, no docker/java -> the ES tarball bundles a JDK) and opens
+    # an ssh -L tunnel so its detection loop reads the box's OWN ES at localhost:<port> — each run gets its
+    # own ES (no shared harness ES), fixing cross-experiment contamination + shard-cap arming failures.
+    # Copied into each telemetry-consuming plugin (box_es_install.sh is co-located) so each plugin is
+    # self-contained — no shared base method or helper module.
+    @staticmethod
+    def _es_tunnel_pidfile(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        return output_root(experiment_name, cfg) / experiment_name / "defender" / "es_tunnel.pid"
+
+    def prepare_box_es(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
+        """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.
+        Writes es_url + falco_index/sysflow_index into the config JSON the runner reads, drops an
+        es_tunnel.pid for teardown, and returns the injected dict. Fail-closed: raises if the topology
+        has no defender box — box ES is required, there is no shared-harness-ES fallback."""
+        import json as _json
+        import shlex
+        import socket
+        import time
+
+        cfgd = _json.loads(Path(config_path).read_text())
+        box = (cfgd.get("defender_env_spec") or {}).get("box") or {}
+        box_ip = box.get("ip")
+        if not box_ip:
+            raise RuntimeError(
+                "no defender box in defender_env_spec; box ES is required (no shared-harness-ES fallback)")
+
+        access = next((a for a in cfgd.get("defender_setup_access", []) if a.get("host") == box_ip), None)
+        if not access or not access.get("ssh_key"):
+            raise RuntimeError(f"defender box {box_ip} present but no SetupAccess entry with an ssh_key")
+        key = os.path.expanduser(access["ssh_key"])
+        common = shlex.split(access.get("ssh_common_args") or "")
+        user = access.get("user", "root")
+        port = str(access.get("port", 22))
+        ssh_base = ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null", "-p", port, *common]
+        target = f"{user}@{box_ip}"
+
+        # 1. ship + run the ES install (idempotent: the script no-ops if :9200 is already up).
+        #    Two steps so the stdin write completes before the channel closes (backgrounding a
+        #    stdin-reading remote cmd in one shot truncates it).
+        script = (Path(__file__).parent / "box_es_install.sh").read_text()
+        subprocess.run([*ssh_base, target, "cat > /root/box_es_install.sh && chmod +x /root/box_es_install.sh"],
+                       input=script, text=True, check=True, timeout=60)
+        subprocess.run([*ssh_base, target,
+                        "nohup /root/box_es_install.sh > /root/es_install.log 2>&1 & echo launched"],
+                       check=True, timeout=30)
+        # 2. wait for ES on the box (fresh install downloads a ~650MB tarball -> allow a few min).
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            r = subprocess.run([*ssh_base, target, "curl -s -m 5 -o /dev/null -w '%{http_code}' localhost:9200"],
+                               capture_output=True, text=True, timeout=30)
+            if r.stdout.strip() == "200":
+                break
+            time.sleep(10)
+        else:
+            raise RuntimeError(f"defender-box ES did not come up on {box_ip}:9200 within 300s")
+
+        # 3. open an ssh -L tunnel harness-host:<lport> -> box:9200 (via the box access's bastion jump).
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            lport = s.getsockname()[1]
+        tunnel = subprocess.Popen(
+            [*ssh_base, "-N", "-L", f"{lport}:localhost:9200", target],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        pidfile = self._es_tunnel_pidfile(experiment_name, cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(tunnel.pid))
+
+        es_url = f"http://127.0.0.1:{lport}"
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                import urllib.request
+                with urllib.request.urlopen(es_url, timeout=5) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                time.sleep(2)
+        else:
+            raise RuntimeError(f"ssh -L tunnel to box ES never became reachable at {es_url}")
+
+        injected = {"es_url": es_url, "falco_index": "falco", "sysflow_index": "sysflow"}
+        cfgd.update(injected)
+        Path(config_path).write_text(_json.dumps(cfgd, indent=2))
+        return injected
+
+    @classmethod
+    def _teardown_box_es_tunnel(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
+        """Kill the harness-host->box ES ssh -L tunnel (ES itself dies with the box at env teardown)."""
+        pidfile = cls._es_tunnel_pidfile(experiment_name, cfg)
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, 15)
+        except (OSError, ValueError):
+            pass
+        finally:
+            pidfile.unlink(missing_ok=True)

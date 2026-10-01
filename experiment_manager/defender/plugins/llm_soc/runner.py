@@ -167,12 +167,6 @@ if strategy_cls is None:
     )
     sys.exit(1)
 
-# Self-protection: a defender must never block its OWN telemetry/management infrastructure (see
-# self_protect.py). Defender-local invariant — no attacker knowledge needed; replaces the old
-# MHB_C2_ON_KALI gate that coupled the defender to an attacker config flag.
-from self_protect import SelfProtectingOrchestrator  # noqa: E402 — runner adds deception_dir dirs to path above
-_PROTECTED_IPS = {ip for ip in (management_ip, config.get("bastion_ip")) if ip}
-
 arsenal = CountArsenal(config.get("arsenal", {}))
 telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
     es_conn, network, falco_index, sysflow_index
@@ -202,11 +196,9 @@ else:
         action_logger=action_logger,
     )
 
-# Self-protection wrapper: any block aimed at the defender's own ES/mgmt IP is dropped, whatever the
-# strategy or the attacker's C2 placement. Applied once here so both the strategy and the Defender
-# (below) share the guarded orchestrator.
-orchestrator = SelfProtectingOrchestrator(orchestrator, _PROTECTED_IPS)
-print(f"[{experiment_name}] Self-protecting orchestrator active; protected IPs: {sorted(_PROTECTED_IPS)}", flush=True)
+# No harness self-protection wrapper: a defender's actions have real consequences. If a strategy blocks
+# an IP it shouldn't (e.g. its own bastion/mgmt), that is the defender's bug to avoid, not the harness's
+# to silently paper over. Keeping the harness out of the defender's decisions is the invariant here.
 
 strategy = strategy_cls(
     arsenal=arsenal,
