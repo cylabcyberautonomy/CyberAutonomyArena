@@ -24,11 +24,17 @@ The dashboard is a thin proxy: it reads `experiment_registry.yaml` for the live 
 **1. Install dependencies**
 
 ```bash
-cd experiment_harness
+cd cyberautonomy-arena
 uv sync
 ```
 
-**2. Edit `config.yaml`** (see [Config reference](#config-reference) below)
+**2. Create `config.yaml`** from the template, then edit the paths and `host_ip`:
+
+```bash
+cp example_config.yaml config.yaml
+```
+
+[`example_config.yaml`](example_config.yaml) documents every field with its default; the [Config reference](#config-reference) below summarizes the common ones.
 
 **3. Start the experiment manager** (backend)
 
@@ -50,7 +56,7 @@ Open `http://localhost:8080` in a browser.
 
 ## Config reference
 
-`config.yaml` is loaded once at startup by the experiment manager. The dashboard also reads a subset of it to find environment specs.
+`config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `incalmo_dir`, `mhbench_dir`, and `host_ip` are required.
 
 **Repo paths** — point these at the relevant codebases on your machine:
 
