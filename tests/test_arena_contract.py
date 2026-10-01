@@ -93,7 +93,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "c2_llm"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "c2_llm", "sliver_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
@@ -340,6 +340,23 @@ def test_c2_llm_build_config_contract():
     assert "objective" in built and "max_turns" in built
     assert atk.requires_docker is True                       # it is a C2 attacker (inherited)
     assert atk.ui_schema()["config_type"] == "c2_llm"
+
+
+def test_sliver_llm_build_config_contract():
+    """The bare LLM + Sliver C2 attacker: its OWN C2 lifecycle (not _IncalmoAttacker), requires_docker
+    False (Sliver is a binary). build_config carries the Sliver C2 coordinates from its own prepared
+    baton (operator config + listener) + model routing. (Runner/lifecycle are not live-validated.)"""
+    from experiment_manager.attacker.plugins.sliver.sliver_c2 import SliverPreparedC2
+    atk = AttackerPlugin._registry["sliver_llm"].model_validate(
+        {"type": "sliver_llm", "model": "gpt-5", "api_base": "https://api.openai.com/v1"})
+    built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC,
+                             SliverPreparedC2(operator_cfg="/run/op.cfg", listener_addr="192.168.202.100:8443"))
+    assert built["operator_cfg"] == "/run/op.cfg"            # its own prepared.operator_cfg
+    assert built["listener_addr"] == "192.168.202.100:8443"  # its own prepared.listener_addr
+    assert built["model"] == "gpt-5"
+    assert "objective" in built and "max_turns" in built
+    assert atk.requires_docker is False                      # Sliver is a single binary, no harness Docker
+    assert atk.ui_schema()["config_type"] == "sliver_llm"
 
 
 def test_attacker_graphsearch_build_config_contract():

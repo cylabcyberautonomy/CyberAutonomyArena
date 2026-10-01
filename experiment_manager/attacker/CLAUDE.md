@@ -16,6 +16,10 @@ Existing plugins:
   the foothold.
 - `plugins/cai/` — the CAI (Cybersecurity AI) framework's offensive agent, installed and run on the
   foothold as a shell agent.
+- `plugins/sliver/` — `sliver_llm`: the Sliver counterpart of `c2_llm` — a bare LLM + `run_command`,
+  but over a [Sliver](https://github.com/BishopFox/sliver) C2 instead of Incalmo's. Has its OWN C2
+  lifecycle (`sliver_c2.py`, not `_IncalmoAttacker`): installs sliver-server on the foothold, drives it
+  via `sliver-py`. See `SLIVER_C2_DESIGN.md`. NOT live-validated (needs an installed Sliver).
 
 ## The interface
 
