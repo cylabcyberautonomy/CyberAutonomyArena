@@ -220,7 +220,7 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
 Key points:
 
 - `config_type="my_attacker"` in the class declaration registers it. The same string must appear as `type` in `ui_schema()` and as the `type` literal.
-- If your attacker needs a C2 server, override `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c`. See the existing `_IncalmoAttacker` base class for a reference implementation.
+- If your attacker needs a C2 server, override `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c` (and `sweep_stale_state` to reap stale tunnels on clean-slate). See the `IncalmoStrategyAttacker` plugin (`arena/attacker/plugins/incalmo_strategy/`) for a reference implementation.
 - `run()` must return an `asyncio.subprocess.Process`. The manager waits for it to exit; exit code 0 → Finished, anything else → Error.
 
 ### Defender plugin

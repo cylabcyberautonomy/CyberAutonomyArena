@@ -495,13 +495,20 @@ async def _clean_slate() -> None:
     except Exception:
         logger.exception("Failed to reap stale ssh on clean-slate")
 
-    # Reap orphaned foothold-C2 ssh -L tunnels left by a crashed prior manager.
-    # Lazy import; no-op when no state dir / no tunnels.
+    # Let each attacker plugin reclaim its own GLOBAL stale host-side state (orphaned C2 ssh -L tunnels,
+    # containers, temp dirs) left by a crashed prior manager — plugin-agnostically. The arena asks every
+    # registered attacker TYPE via its sweep_stale_state() hook; it never imports a specific plugin to
+    # clean up after it (the attacker package is already imported, so the registry is populated).
     try:
-        from .attacker.plugins.incalmo import c2
-        c2.sweep_stale_tunnels()
+        from .attacker.plugins.base import AttackerPlugin
+        for _attacker_cls in set(AttackerPlugin._registry.values()):
+            try:
+                _attacker_cls.sweep_stale_state(cfg)
+            except Exception:
+                logger.exception("attacker plugin %s failed stale-state sweep on clean-slate",
+                                 _attacker_cls.__name__)
     except Exception:
-        logger.exception("Failed to sweep stale foothold-C2 tunnels on clean-slate")
+        logger.exception("Failed to sweep stale attacker-plugin state on clean-slate")
 
     experiments = registry.load()
 

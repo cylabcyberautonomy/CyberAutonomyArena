@@ -9,15 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal, Optional
 
-from pydantic import field_validator
-
-from .c2 import start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready
+from .c2 import (start_c2c_server, stop_c2c_server, wait_for_agent, wait_for_c2c_ready,
+                 sweep_stale_tunnels)
 from . import foothold
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
 from ..base import AttackerPlugin, PreparedAttacker
+
+# Incalmo C2 attacker driven by a free-form LLM planning loop. Self-contained: it carries its own copy of
+# the Incalmo C2 lifecycle + helpers (c2.py / foothold.py / aux/), mirroring the sibling `incalmo_strategy`
+# plugin — one plugin per folder, each duplicating the shared C2 machinery. Both point at the same Incalmo
+# repo via their own code-path config fields (incalmo_llm_dir vs incalmo_strategy_dir).
 
 
 def _require_access(access):
@@ -143,18 +147,26 @@ class IncalmoPreparedC2(PreparedAttacker):
     local_url: Optional[str] = None    # 127.0.0.1 ssh -L tunnel the attacker LLM reaches the C2 through
 
 
-class _IncalmoAttacker(AttackerPlugin):
-    """Shared C2 lifecycle for all Incalmo-based attackers."""
+class IncalmoLLMAttacker(AttackerPlugin, config_type="incalmo_llm"):
+    type: Literal["incalmo_llm"]
 
     # The C2 image is built with Docker on the harness host before it is shipped to the foothold.
     requires_docker: ClassVar[bool] = True
+    # Per-plugin code path (points at the Incalmo repo). The sibling incalmo_strategy plugin names its own
+    # (incalmo_strategy_dir) — redundant by design so no field silently backs both.
+    code_dir_field: ClassVar[str] = "incalmo_llm_dir"
+    code_python_field: ClassVar[str] = "incalmo_llm_python"
 
-    # Per-plugin code path: each Incalmo attacker names its own config fields (both point at the Incalmo
-    # repo — redundant by design). Subclasses set these; the shared code resolves via self so the right
-    # field is read per plugin.
-    code_dir_field: ClassVar[str] = "incalmo_strategy_dir"
-    code_python_field: ClassVar[str] = "incalmo_strategy_python"
+    REQUIRED_CONFIG_KEYS = frozenset(
+        {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
+    planning_llm: str
+    # Only the agent_* abstractions consume execution_llm (see _AGENT_ABSTRACTIONS
+    # and the show_when gate below).  Optional so the dashboard can omit it for
+    # non-agent abstractions; build_config falls back to planning_llm.
+    execution_llm: str = ""
+    abstraction: str = "incalmo"
 
+    # ---- Incalmo C2 lifecycle (self-contained; a copy also lives in plugins/incalmo_strategy/) --------
     def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
         return cfg.plugin_dir(self.code_dir_field)
 
@@ -165,6 +177,11 @@ class _IncalmoAttacker(AttackerPlugin):
     def example_prepared(cls) -> PreparedAttacker:
         """build_config() reads the C2 URLs off its own baton — hand it a filled-in one for offline tests."""
         return IncalmoPreparedC2(local_url="http://127.0.0.1:8888", remote_url="http://foothold:8888")
+
+    @classmethod
+    def sweep_stale_state(cls, cfg: ExperimentManagerConfig) -> None:
+        # Reap orphaned foothold-C2 ssh -L tunnels left by a crashed prior manager (no-op if none).
+        sweep_stale_tunnels()
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
@@ -192,6 +209,11 @@ class _IncalmoAttacker(AttackerPlugin):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
         # SetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
         await foothold.land_sandcat(_require_access(access), remote_url, cfg, experiment.experiment_name)
+        # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
+        # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
+        # run on the foothold itself (it binds 127.0.0.1, and the box has no floating IP), which is
+        # exactly why the attacker installs it on its own foothold here.
+        await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
 
     async def launch_c2c(
         self, experiment_name: str, cfg: ExperimentManagerConfig, bastion_ip: Optional[str] = None,
@@ -209,130 +231,7 @@ class _IncalmoAttacker(AttackerPlugin):
     async def stop_c2c(self, experiment_name: str) -> None:
         await stop_c2c_server(experiment_name)
 
-
-# Hardcoded strategies that drive Metasploit directly (via MsfRpcCommand) need
-# msfrpcd + pymetasploit3 on the foothold, exactly like the LLM attacker. Most
-# state-machine strategies never touch msf (LateralMoveToHost's msf path is
-# llm_interface-gated, which they don't set), so this install is opt-in per
-# strategy to avoid paying metasploit-framework's large download for runs that
-# never use it.
-_MSF_STRATEGIES = {"MsfBindTestStrategy"}
-
-
-class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
-    type: Literal["incalmo_strategy"]
-    REQUIRED_CONFIG_KEYS = frozenset(
-        {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
-    strategy: str  # e.g. "GraphSearch", "Darkside", "EquifaxStrategy"
-    script_path: Optional[str] = None  # action_script.json path, required by OptimalReplayStrategy
-
-    @field_validator("strategy", mode="before")
-    @classmethod
-    def _normalize_strategy(cls, value):
-        if isinstance(value, list):
-            return value[0] if value else "GraphSearch"
-        return value
-
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
-        await super().prepare_foothold(experiment, cfg, bastion_ip, remote_url, access)
-        # Only install msf for strategies that actually dispatch Metasploit ops.
-        if self.strategy in _MSF_STRATEGIES:
-            await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
-
-    @classmethod
-    def ui_schema(cls) -> PluginUISchema:
-        return {
-            "config_type": "incalmo_strategy",
-            "label": "Incalmo Strategy",
-            "cartesian_product": False,
-            "fields": [
-                {
-                    "field_type": "flat_checkboxes",
-                    "label": "Strategy",
-                    "key": "strategy",
-                    "options": ["GraphSearch", "Darkside", "EquifaxStrategy", "MulvalOptimal", "OptimalReplayStrategy"],
-                    "short_names": {
-                        "GraphSearch": "graphsrch",
-                        "Darkside": "darkside",
-                        "EquifaxStrategy": "eq_strategy",
-                        "MulvalOptimal": "mulval_opt",
-                        "OptimalReplayStrategy": "opt_replay",
-                    },
-                },
-                {
-                    "field_type": "text_with_suggestions",
-                    "label": "Script path (OptimalReplayStrategy only)",
-                    "key": "script_path",
-                    "suggestions": [],
-                    "default": "",
-                },
-            ],
-        }
-
-    def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
-        strategy = {"name": self.strategy}
-        if self.script_path:
-            strategy["script_path"] = self.script_path
-        return {
-            "name": experiment_name,
-            "strategy": strategy,
-            "environment": env_spec.objective,
-            # C2 URLs come from Incalmo's OWN setup handle: c2c_server = the LLM's tunnel to the C2,
-            # agent_c2c_server = the foothold's in-env address victims fetch the implant from.
-            "c2c_server": prepared.local_url,
-            "agent_c2c_server": prepared.remote_url,
-            "blacklist_ips": ["172.17.0.0/16"],
-        }
-
-    async def run(self, prepared: PreparedAttacker, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> asyncio.subprocess.Process:
-        log_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "a")
-        return await asyncio.create_subprocess_exec(
-            str(self._code_python(cfg)), "-c", _RUNNER,
-            str(config_path), experiment_name,
-            cwd=str(self._code_dir(cfg)),
-            env={
-                **os.environ,
-                "C2C_SERVER": prepared.local_url,
-                # Victim-reachable C2 URL for target-side agent downloads (ExploitStruts etc.).
-                # ConfigService reads this from C2C_SERVER_AGENTS; without it the low-level actions
-                # fall back to C2C_SERVER, which is the 127.0.0.1 ssh -L tunnel a victim can't reach.
-                # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
-                "C2C_SERVER_AGENTS": prepared.remote_url or prepared.local_url,
-                "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
-                "PYTHONPATH": str(self._code_dir(cfg) / ".venv" / "lib" / "python3.13" / "site-packages"),
-            },
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            # Own session/process group so a wedged attacker can be SIGKILLed as a whole
-            # group (children: ssh, msfrpc, the langchain worker) without the harness having
-            # to be in that group — see _force_kill_attacker in main.py.
-            start_new_session=True,
-        )
-
-
-class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
-    type: Literal["incalmo_llm"]
-    code_dir_field: ClassVar[str] = "incalmo_llm_dir"
-    code_python_field: ClassVar[str] = "incalmo_llm_python"
-    REQUIRED_CONFIG_KEYS = frozenset(
-        {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
-    planning_llm: str
-    # Only the agent_* abstractions consume execution_llm (see _AGENT_ABSTRACTIONS
-    # and the show_when gate below).  Optional so the dashboard can omit it for
-    # non-agent abstractions; build_config falls back to planning_llm.
-    execution_llm: str = ""
-    abstraction: str = "incalmo"
-
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
-        await super().prepare_foothold(experiment, cfg, bastion_ip, remote_url, access)
-        # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
-        # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
-        # run on the foothold itself (it binds 127.0.0.1, and the box has no floating IP), which is
-        # exactly why the attacker installs it on its own foothold here.
-        await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
-
+    # ---- LLM-specific config + launch ----------------------------------------------------------------
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
         llm_groups = _LLM_GROUPS
