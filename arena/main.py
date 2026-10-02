@@ -3,6 +3,7 @@ import heapq
 import json
 import logging
 import os
+import secrets
 import shutil
 import signal
 from contextlib import asynccontextmanager
@@ -38,6 +39,7 @@ async def _stop_defender_process(experiment, process) -> None:
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_persister as _env_signal_persister
+from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -230,7 +232,22 @@ async def lifespan(app: FastAPI):
     _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
                                 max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
-    yield
+    # Defender→environment action channel: a UDS-only listener (no TCP port, so no in-env VM can reach
+    # it) that services EnvActionRequest events from a running defender. Per-manager socket path keeps the
+    # two managers one host may run from colliding. Inert unless a defender arms the serving window.
+    _env_action_socket_path = resolve_socket_path(cfg)
+    _env_action_task = asyncio.create_task(
+        serve_env_actions(_env_action_socket_path, registry, cfg, _openstack_lock)
+    )
+    logger.warning("env-action channel listening on UDS %s", _env_action_socket_path)
+    try:
+        yield
+    finally:
+        _env_action_task.cancel()
+        try:
+            await _env_action_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — never let channel teardown mask shutdown
+            pass
     await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
 
 
@@ -1031,6 +1048,19 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
+                # Arm the dynamic topology-mutation window IFF this defender declared a VM budget. We mint
+                # a per-experiment token (only the defender config receives it, below), seed the remaining
+                # budget, and attach a persistent env lifecycle to record the request trace. The window
+                # stays CLOSED (_env_serving=False) until the attack phase starts (ACTIVATE, below) so no
+                # event is honoured during arming. A defender with no budget arms nothing here.
+                _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+                _env_action_token = None
+                if _budget_specs:
+                    _env_action_token = secrets.token_urlsafe(24)
+                    experiment._env_action_token = _env_action_token
+                    experiment._env_budget_remaining = len(_budget_specs)
+                    experiment._env_serving = False
+                    experiment._env_lifecycle = _env_lc(experiment)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,
@@ -1039,6 +1069,8 @@ async def _run_experiment(experiment: Experiment) -> None:
                     bastion_ip,
                     defender_env_spec=_dfn_env_spec,
                     defender_access=_dfn_access,
+                    env_action_socket=(resolve_socket_path(cfg) if _env_action_token else None),
+                    env_action_token=_env_action_token,
                 )
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
@@ -1109,6 +1141,14 @@ async def _run_experiment(experiment: Experiment) -> None:
         except Exception:
             exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
+    # Open the env-mutation serving window for the attack phase: a defender that armed a VM budget may now
+    # send EnvActionRequest events (add/rebuild/remove host). Events were rejected (409, window closed)
+    # throughout arming; they are rejected again once the attack ends (DEACTIVATE, in the finally below).
+    if getattr(experiment, "_env_action_token", None):
+        experiment._env_serving = True
+        experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
+        experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
+
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
         process = await run_attacker(experiment.attacker, experiment, cfg, prepared)
@@ -1162,6 +1202,12 @@ async def _run_experiment(experiment: Experiment) -> None:
         status = ExperimentStatus.ERROR
         experiment.error = f"Error waiting on attacker process — {e}"
     finally:
+        # Close the env-mutation serving window first: the attack is over, so any late defender event is
+        # rejected (409) before we stop the defender process.
+        if getattr(experiment, "_env_action_token", None) and getattr(experiment, "_env_serving", False):
+            experiment._env_serving = False
+            experiment._env_lifecycle.send(EnvironmentCommand.DEACTIVATE)
+            experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)
         if defender_process:
             try:
                 await _stop_defender_process(experiment, defender_process)

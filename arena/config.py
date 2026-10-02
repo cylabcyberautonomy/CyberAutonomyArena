@@ -16,6 +16,7 @@ class ExperimentManagerConfig(BaseModel):
     ansible_log_dir: str = "experiment/ansible"  # per-experiment subpath under output_dir/<exp>/ for per-host ansible logs
     registry_path: Path = _HERE / "experiment_registry.yaml"
     os_cloud: str = "openstack"
+    env_action_socket: Optional[str] = None  # path of the UDS the defender→env action channel listens on. None = derived per-manager from a hash of output_dir (so two managers on one host don't collide). Never a TCP port: an in-env VM must not be able to reach it (see env_action_server.py).
     cloud_backend: str = "openstack"  # "openstack" (default) or "gcp"; gcp routes MHBench via mhbench_config and skips OpenStack clean-slate
     mhbench_config: Optional[str] = None  # passed to MHBench cli as --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"; None = MHBench default (OpenStack)
     gcp_relay_ip: str = "10.0.1.10"  # Internal IP of the management/bastion host on the victim-reachable management CIDR (10.0.1.0/24), constant across runs. The per-experiment telemetry relay runs here, and it's the fallback defender-box location for topologies without a defender_subnet (see MHBenchEnvironment._mgmt_internal_ip). Named gcp_relay_ip for historical reasons.

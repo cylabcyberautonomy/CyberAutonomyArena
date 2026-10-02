@@ -48,6 +48,8 @@ async def run_defender(
     bastion_ip: Optional[str] = None,
     defender_env_spec=None,
     defender_access=None,
+    env_action_socket: Optional[str] = None,
+    env_action_token: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +77,14 @@ async def run_defender(
     built["management_ip"] = cfg.arena_host_ip
     built["bastion_ip"] = bastion_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+    # Dynamic topology-mutation channel: the defender's RemoteEnvOrchestrator POSTs EnvActionRequest
+    # events to this UDS with this per-experiment token (see env_action_server.py). Injected ONLY into the
+    # defender config — the attacker config never carries it (nor any management address). Absent when the
+    # defender declared no VM budget (the window is never armed), so a non-mutating defender gets nothing.
+    if env_action_socket is not None and env_action_token is not None:
+        built["env_action_socket"] = env_action_socket
+        built["env_action_token"] = env_action_token
+        built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Preparing defender ({defender.type}), config: {config_path}")
     # EXTERNAL arming phase, symmetric with the attacker's setup(): stand up the box ES and run any
