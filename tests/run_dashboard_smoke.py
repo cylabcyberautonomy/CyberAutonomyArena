@@ -7,12 +7,14 @@ DASHBOARD end to end instead: it stands up a STUB upstream manager (captures wha
 forwards) and the REAL dashboard server pointed at that stub, then exercises the dashboard's HTTP
 surface and asserts:
 
-  1. GET /            -> 200, the submit UI renders (plugin ui-schemas loaded into the page).
-  2. GET /data        -> 200 (the dashboard proxies the manager's registry).
-  3. POST /submit with an EMBEDDED attacker payload -> the dashboard converts it to the
-     (plugin + spec-file) pair form and forwards THAT to the manager: the captured payload has
-     attacker_plugin + attacker_spec (no embedded `attacker`), and the spec file on disk holds the
-     bespoke fields with `type` stripped.
+  1. GET /             -> 200, serves the SPA shell with the submit form mount points.
+  2. GET /api/schema   -> 200, the plugin ui-schemas are discovered (incalmo_strategy present).
+  3. GET /api/experiments -> 200 (the dashboard proxies the manager's registry).
+  4. POST /api/submit with the real BROWSER-shaped payload (bare-string environment + an EMBEDDED
+     attacker {type,...}) -> the dashboard converts it server-side to the arena wire form and forwards
+     THAT: environment becomes {environment_plugin, environment_spec=environments/<group>/<stem>.json},
+     the attacker becomes attacker_plugin + attacker_spec (the bespoke fields as an inline dict, `type`
+     stripped, no embedded `attacker`), and the embedded defender passes through unchanged.
 
 It runs in ~1s and is safe to run anywhere (two loopback HTTP servers on ephemeral ports).
 
@@ -29,7 +31,6 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 
 def _free_port() -> int:
@@ -47,14 +48,14 @@ class _StubManager(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        # the dashboard's /data proxies GET /experiments
+        # the dashboard's /api/experiments proxies GET /experiments
         self._json(200, [])
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         _captured.append(body)
-        self._json(201, {"experiment_name": body.get("experiment_name", "?")})
+        self._json(201, {"experiment_name": body.get("experiment_name", "?"), "status": "Queued"})
 
     def _json(self, code, obj):
         data = json.dumps(obj).encode()
@@ -71,8 +72,7 @@ def _http(method, url, body=None, timeout=10):
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode()
-            return r.status, raw
+            return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
 
@@ -103,62 +103,59 @@ def main() -> int:
 
     base = f"http://127.0.0.1:{dash_port}"
     rows: list[tuple[str, bool, str]] = []
-    written_spec: Path | None = None
     try:
         if not _wait_up(f"http://127.0.0.1:{stub_port}/experiments") or not _wait_up(f"{base}/"):
             print("FAIL: servers did not come up")
             return 1
 
-        # 1. the page renders + the submit UI is present (schemas loaded)
+        # 1. the SPA shell renders with the submit form mount points
         code, html = _http("GET", f"{base}/")
-        ok = code == 200 and 'id="attacker-type"' in html and "incalmo_strategy" in html
-        rows.append(("GET / renders submit UI (schemas loaded)", ok, f"HTTP {code}, {len(html)} bytes"))
+        ok = code == 200 and 'id="atk-type-select"' in html and 'id="submit-form"' in html
+        rows.append(("GET / serves the SPA shell", ok, f"HTTP {code}, {len(html)} bytes"))
 
-        # 2. /data proxies the manager
-        code, _ = _http("GET", f"{base}/data")
-        rows.append(("GET /data proxies the manager", code == 200, f"HTTP {code}"))
+        # 2. the plugin ui-schemas are discovered and served
+        code, body = _http("GET", f"{base}/api/schema")
+        schema_ok = False
+        try:
+            schema = json.loads(body)
+            schema_ok = code == 200 and "incalmo_strategy" in (schema.get("attacker") or {})
+        except Exception:
+            pass
+        rows.append(("GET /api/schema discovers plugins", schema_ok,
+                     f"HTTP {code}; attackers: {sorted((json.loads(body).get('attacker') or {})) if code==200 else '?'}"))
 
-        # 3. POST /submit converts embedded attacker -> (plugin + spec-file) pair form and forwards it
+        # 3. the registry proxy works
+        code, _ = _http("GET", f"{base}/api/experiments")
+        rows.append(("GET /api/experiments proxies the manager", code == 200, f"HTTP {code}"))
+
+        # 4. the browser-shaped payload is converted to the arena wire form server-side
         _captured.clear()
         payload = {
             "experiment_name": "dash_smoke",
-            "environment": {"environment_plugin": "mhbench", "environment_spec": "equifax_small"},
-            "attacker_plugin": "incalmo_strategy",
-            "attacker_spec": {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"},
+            "environment": "instrumented/equifax_small_instrumented",   # bare <group>/<stem> (browser form)
+            "attacker": {"type": "incalmo_strategy",                    # embedded attacker (browser form)
+                         "strategy": "GraphSearch", "script_path": "/tmp/replay.json"},
             "defender": {"type": "canary"},
             "trial": 0,
         }
-        code, _ = _http("POST", f"{base}/submit", payload)
+        code, _ = _http("POST", f"{base}/api/submit", payload)
         fwd = _captured[-1] if _captured else {}
-        conv_ok = (
-            code == 201
-            and fwd.get("attacker_plugin") == "incalmo_strategy"
-            and isinstance(fwd.get("attacker_spec"), str)
-            and "attacker" not in fwd
-        )
-        rows.append(("POST /submit converts to plugin+spec pair form", conv_ok,
-                     f"HTTP {code}; forwarded keys: {sorted(fwd)}"))
-
-        # the spec file the dashboard wrote holds the bespoke fields, `type` stripped
-        spec_ok = False
-        detail = "no attacker_spec forwarded"
-        if isinstance(fwd.get("attacker_spec"), str):
-            written_spec = Path(fwd["attacker_spec"])
-            try:
-                spec = json.loads(written_spec.read_text())
-                spec_ok = spec == {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"}
-                detail = f"{written_spec.name}: {spec}"
-            except Exception as e:
-                detail = f"unreadable: {e}"
-        rows.append(("spec file written (fields only, no type)", spec_ok, detail))
+        env = fwd.get("environment") if isinstance(fwd.get("environment"), dict) else {}
+        env_ok = (env.get("environment_plugin") == "mhbench"
+                  and env.get("environment_spec") == "environments/instrumented/equifax_small_instrumented.json")
+        atk_ok = (fwd.get("attacker_plugin") == "incalmo_strategy"
+                  and fwd.get("attacker_spec") == {"strategy": "GraphSearch", "script_path": "/tmp/replay.json"}
+                  and "attacker" not in fwd)
+        def_ok = fwd.get("defender") == {"type": "canary"}
+        rows.append(("POST /api/submit -> environment wrapped + path-normalized", code == 201 and env_ok,
+                     f"HTTP {code}; environment={env}"))
+        rows.append(("POST /api/submit -> attacker plugin+spec (dict, type stripped)", atk_ok,
+                     f"attacker_plugin={fwd.get('attacker_plugin')!r} attacker_spec={fwd.get('attacker_spec')!r}"))
+        rows.append(("POST /api/submit -> embedded defender passes through", def_ok,
+                     f"defender={fwd.get('defender')!r}"))
     finally:
         stub.shutdown()
         dash.shutdown()
-        if written_spec is not None:
-            try:
-                written_spec.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     print("\nDASHBOARD SMOKE")
     for label, ok, detail in rows:
