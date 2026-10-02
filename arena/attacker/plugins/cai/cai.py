@@ -55,7 +55,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "foothold_ip": (env_spec.primary.host if env_spec.primary else None),
         }
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str], access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:
         base = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
         install = (
             "set -e; mkdir -p /opt/cai/logs; "

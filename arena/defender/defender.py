@@ -45,13 +45,13 @@ async def run_defender(
     environment: Optional[DeployedEnvironment],
     experiment_name: str,
     cfg: ExperimentManagerConfig,
-    mgmt_ip: Optional[str] = None,
+    bastion_ip: Optional[str] = None,
     defender_env_spec=None,
     defender_access=None,
 ) -> asyncio.subprocess.Process:
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    await defender.setup(experiment_name, environment, cfg, mgmt_ip,
+    await defender.setup(experiment_name, environment, cfg, bastion_ip,
                          defender_env_spec=defender_env_spec, defender_access=defender_access)
     built = defender.build_config(experiment_name, environment)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
@@ -65,11 +65,11 @@ async def run_defender(
     # "management_ip" is the harness's own fixed host (cfg.host_ip), NOT an Elasticsearch address — every
     # defender reads its OWN per-experiment ES on the defender box (see DefenderPlugin.prepare_box_es).
     # It is kept only so a defender's self-protection knows not to block the harness/manager host. It is
-    # NOT `mgmt_ip`/`bastion_ip` below, which is this experiment's own ephemeral bastion floating IP —
+    # NOT `bastion_ip`/`bastion_ip` below, which is this experiment's own ephemeral bastion floating IP —
     # Perry's AnsibleRunner needs THAT one to SSH-ProxyCommand into the experiment's internal 192.168.x.x
     # hosts (ssh -W %h:%p ... root@<bastion>).
     built["management_ip"] = cfg.host_ip
-    built["bastion_ip"] = mgmt_ip
+    built["bastion_ip"] = bastion_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Preparing defender ({defender.type}), config: {config_path}")

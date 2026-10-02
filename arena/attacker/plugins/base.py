@@ -90,7 +90,7 @@ class AttackerPlugin(BaseModel):
     ) -> asyncio.subprocess.Process:
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
-    async def setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str],
+    async def setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, bastion_ip: Optional[str],
                     access: Optional[list[SetupAccess]] = None) -> PreparedAttacker:
         """Prepare the foothold and block until the attacker is ready to run. Default: nothing to do.
 
@@ -180,7 +180,7 @@ class AttackerPlugin(BaseModel):
     def _lifecycle(experiment: "Experiment"):
         return getattr(experiment, "_attacker_lifecycle", None)
 
-    async def run_setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, mgmt_ip: Optional[str],
+    async def run_setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, bastion_ip: Optional[str],
                         access: Optional[list[SetupAccess]] = None) -> "PreparedAttacker":
         lc = self._lifecycle(experiment)
         if lc is not None:
@@ -188,7 +188,7 @@ class AttackerPlugin(BaseModel):
         if access and cfg is not None:
             self._persist_access(experiment.experiment_name, cfg, access)  # so run_start/stop/collect recover it
         try:
-            prepared = await self.setup(experiment, cfg, mgmt_ip, access)
+            prepared = await self.setup(experiment, cfg, bastion_ip, access)
         except Exception as e:  # noqa: BLE001 — surface as a FAILED signal, then re-raise for the arena
             if lc is not None:
                 await lc.emit(AttackerSignal.FAILED, error=str(e))

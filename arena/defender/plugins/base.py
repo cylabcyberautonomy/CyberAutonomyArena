@@ -83,7 +83,7 @@ class DefenderPlugin(BaseModel):
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str] = None,
+        bastion_ip: Optional[str] = None,
         defender_env_spec=None,
         defender_access=None,
     ) -> None:
@@ -94,7 +94,7 @@ class DefenderPlugin(BaseModel):
         container) to tear down on failure, so this has no transactional cleanup -
         raising here just fails the defender start (see run_defender()'s caller).
 
-        `mgmt_ip` is this experiment's own bastion floating IP (from MHBench
+        `bastion_ip` is this experiment's own bastion floating IP (from MHBench
         provisioning) - NOT the same as cfg.host_ip (the harness's own fixed
         address, used for Elasticsearch). Any AnsibleRunner use needs THIS one to
         SSH-ProxyCommand into the experiment's internal hosts at all.

@@ -208,7 +208,7 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
             raise RuntimeError(f"Failed to push {dest} to foothold: {stderr.decode().strip()}")
 
     # -- lifecycle (no C2; a pure shell agent, like Terminus/CAI) -----------------------------------
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str], access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:
         ssh_base_cmd = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
         # Install the openshell CLI + local gateway on foothold. The installer needs a container runtime
         # (Docker/Podman); ensure docker is present (the victim range has no apt mirror only on GCP —

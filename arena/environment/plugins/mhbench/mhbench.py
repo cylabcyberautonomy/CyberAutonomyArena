@@ -78,7 +78,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     async def configure(
         self,
         experiment: "Experiment",
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
         c2c_url: Optional[str],
         cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
@@ -88,7 +88,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         if lc:
             lc.emit(EnvironmentSignal.CONFIGURING)
         try:
-            await configure_environment(experiment, mgmt_ip, c2c_url, cfg)
+            await configure_environment(experiment, bastion_ip, c2c_url, cfg)
         except Exception as e:  # noqa: BLE001
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
@@ -114,16 +114,16 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import attacker_env_spec
         return attacker_env_spec(deployed, cfg)
 
-    def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+    def attacker_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         from .deployer import attacker_setup_access, _bastion_proxy_args
         # The env ISSUES the attacker's scoped credential (foothold-only). Both hops in SetupAccess use
         # it: the final hop opens a shell on the foothold, and the bastion hop tunnels with the SAME key
         # (forward-only on the bastion). The broad management key never enters SetupAccess — assume a
         # plugin may forward SetupAccess to its agent, so nothing in it may out-scope the system.
         cred = self.attacker_credential(deployed, cfg)
-        proxy = _bastion_proxy_args(mgmt_ip, cred)
+        proxy = _bastion_proxy_args(bastion_ip, cred)
         return [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
-                for a in attacker_setup_access(deployed, mgmt_ip, cfg)]
+                for a in attacker_setup_access(deployed, bastion_ip, cfg)]
 
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import defender_env_spec
@@ -131,24 +131,24 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         spec.box = self.defender_box(deployed, cfg)  # every env provides the defender box
         return spec
 
-    def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+    def defender_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         from .deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
         from ....attacker.env_spec import SetupAccess
         cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
         # Both hops use the scoped defender key: final hop = shell on box/victims, bastion hop = tunnel
         # with the same key (forward-only on the bastion). No management key in SetupAccess (a plugin may
         # forward it to its agent).
-        proxy = _bastion_proxy_args(mgmt_ip, cred)
+        proxy = _bastion_proxy_args(bastion_ip, cred)
         access = [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
-                  for a in defender_setup_access(deployed, mgmt_ip, cfg)]
+                  for a in defender_setup_access(deployed, bastion_ip, cfg)]
         # When the topology declares a defender_subnet, the deployer already added the REAL box entry
         # (reached via the bastion, like the victims). Only fall back to the mgmt-host placeholder for
         # older topologies without an isolated box, so the defender always has somewhere to run.
         topo = deployed.topology_spec if deployed else None
         has_real_box = bool(topo and Path(topo).exists() and _defender_box_host(topo))
-        if not has_real_box and mgmt_ip:
+        if not has_real_box and bastion_ip:
             box = self.defender_box(deployed, cfg)
-            access.append(SetupAccess(name=box.name, host=mgmt_ip, user="root",
+            access.append(SetupAccess(name=box.name, host=bastion_ip, user="root",
                                       ssh_key=cred, ssh_common_args=""))
         return access
 
@@ -186,11 +186,11 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import defender_box_spec
         return defender_box_spec(deployed, cfg) is not None
 
-    async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
+    async def program_ingress(self, experiment, bastion_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay
         # dests for telemetry ports; mgmt forward + SG for forward ports). No-op for {} — box isolated.
         from .deployer import request_ingress_env
-        await request_ingress_env(experiment, mgmt_ip, cfg, ingress)
+        await request_ingress_env(experiment, bastion_ip, cfg, ingress)
 
     async def _teardown_decoys(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
         """Delete any VMs standing on this experiment's networks that aren't topology hosts (decoys) -

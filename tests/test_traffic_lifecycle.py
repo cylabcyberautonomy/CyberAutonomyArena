@@ -28,19 +28,19 @@ class _FakeTraffic(TrafficPlugin, config_type="_fake_traffic_test"):
     def ui_schema(cls):
         return {"config_type": "_fake_traffic_test", "label": "fake", "fields": [], "cartesian_product": False}
 
-    async def setup(self, experiment, cfg, mgmt_ip):
+    async def setup(self, experiment, cfg, bastion_ip):
         self.calls.append("setup")
 
-    async def start(self, experiment, cfg, mgmt_ip):
+    async def start(self, experiment, cfg, bastion_ip):
         self.calls.append("start")
 
-    async def stop(self, experiment, cfg, mgmt_ip):
+    async def stop(self, experiment, cfg, bastion_ip):
         self.calls.append("stop")
 
-    async def collect_logs(self, experiment, cfg, dest, mgmt_ip):
+    async def collect_logs(self, experiment, cfg, dest, bastion_ip):
         self.calls.append("collect_logs")
 
-    async def teardown(self, experiment, cfg, mgmt_ip):
+    async def teardown(self, experiment, cfg, bastion_ip):
         self.calls.append("teardown")
 
 

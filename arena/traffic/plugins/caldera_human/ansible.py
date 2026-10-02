@@ -40,7 +40,7 @@ def victim_hosts(topology_path: Path) -> list[tuple[str, str]]:
     return out
 
 
-def _proxy_command(mgmt_ip: str, ssh_key: Path) -> str:
+def _proxy_command(bastion_ip: str, ssh_key: Path) -> str:
     # Mirrors MHBench's bastion hop: key-auth only (fail fast, no password hang) and
     # /dev/null known-hosts so a recycled bastion floating IP with a stale key doesn't
     # get rejected (the ProxyJump/known_hosts trap).
@@ -48,12 +48,12 @@ def _proxy_command(mgmt_ip: str, ssh_key: Path) -> str:
         f"ssh -W %h:%p -i {ssh_key} "
         f"-o BatchMode=yes -o PasswordAuthentication=no "
         f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"root@{mgmt_ip}"
+        f"root@{bastion_ip}"
     )
 
 
-def _write_inventory(hosts: list[tuple[str, str]], mgmt_ip: str, ssh_key: Path, tmp: Path) -> Path:
-    proxy = _proxy_command(mgmt_ip, ssh_key)
+def _write_inventory(hosts: list[tuple[str, str]], bastion_ip: str, ssh_key: Path, tmp: Path) -> Path:
+    proxy = _proxy_command(bastion_ip, ssh_key)
     common = (
         "-o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null "
@@ -83,7 +83,7 @@ def run_play(
     *,
     action: str,
     topology_path: Path,
-    mgmt_ip: str,
+    bastion_ip: str,
     ssh_key: Path,
     ansible_playbook_bin: Path,
     extravars: dict,
@@ -98,7 +98,7 @@ def run_play(
     ssh_key = Path(os.path.expanduser(str(ssh_key)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        inventory = _write_inventory(hosts, mgmt_ip, ssh_key, tmp)
+        inventory = _write_inventory(hosts, bastion_ip, ssh_key, tmp)
         varfile = tmp / "extravars.json"
         varfile.write_text(json.dumps({"bgtraffic_action": action, **extravars}))
 

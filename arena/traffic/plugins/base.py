@@ -12,11 +12,11 @@ scoring time.
 Lifecycle (all no-ops by default; the harness calls them only when a traffic
 config is present, so a run without one behaves exactly as before):
 
-    setup(experiment, cfg, mgmt_ip)          # install generator+persona on victims (heavy; pre-rotation)
-    start(experiment, cfg, mgmt_ip)          # start it (fast; POST-rotation, so noise is in the attack logs)
-    stop(experiment, cfg, mgmt_ip)           # stop it (attacker finished)
-    collect_logs(experiment, cfg, dest, mgmt_ip)  # pull activity log before VMs are destroyed
-    teardown(experiment, cfg, mgmt_ip)       # best-effort extra cleanup
+    setup(experiment, cfg, bastion_ip)          # install generator+persona on victims (heavy; pre-rotation)
+    start(experiment, cfg, bastion_ip)          # start it (fast; POST-rotation, so noise is in the attack logs)
+    stop(experiment, cfg, bastion_ip)           # stop it (attacker finished)
+    collect_logs(experiment, cfg, dest, bastion_ip)  # pull activity log before VMs are destroyed
+    teardown(experiment, cfg, bastion_ip)       # best-effort extra cleanup
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class TrafficPlugin(BaseModel):
         self,
         experiment: "Experiment",
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
     ) -> None:
         """Install the generator + persona onto the victim hosts. Runs BEFORE the
         pre-attack log rotation (like attacker setup) so install noise is rotated
@@ -66,7 +66,7 @@ class TrafficPlugin(BaseModel):
         self,
         experiment: "Experiment",
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
     ) -> None:
         """Start the generator on the victim hosts. Runs AFTER rotation so the
         benign activity is captured in the same attack-phase telemetry the
@@ -76,7 +76,7 @@ class TrafficPlugin(BaseModel):
         self,
         experiment: "Experiment",
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
     ) -> None:
         """Stop the generator (attacker has finished). Best-effort."""
 
@@ -85,7 +85,7 @@ class TrafficPlugin(BaseModel):
         experiment: "Experiment",
         cfg: ExperimentManagerConfig,
         dest: Path,
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
     ) -> None:
         """Pull the per-host labeled activity log into ``dest`` before the VMs are
         destroyed. Best-effort: losing this log must never block reclaiming VMs."""
@@ -94,7 +94,7 @@ class TrafficPlugin(BaseModel):
         self,
         experiment: "Experiment",
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
     ) -> None:
         """Best-effort cleanup of anything MHBench's own teardown won't remove.
         Default no-op — the generator lives on VMs that get destroyed anyway."""

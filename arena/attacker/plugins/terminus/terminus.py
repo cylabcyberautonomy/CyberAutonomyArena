@@ -84,7 +84,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             raise RuntimeError(f"Failed to push {dest} to foothold: {stderr.decode().strip()}")
 
     # -- lifecycle (no C2; a pure shell agent, like CAI) -----------------------------------
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str], access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:
         ssh_base_cmd = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
         install = (
             "set -e; mkdir -p /opt/terminus/logs; "

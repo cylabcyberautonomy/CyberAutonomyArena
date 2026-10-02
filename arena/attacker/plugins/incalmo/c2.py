@@ -134,10 +134,10 @@ def _free_local_port() -> int:
         s.close()
 
 
-def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None = None) -> tuple[str, str, str]:
+def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | None = None) -> tuple[str, str, str]:
     """Run the C2 on the foothold and open a tunnel to it for the attacker LLM. Reaches the foothold
     only via the env-provided SetupAccess (scoped key + bastion routing) — never a management key off
-    disk. `mgmt_ip` is accepted for log messages only; the routing is opaque in access.ssh_common_args.
+    disk. `bastion_ip` is accepted for log messages only; the routing is opaque in access.ssh_common_args.
     Returns (sentinel, remote_url, local_url):
       sentinel  = "foothold-c2:<exp>"       (legacy handle; teardown is keyed by experiment_name)
       remote_url= http://<foothold>:8888    (in-env address sandcat agents / the setup play beacon to)
@@ -173,17 +173,17 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None
         if proc.returncode == 0:
             if attempt:
                 logger.info("[foothold-c2] foothold %s reachable via %s after %d failed attempt(s)",
-                            foothold_ip, mgmt_ip, attempt)
+                            foothold_ip, bastion_ip, attempt)
             break
         last_err = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
         if attempt == 0 or attempt % 6 == 5:
             logger.warning("[foothold-c2] poll foothold %s via %s attempt %d/45 rc=%d: %s",
-                           foothold_ip, mgmt_ip, attempt + 1, proc.returncode,
+                           foothold_ip, bastion_ip, attempt + 1, proc.returncode,
                            last_err[:250] or "(no stderr)")
         time.sleep(10)
     else:
         raise RuntimeError(
-            f"[foothold-c2] SSH to foothold {foothold_ip} (via bastion {mgmt_ip}) never came up; "
+            f"[foothold-c2] SSH to foothold {foothold_ip} (via bastion {bastion_ip}) never came up; "
             f"last ssh error: {last_err[:300] or '(none captured)'}")
 
     # 1b. Reachability confirmed — now open the shared ControlMaster EXPLICITLY (a plain `ssh -o ...ctl true`
@@ -195,7 +195,7 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None
         if mo.returncode == 0:
             break
         logger.warning("[foothold-c2] master-open to foothold %s via %s try %d/6 rc=%d: %s",
-                       foothold_ip, mgmt_ip, m + 1, mo.returncode,
+                       foothold_ip, bastion_ip, m + 1, mo.returncode,
                        (mo.stderr or "").strip().replace("\n", " ")[:200] or "(no stderr)")
         _close_master(access, ctl)  # reap the failed/half-open master before retrying
         time.sleep(5)
@@ -281,11 +281,11 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: str | None
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               start_new_session=True)
     _statefile(experiment_name).write_text(json.dumps({
-        "tunnel_pid": tunnel.pid, "foothold_ip": foothold_ip, "mgmt_ip": mgmt_ip, "local_port": local_port,
+        "tunnel_pid": tunnel.pid, "foothold_ip": foothold_ip, "mgmt_ip": bastion_ip, "local_port": local_port,
         "access": access.model_dump(),  # so teardown reaches foothold with the same scoped key + routing, no disk read
     }))
     logger.info("[foothold-c2] resilient tunnel supervisor pid=%s 127.0.0.1:%s -> %s:%s (via %s)",
-                tunnel.pid, local_port, foothold_ip, _C2_PORT, mgmt_ip)
+                tunnel.pid, local_port, foothold_ip, _C2_PORT, bastion_ip)
 
     # 7. Wait until the C2 serves through the tunnel (first boot runs `uv sync`; give ~4 min).
     url = f"http://127.0.0.1:{local_port}/agents"
@@ -382,7 +382,7 @@ def sweep_stale_tunnels() -> None:
 # ----------------------------------------------------------------------------------------------
 
 async def start_c2c_server(
-    experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: str | None = None, foothold_access=None,
+    experiment_name: str, cfg: ExperimentManagerConfig, bastion_ip: str | None = None, foothold_access=None,
 ) -> tuple[str, str, str]:
     """Bring up the Incalmo C2 on the attacker's foothold and return once it is serving.
 
@@ -401,7 +401,7 @@ async def start_c2c_server(
             "(scoped key + routing) was passed to start_c2c_server()")
     loop = asyncio.get_event_loop()
     sentinel, remote_url, local_url = await loop.run_in_executor(
-        None, setup_c2, experiment_name, cfg, foothold_access, mgmt_ip)
+        None, setup_c2, experiment_name, cfg, foothold_access, bastion_ip)
     log(experiment_name, f"C2 on foothold: agents -> {remote_url}, harness (tunnel) -> {local_url}")
     return sentinel, remote_url, local_url
 

@@ -86,7 +86,7 @@ def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
     )
 
 
-def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+def attacker_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: Optional[str], cfg: ExperimentManagerConfig):
     """Build the harness-only SetupAccess for the attacker's foothold (how to reach it to prep it —
     key + routing through the bastion). Never given to the adversary. ssh_common_args routes through
     the bastion via ProxyCommand; the plugin stamps in the scoped attacker key."""
@@ -96,10 +96,10 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
         return []
     key = _mhbench_ssh_key(cfg)
     proxy = ""
-    if mgmt_ip:
+    if bastion_ip:
         proxy = (
             f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
-            f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{mgmt_ip}"'
+            f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{bastion_ip}"'
         )
     return [SetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
@@ -155,8 +155,8 @@ def _role_from_name(name: str) -> Optional[str]:
     return re.sub(r"\d+$", "", name) or None
 
 
-def _bastion_proxy_args(mgmt_ip: Optional[str], key: str) -> str:
-    if not mgmt_ip:
+def _bastion_proxy_args(bastion_ip: Optional[str], key: str) -> str:
+    if not bastion_ip:
         return ""
     # IdentitiesOnly=yes on BOTH hops is load-bearing: it forces ssh to offer ONLY this scoped key.
     # Without it, ssh also tries default/agent keys — and whoever runs this (the harness, or a plugin
@@ -167,7 +167,7 @@ def _bastion_proxy_args(mgmt_ip: Optional[str], key: str) -> str:
         f'-o IdentitiesOnly=yes '
         f'-o ProxyCommand="ssh -W %h:%p -i {key} -o IdentitiesOnly=yes -o BatchMode=yes '
         f'-o PasswordAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
-        f'root@{mgmt_ip}"'
+        f'root@{bastion_ip}"'
     )
 
 
@@ -197,7 +197,7 @@ def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path]:
     return out[0], out[1]
 
 
-def _inject_bastion_jump(pubkey: str, targets: list[str], mgmt_ip: str, mgmt_key: str) -> bool:
+def _inject_bastion_jump(pubkey: str, targets: list[str], bastion_ip: str, mgmt_key: str) -> bool:
     """Add a FORWARD-ONLY entry for pubkey to the BASTION's root authorized_keys: it may ONLY open a
     tunnel (ssh -W) to the listed host:port targets — no shell, no PTY, no other forwarding. Replaces
     any prior entry for the same key (idempotent). This is what lets a system's SetupAccess route its
@@ -222,17 +222,17 @@ def _inject_bastion_jump(pubkey: str, targets: list[str], mgmt_ip: str, mgmt_key
     )
     r = subprocess.run(
         ["ssh", "-i", mgmt_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", f"root@{mgmt_ip}", remote],
+         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", f"root@{bastion_ip}", remote],
         capture_output=True, text=True, timeout=60,
     )
     return r.returncode == 0
 
 
-def _inject_pubkey(pubkey: str, host_ip: str, mgmt_ip: str, mgmt_key: str) -> bool:
+def _inject_pubkey(pubkey: str, host_ip: str, bastion_ip: str, mgmt_key: str) -> bool:
     """Append pubkey to root's authorized_keys on host_ip (reached via the bastion with the broad
     management key). Idempotent per host."""
     proxy = (f"ssh -W %h:%p -i {mgmt_key} -o BatchMode=yes -o StrictHostKeyChecking=no "
-             f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 root@{mgmt_ip}")
+             f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 root@{bastion_ip}")
     remote = ("install -d -m700 ~/.ssh && touch ~/.ssh/authorized_keys && "
               f"grep -qxF {pubkey!r} ~/.ssh/authorized_keys || echo {pubkey!r} >> ~/.ssh/authorized_keys")
     r = subprocess.run(
@@ -244,7 +244,7 @@ def _inject_pubkey(pubkey: str, host_ip: str, mgmt_ip: str, mgmt_key: str) -> bo
     return r.returncode == 0
 
 
-def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
+def inject_scoped_keys(experiment: Experiment, bastion_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
     """Issue + inject the per-system scoped keys so NOTHING a plugin could forward to its agent grants
     more than that system could earn. For each system, ONE keypair serves both hops:
       - a full-shell entry on the system's own hosts (attacker_key -> foothold; defender_key -> box +
@@ -255,8 +255,8 @@ def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: Expe
         runs in the harness and is never handed out.
     Best-effort per host (logged)."""
     name = experiment.experiment_name
-    if not mgmt_ip:
-        log(name, "inject_scoped_keys: no mgmt_ip; skipping per-system key injection.")
+    if not bastion_ip:
+        log(name, "inject_scoped_keys: no bastion_ip; skipping per-system key injection.")
         return
     topo = resolve_topology_path(experiment.environment_spec, cfg)
     ak, dk = issue_scoped_keys(cfg)
@@ -267,9 +267,9 @@ def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: Expe
     # attacker: full shell on the foothold, forward-only tunnel to it on the bastion
     kali_ip = _kali_ip_from_spec(topo)
     if kali_ip:
-        ok = _inject_pubkey(ak_pub, kali_ip, mgmt_ip, mgmt_key)
+        ok = _inject_pubkey(ak_pub, kali_ip, bastion_ip, mgmt_key)
         log(name, f"per-system key: attacker_key -> foothold {kali_ip}: {'ok' if ok else 'FAILED'}")
-        jok = _inject_bastion_jump(ak_pub, [f"{kali_ip}:22"], mgmt_ip, mgmt_key)
+        jok = _inject_bastion_jump(ak_pub, [f"{kali_ip}:22"], bastion_ip, mgmt_key)
         log(name, f"jump: attacker_key forward-only on bastion -> {kali_ip}:22: {'ok' if jok else 'FAILED'}")
 
     # defender: full shell on box + victims, forward-only tunnel to exactly those on the bastion
@@ -281,16 +281,16 @@ def inject_scoped_keys(experiment: Experiment, mgmt_ip: Optional[str], cfg: Expe
         if h.get("ip_address"):
             targets.append((h["name"], str(h["ip_address"])))
     for hname, hip in targets:
-        ok = _inject_pubkey(dk_pub, hip, mgmt_ip, mgmt_key)
+        ok = _inject_pubkey(dk_pub, hip, bastion_ip, mgmt_key)
         log(name, f"per-system key: defender_key -> {hname} {hip}: {'ok' if ok else 'FAILED'}")
     if targets:
-        jok = _inject_bastion_jump(dk_pub, [f"{ip}:22" for _, ip in targets], mgmt_ip, mgmt_key)
+        jok = _inject_bastion_jump(dk_pub, [f"{ip}:22" for _, ip in targets], bastion_ip, mgmt_key)
         log(name, f"jump: defender_key forward-only on bastion -> {len(targets)} hosts: {'ok' if jok else 'FAILED'}")
 
 
-async def inject_scoped_keys_env(experiment: Experiment, mgmt_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
+async def inject_scoped_keys_env(experiment: Experiment, bastion_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, inject_scoped_keys, experiment, mgmt_ip, cfg)
+    await loop.run_in_executor(None, inject_scoped_keys, experiment, bastion_ip, cfg)
 
 
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
@@ -312,7 +312,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
     )
 
 
-def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Optional[str], cfg: ExperimentManagerConfig):
+def defender_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: Optional[str], cfg: ExperimentManagerConfig):
     """Build the harness-only SetupAccess for each victim the defender may reach — key + bastion
     routing. Never given to the defender's brain; the plugin stamps in the scoped defender key."""
     from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
@@ -320,7 +320,7 @@ def defender_setup_access(deployed: Optional[DeployedEnvironment], mgmt_ip: Opti
     if not (topo and Path(topo).exists()):
         return []
     key = _mhbench_ssh_key(cfg)
-    proxy = _bastion_proxy_args(mgmt_ip, key)
+    proxy = _bastion_proxy_args(bastion_ip, key)
     out = []
     for h in _iter_victims(topo):
         ip = h.get("ip_address")
@@ -366,27 +366,27 @@ def _provision_sync(
     if result.returncode != 0:
         raise _mhbench_error("provision", result.returncode, mhbench_log)
 
-    mgmt_ip: Optional[str] = None
+    bastion_ip: Optional[str] = None
     if provision_result_path.exists():
-        mgmt_ip = json.loads(provision_result_path.read_text()).get("mgmt_ip")
+        bastion_ip = json.loads(provision_result_path.read_text()).get("mgmt_ip")
 
     kali_ip = _kali_ip_from_spec(topology_path)
-    log(experiment_name, f"Provisioning complete. Kali IP: {kali_ip}, mgmt IP: {mgmt_ip}")
+    log(experiment_name, f"Provisioning complete. Kali IP: {kali_ip}, mgmt IP: {bastion_ip}")
     return DeployedEnvironment(
         topology_spec=str(topology_path),
         ip=kali_ip,
         spec=Path(environment_spec).stem,
-    ), mgmt_ip
+    ), bastion_ip
 
 
 def _configure_sync(
     experiment_name: str,
     environment_spec: str,
-    mgmt_ip: Optional[str],
+    bastion_ip: Optional[str],
     c2c_url: Optional[str],
     cfg: ExperimentManagerConfig,
 ) -> None:
-    if mgmt_ip is None:
+    if bastion_ip is None:
         return
 
     mhbench_dir = cfg.mhbench_dir
@@ -398,7 +398,7 @@ def _configure_sync(
         str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
         "configure", str(topology_path),
         "--project-name", experiment_name,
-        "--mgmt-ip", mgmt_ip,
+        "--mgmt-ip", bastion_ip,
     ]
     if c2c_url:
         cmd += ["--c2c-url", c2c_url]
@@ -429,17 +429,17 @@ async def provision_environment(
 
 async def configure_environment(
     experiment: Experiment,
-    mgmt_ip: Optional[str],
+    bastion_ip: Optional[str],
     c2c_url: Optional[str],
     cfg: ExperimentManagerConfig,
 ) -> None:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, _configure_sync, experiment.experiment_name, experiment.environment_spec, mgmt_ip, c2c_url, cfg
+        None, _configure_sync, experiment.experiment_name, experiment.environment_spec, bastion_ip, c2c_url, cfg
     )
 
 
-def _request_ingress_sync(experiment_name: str, environment_spec: str, mgmt_ip: str,
+def _request_ingress_sync(experiment_name: str, environment_spec: str, bastion_ip: str,
                           cfg: ExperimentManagerConfig, ingress: dict) -> None:
     """Provision the DEFENDER-REQUESTED box ingress by invoking `cli.py request-ingress` — exactly the
     ports the defender declared (ingress = {"telemetry": [..], "forward": [..]}). telemetry -> relay
@@ -453,7 +453,7 @@ def _request_ingress_sync(experiment_name: str, environment_spec: str, mgmt_ip: 
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
     cmd = [str(python), str(cli), *_mhb_config_args(cfg), "request-ingress", str(topology_path),
-           "--project-name", experiment_name, "--mgmt-ip", mgmt_ip]
+           "--project-name", experiment_name, "--mgmt-ip", bastion_ip]
     for p in telemetry:
         cmd += ["--telemetry", str(p)]
     for p in forward:
@@ -468,13 +468,13 @@ def _request_ingress_sync(experiment_name: str, environment_spec: str, mgmt_ip: 
     log(experiment_name, "Defender box ingress provisioned.")
 
 
-async def request_ingress_env(experiment: Experiment, mgmt_ip: Optional[str],
+async def request_ingress_env(experiment: Experiment, bastion_ip: Optional[str],
                               cfg: ExperimentManagerConfig, ingress: dict) -> None:
-    if not mgmt_ip or not ingress:
+    if not bastion_ip or not ingress:
         return
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _request_ingress_sync,
-                               experiment.experiment_name, experiment.environment_spec, mgmt_ip, cfg, ingress)
+                               experiment.experiment_name, experiment.environment_spec, bastion_ip, cfg, ingress)
 
 
 # NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its

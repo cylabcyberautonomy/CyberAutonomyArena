@@ -7,8 +7,8 @@ defender need. See the repo-root ``CLAUDE.md`` ("Adding an ENVIRONMENT plugin") 
 
 Lifecycle the arena drives:
     capacity(experiment, cfg)                    -> [(vcpus, ram_mb, disk_gb), ...]  # admission sizing
-    provision(experiment, c2c_url, cfg)          -> (DeployedEnvironment, mgmt_ip)
-    configure(experiment, mgmt_ip, c2c_url, cfg) -> None
+    provision(experiment, c2c_url, cfg)          -> (DeployedEnvironment, bastion_ip)
+    configure(experiment, bastion_ip, c2c_url, cfg) -> None
     collect(experiment, cfg)                     -> None   # pull host logs before teardown
     teardown(experiment, cfg)                    -> None
 """
@@ -67,7 +67,7 @@ class EnvironmentPlugin(BaseModel):
     async def configure(
         self,
         experiment: "Experiment",
-        mgmt_ip: Optional[str],
+        bastion_ip: Optional[str],
         c2c_url: Optional[str],
         cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
@@ -94,7 +94,7 @@ class EnvironmentPlugin(BaseModel):
         """AGENT-FACING AttackerEnvSpec: objective + foothold identity (no creds/routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement attacker_spec()")
 
-    def attacker_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+    def attacker_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         """SETUP ACCESS: list[SetupAccess] for the attacker's foothold(s) (setup-time key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement attacker_setup_access()")
 
@@ -102,7 +102,7 @@ class EnvironmentPlugin(BaseModel):
         """AGENT-FACING DefenderEnvSpec: objective + host inventory (no creds/routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_spec()")
 
-    def defender_setup_access(self, deployed, mgmt_ip, cfg: ExperimentManagerConfig):
+    def defender_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         """SETUP ACCESS: list[SetupAccess] for the victims (+ the defender box) the defender may reach
         (key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
@@ -143,7 +143,7 @@ class EnvironmentPlugin(BaseModel):
         isolated box exists overrides this to report the real box only."""
         return self.defender_box(deployed, cfg) is not None
 
-    async def program_ingress(self, experiment, mgmt_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
+    async def program_ingress(self, experiment, bastion_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
         """Open EXACTLY the box ingress the defender declared (ingress = {"telemetry": [ports],
         "forward": [ports]}). telemetry → route the relay to box:port; forward → victim→mgmt:port→box:port.
         The environment assumes NO defender port; a defender that declares {} opens nothing (box stays

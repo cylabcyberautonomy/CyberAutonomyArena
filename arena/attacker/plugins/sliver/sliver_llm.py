@@ -71,13 +71,13 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
         """build_config() reads the Sliver C2 coordinates off its own baton — fill one in for offline tests."""
         return SliverPreparedC2(operator_cfg="/tmp/operator.cfg", listener_addr="192.0.2.1:8443")
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, access=None) -> PreparedAttacker:
         _preflight_sliver_venv(cfg)
         foothold_access = self.primary_access(access) if access else None
         if foothold_access is None:
             raise RuntimeError("the Sliver C2 runs on the attacker foothold, but setup() got no SetupAccess")
         try:
-            return await sliver_c2.setup_c2(experiment.experiment_name, cfg, foothold_access, mgmt_ip)
+            return await sliver_c2.setup_c2(experiment.experiment_name, cfg, foothold_access, bastion_ip)
         except Exception:
             await self.stop_c2c(experiment.experiment_name)  # tear down a partial C2 (keyed by name)
             raise

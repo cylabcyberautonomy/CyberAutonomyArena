@@ -118,7 +118,7 @@ async def _run_sliver_ops(cfg, subcmd: str, args: list[str], timeout: int = 300)
     return proc.returncode, out.decode("utf-8", "replace")
 
 
-async def setup_c2(experiment_name: str, cfg, access: SetupAccess, mgmt_ip: Optional[str] = None) -> SliverPreparedC2:
+async def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: Optional[str] = None) -> SliverPreparedC2:
     """Bring the Sliver C2 up on the foothold and return once the initial session is in. Raises on
     failure (the plugin tears down a partial C2 via teardown_c2)."""
     if access is None or not access.host:

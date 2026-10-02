@@ -119,9 +119,9 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
         return out
 
     @staticmethod
-    def _recover_mgmt_ip(experiment, cfg: ExperimentManagerConfig) -> Optional[str]:
+    def _recover_bastion_ip(experiment, cfg: ExperimentManagerConfig) -> Optional[str]:
         """Re-read the bastion floating IP from where provisioning wrote it — the
-        teardown path (stop/collect) runs without the live mgmt_ip, exactly like
+        teardown path (stop/collect) runs without the live bastion_ip, exactly like
         collect_environment/rotate_environment do."""
         pr = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "provision_result.json"
         if pr.exists():
@@ -131,27 +131,27 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
                 return None
         return None
 
-    def _common(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> dict:
-        if mgmt_ip is None:
-            mgmt_ip = self._recover_mgmt_ip(experiment, cfg)
-        if mgmt_ip is None:
-            raise RuntimeError("CalderaHumanTraffic needs the experiment bastion IP (mgmt_ip).")
+    def _common(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> dict:
+        if bastion_ip is None:
+            bastion_ip = self._recover_bastion_ip(experiment, cfg)
+        if bastion_ip is None:
+            raise RuntimeError("CalderaHumanTraffic needs the experiment bastion IP (bastion_ip).")
         return dict(
             topology_path=_topology_path(cfg, experiment.environment_spec),
-            mgmt_ip=mgmt_ip,
+            bastion_ip=bastion_ip,
             ssh_key=_mhbench_ssh_key(cfg),
             ansible_playbook_bin=_ansible_playbook_bin(cfg),
             log_path=_traffic_out(experiment.experiment_name, cfg) / "bgtraffic_ansible.log",
         )
 
     # -- lifecycle ---------------------------------------------------------
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> None:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
         import asyncio
 
         bg = _resolve_bgtraffic_dir(cfg)
         out_dir = _traffic_out(experiment.experiment_name, cfg)
         persona_file = self._render_persona_file(cfg, out_dir)  # validates too
-        common = self._common(experiment, cfg, mgmt_ip)
+        common = self._common(experiment, cfg, bastion_ip)
         log(experiment.experiment_name,
             f"[traffic] installing caldera_human (persona={self.persona_inline and '<inline>' or self.persona}) on victims")
         await asyncio.get_event_loop().run_in_executor(
@@ -168,30 +168,30 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
             ),
         )
 
-    async def start(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> None:
+    async def start(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
         import asyncio
 
-        common = self._common(experiment, cfg, mgmt_ip)
+        common = self._common(experiment, cfg, bastion_ip)
         log(experiment.experiment_name, "[traffic] starting caldera_human daemon on victims")
         await asyncio.get_event_loop().run_in_executor(
             None, lambda: bg_ansible.run_play(action="start", extravars={}, **common)
         )
 
-    async def stop(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str]) -> None:
+    async def stop(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
         import asyncio
 
         try:
-            common = self._common(experiment, cfg, mgmt_ip)
+            common = self._common(experiment, cfg, bastion_ip)
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: bg_ansible.run_play(action="stop", extravars={}, **common)
             )
         except Exception:  # noqa: BLE001 — stop is best-effort (host may already be gone)
             log(experiment.experiment_name, "[traffic] stop failed (best-effort) — continuing")
 
-    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, mgmt_ip: Optional[str]) -> None:
+    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, bastion_ip: Optional[str]) -> None:
         import asyncio
 
-        common = self._common(experiment, cfg, mgmt_ip)
+        common = self._common(experiment, cfg, bastion_ip)
         collect_dir = dest / "traffic" / "activity_logs"
         collect_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.get_event_loop().run_in_executor(

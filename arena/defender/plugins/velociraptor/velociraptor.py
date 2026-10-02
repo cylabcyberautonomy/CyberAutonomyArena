@@ -82,12 +82,12 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
-        mgmt_ip: Optional[str] = None,
+        bastion_ip: Optional[str] = None,
         defender_env_spec=None,
         defender_access=None,
     ) -> None:
-        if mgmt_ip is None:
-            raise RuntimeError("Velociraptor defender needs the experiment bastion IP (mgmt_ip).")
+        if bastion_ip is None:
+            raise RuntimeError("Velociraptor defender needs the experiment bastion IP (bastion_ip).")
         velo_dir = _require_velociraptor_dir(cfg)
         spec = environment.topology_spec if environment else None
         # topology_spec from the environment may be an absolute path; else derive it.

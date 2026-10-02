@@ -18,13 +18,13 @@ def _rotate_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     cli = mhbench_dir / "cli.py"
     exp_dir = output_root(name, cfg) / name / "experiment"
 
-    # mgmt_ip is not carried on the experiment — re-read it from where provisioning wrote it.
+    # bastion_ip is not carried on the experiment — re-read it from where provisioning wrote it.
     provision_result = exp_dir / "provision_result.json"
-    mgmt_ip = None
+    bastion_ip = None
     if provision_result.exists():
-        mgmt_ip = json.loads(provision_result.read_text()).get("mgmt_ip")
-    if not mgmt_ip:
-        log(name, "No mgmt_ip in provision_result.json; skipping pre-attack log rotation.")
+        bastion_ip = json.loads(provision_result.read_text()).get("mgmt_ip")
+    if not bastion_ip:
+        log(name, "No bastion_ip in provision_result.json; skipping pre-attack log rotation.")
         return
 
     init_logger(name, output_root(name, cfg))
@@ -34,7 +34,7 @@ def _rotate_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     with open(mhbench_log, "a") as lf:
         result = subprocess.run(
             [str(python), str(cli), "rotate-logs", str(topology_path),
-             "--project-name", name, "--mgmt-ip", mgmt_ip],
+             "--project-name", name, "--mgmt-ip", bastion_ip],
             cwd=str(mhbench_dir),
             stdout=lf, stderr=lf,
         )

@@ -153,7 +153,7 @@ class _IncalmoAttacker(AttackerPlugin):
         """build_config() reads the C2 URLs off its own baton — hand it a filled-in one for offline tests."""
         return IncalmoPreparedC2(local_url="http://127.0.0.1:8888", remote_url="http://foothold:8888")
 
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
         _preflight_incalmo_host(cfg)
@@ -163,11 +163,11 @@ class _IncalmoAttacker(AttackerPlugin):
         if foothold_access is None:
             raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no SetupAccess")
         _sentinel, remote_url, local_url = await self.launch_c2c(
-            experiment.experiment_name, cfg, mgmt_ip, foothold_access=foothold_access)
+            experiment.experiment_name, cfg, bastion_ip, foothold_access=foothold_access)
         try:
             if local_url:
                 await self.wait_c2c_ready(local_url, experiment.experiment_name)
-            await self.prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
+            await self.prepare_foothold(experiment, cfg, bastion_ip, remote_url, access)
             if local_url:
                 await self.wait_c2c_agent(local_url, experiment.experiment_name)
         except Exception:
@@ -175,16 +175,16 @@ class _IncalmoAttacker(AttackerPlugin):
             raise
         return IncalmoPreparedC2(remote_url=remote_url, local_url=local_url)
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
         # SetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
         await foothold.land_sandcat(_require_access(access), remote_url, cfg, experiment.experiment_name)
 
     async def launch_c2c(
-        self, experiment_name: str, cfg: ExperimentManagerConfig, mgmt_ip: Optional[str] = None,
+        self, experiment_name: str, cfg: ExperimentManagerConfig, bastion_ip: Optional[str] = None,
         foothold_access=None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, mgmt_ip, foothold_access=foothold_access)
+        return await start_c2c_server(experiment_name, cfg, bastion_ip, foothold_access=foothold_access)
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -219,8 +219,8 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
             return value[0] if value else "GraphSearch"
         return value
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
-        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
+        await super().prepare_foothold(experiment, cfg, bastion_ip, remote_url, access)
         # Only install msf for strategies that actually dispatch Metasploit ops.
         if self.strategy in _MSF_STRATEGIES:
             await foothold.install_metasploit(_require_access(access), cfg, experiment.experiment_name)
@@ -309,8 +309,8 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     execution_llm: str = ""
     abstraction: str = "incalmo"
 
-    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, mgmt_ip, remote_url, access=None):
-        await super().prepare_foothold(experiment, cfg, mgmt_ip, remote_url, access)
+    async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
+        await super().prepare_foothold(experiment, cfg, bastion_ip, remote_url, access)
         # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to
         # run on the foothold itself (it binds 127.0.0.1, and the box has no floating IP), which is
