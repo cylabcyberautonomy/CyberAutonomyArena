@@ -113,7 +113,7 @@ class DefenderLifecycle:
 
 def signal_persister(experiment):
     """on_emit callback that records each defender signal onto the experiment (status + the matching
-    timestamp), mirroring _attacker_signal_persister. Sync (no I/O) — the arena calls registry.update()
+    timestamp), mirroring attacker/lifecycle.py's signal_persister. Sync (no I/O) — the arena calls registry.update()
     at phase boundaries to persist to disk."""
     _ts_field = {
         DefenderSignal.SETUP_STARTED: "defender_setup_started_at",

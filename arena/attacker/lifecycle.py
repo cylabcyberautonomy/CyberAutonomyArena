@@ -18,6 +18,7 @@ short-circuits any pending wait with the underlying error.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Optional
 
@@ -106,3 +107,24 @@ class AttackerLifecycle:
                     await asyncio.wait_for(self._cond.wait(), timeout=remaining)
                 except asyncio.TimeoutError:
                     raise TimeoutError(f"timed out waiting for attacker signal {signal.value}")
+
+
+def signal_persister(experiment):
+    """on_emit callback that records each attacker signal onto the experiment (status + the matching
+    timestamp), mirroring defender/lifecycle.py's signal_persister. Sync (no I/O) — the arena calls
+    registry.update() at phase boundaries to persist to disk."""
+    _ts_field = {
+        AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
+        AttackerSignal.READY: "attacker_ready_at",
+        AttackerSignal.RUNNING: "attacker_started_at",
+        AttackerSignal.STOPPING: "attacker_stopping_at",
+        AttackerSignal.STOPPED: "attacker_stopped_at",
+    }
+
+    def _on_emit(signal: AttackerSignal, error) -> None:
+        experiment.attacker_status = signal.value
+        field = _ts_field.get(signal)
+        if field is not None and getattr(experiment, field) is None:
+            setattr(experiment, field, datetime.now(timezone.utc))
+
+    return _on_emit

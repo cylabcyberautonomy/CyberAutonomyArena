@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
-from .attacker.lifecycle import AttackerLifecycle, AttackerSignal, AttackerCommand
+from .attacker.lifecycle import (
+    AttackerLifecycle, AttackerSignal, AttackerCommand, signal_persister as _attacker_signal_persister,
+)
 from .defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, signal_persister as _defender_signal_persister,
 )
@@ -35,6 +37,7 @@ async def _stop_defender_process(experiment, process) -> None:
         await lc.emit(DefenderSignal.STOPPED)
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
+from .environment.lifecycle import signal_persister as _env_signal_persister
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -46,8 +49,10 @@ def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecy
     system's signal (environment_status), on_command records the arena's command (environment_last_command)
     — so the arena->env command and the env->arena signal (Provision→Deploying→Deployed, etc.) are both
     visible per phase, distinct from the whole-experiment status. If `command` is given it is sent now."""
+    persist = _env_signal_persister(experiment)  # stamps environment_status (mirrors attacker/defender)
+
     def _on_emit(signal: EnvironmentSignal, error) -> None:
-        experiment.environment_status = signal.value
+        persist(signal, error)
         log(experiment.experiment_name,
             f"environment: {signal.value}" + (f" ({error})" if error else ""))
 
@@ -571,7 +576,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
             await experiment.traffic.collect_logs(
                 experiment, cfg,
                 output_root(experiment.experiment_name, cfg) / experiment.experiment_name,
-                None,  # mgmt_ip re-read from provision_result.json by the plugin
+                None,  # bastion_ip re-read from provision_result.json by the plugin
             )
         except Exception:
             get_logger(experiment.experiment_name).exception("Background-traffic log collection failed for '%s'", experiment.experiment_name)
@@ -747,27 +752,6 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
         await _run_experiment(experiment)
 
 
-def _attacker_signal_persister(experiment: Experiment):
-    """Return an on_emit callback that records each attacker signal onto the experiment (status +
-    the matching timestamp), so an observer sees which phase the attacker is in. Sync (no I/O) — the
-    arena calls registry.update() at phase boundaries to persist to disk."""
-    _ts_field = {
-        AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
-        AttackerSignal.READY: "attacker_ready_at",
-        AttackerSignal.RUNNING: "attacker_started_at",
-        AttackerSignal.STOPPING: "attacker_stopping_at",
-        AttackerSignal.STOPPED: "attacker_stopped_at",
-    }
-
-    def _on_emit(signal: AttackerSignal, error) -> None:
-        experiment.attacker_status = signal.value
-        field = _ts_field.get(signal)
-        if field is not None and getattr(experiment, field) is None:
-            setattr(experiment, field, datetime.now(timezone.utc))
-
-    return _on_emit
-
-
 def _attacker_command_recorder(experiment: Experiment):
     """Return an on_command callback that records the last command the arena SENT to the attacker."""
     def _on_command(command: AttackerCommand) -> None:
@@ -776,12 +760,12 @@ def _attacker_command_recorder(experiment: Experiment):
     return _on_command
 
 
-async def _drive_attacker_setup(experiment: Experiment, cfg, mgmt_ip, lc: AttackerLifecycle, access=None):
+async def _drive_attacker_setup(experiment: Experiment, cfg, bastion_ip, lc: AttackerLifecycle, access=None):
     """Handshake the setup phase: send start_setup (run the attacker's setup template as a task),
     wait for its setup_started ack, then wait for ready. Running setup concurrently is what lets a
     hang between the two show up as a stalled READY wait rather than a silent block.
     `access` is the scoped foothold SetupAccess, passed through to run_setup (env-produced)."""
-    task = asyncio.create_task(experiment.attacker.run_setup(experiment, cfg, mgmt_ip, access))
+    task = asyncio.create_task(experiment.attacker.run_setup(experiment, cfg, bastion_ip, access))
     try:
         # setup_started is emitted at the very top of run_setup, so it arrives promptly; if the ack
         # wait times out or errors, fall through and let `await task` surface the real cause.
@@ -820,7 +804,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     )
     await registry.update(experiment)
 
-    mgmt_ip = None
+    bastion_ip = None
     deploy_slot_held = False
     try:
         vm_specs = await experiment.environment.capacity(experiment, cfg)
@@ -856,7 +840,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
             # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
             try:
-                deployed, mgmt_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.PROVISION))
+                deployed, bastion_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.PROVISION))
                 experiment.deployed_environment = deployed
                 await registry.update(experiment)
             except NotImplementedError:
@@ -873,7 +857,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             deploy_slot_held = False
             experiment.status = ExperimentStatus.CONFIGURING
             await registry.update(experiment)
-            await experiment.environment.configure(experiment, mgmt_ip, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.CONFIGURE))
+            await experiment.environment.configure(experiment, bastion_ip, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.CONFIGURE))
             experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
             experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
             await registry.update(experiment)
@@ -923,7 +907,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     # credential + bastion routing). The scoped SetupAccess is PASSED as a parameter into the attacker's
     # run_setup (same shape as the defender's defender_access), not hung on the experiment.
     experiment._attacker_env_spec = experiment.environment.attacker_spec(experiment.deployed_environment, cfg)
-    attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
+    attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, bastion_ip, cfg)
     try:
         # A C2-based attacker's bring-up is bastion-FIP-heavy: it SSHes into the in-env foothold (which
         # has no floating IP) through the bastion to install docker, ship the image, and open the
@@ -934,9 +918,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         await attacker_lc.send(AttackerCommand.START_SETUP)  # arena -> attacker: begin setup
         if getattr(experiment.attacker, "requires_docker", False):
             async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
-                prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
+                prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
         else:
-            prepared = await _drive_attacker_setup(experiment, cfg, mgmt_ip, attacker_lc, attacker_access)
+            prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
         await registry.update(experiment)   # persist the setup_started/ready signals
         # `prepared` is the attacker's opaque setup handle — the arena passes it straight to
         # run_attacker without inspecting it. A C2 attacker reads its own URLs off it; teardown is
@@ -972,7 +956,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
                 # setup access (key + bastion routing), symmetric with the attacker.
                 _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
-                _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, mgmt_ip, cfg)
+                _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
                 # Defender-requested box ingress: open EXACTLY the ports the defender declares
                 # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
                 # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
@@ -980,13 +964,13 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # (pre-merge) simply requests nothing.
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
-                    await experiment.environment.program_ingress(experiment, mgmt_ip, cfg, _ingress)
+                    await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,
                     experiment.experiment_name,
                     cfg,
-                    mgmt_ip,
+                    bastion_ip,
                     defender_env_spec=_dfn_env_spec,
                     defender_access=_dfn_access,
                 )
@@ -1037,7 +1021,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     if experiment.traffic:
         try:
             async with _configure_lock.acquire(_PRIORITY_DEPLOY):  # heavy bastion ansible — same gate as configure/arming
-                await experiment.traffic.setup(experiment, cfg, mgmt_ip)
+                await experiment.traffic.setup(experiment, cfg, bastion_ip)
         except Exception as e:
             exp_log.exception("Background-traffic install failed for '%s'", experiment.experiment_name)
             if defender_process:
@@ -1053,7 +1037,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     # waste a full deploy — the run just proceeds with less (or no) background traffic.
     if experiment.traffic:
         try:
-            await experiment.traffic.start(experiment, cfg, mgmt_ip)
+            await experiment.traffic.start(experiment, cfg, bastion_ip)
             experiment.traffic_started_at = datetime.now(timezone.utc)
             await registry.update(experiment)
         except Exception:
@@ -1121,7 +1105,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # Stop background traffic once the attacker has finished (best-effort; VMs get torn down anyway).
         if experiment.traffic:
             try:
-                await experiment.traffic.stop(experiment, cfg, mgmt_ip)
+                await experiment.traffic.stop(experiment, cfg, bastion_ip)
                 experiment.traffic_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping background traffic for '%s'", experiment.experiment_name)

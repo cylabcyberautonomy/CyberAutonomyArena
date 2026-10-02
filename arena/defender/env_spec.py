@@ -1,16 +1,21 @@
-"""Defender-facing environment types — symmetric with attacker/env_spec.py.
+"""Defender-facing environment types — mirrors attacker/env_spec.py.
 
-  DefenderEnvSpec — AGENT-FACING. What the defender's brain legitimately knows about the estate it
-                    defends: the objective/scenario and the hosts at its knowledge level
-                    ({name, ip, role} — a real org knows its own inventory). NO credentials, NO
-                    routing. (Later stages add the common-telemetry source channels + the defender
-                    box's own identity.)
+Two deliberately separate objects:
+
+  DefenderEnvSpec — the RUN SPEC: the runtime information the defender acts on. It carries the
+                    objective and the host inventory at the defender's knowledge level (name/ip/role —
+                    a real org knows its own estate), plus the defender's own box. NO credentials, NO
+                    routing — the defender's brain doesn't need them at runtime. This is what
+                    build_config() consumes and what conceptually "the defender gets".
 
   SetupAccess    — the SETUP ACCESS (the SAME shared type the attacker uses, from attacker/env_spec.py):
                     how the trusted defender *plugin* reaches a host to set itself up / install
-                    bespoke sensors (ssh key + routing). Produced by the environment, used at setup time
-                    by the plugin — it carries the key because that's what setup needs, not because it's
-                    kept from the defender's brain.
+                    bespoke sensors (ssh key + routing). Produced by the environment and used at setup
+                    time by the plugin. It carries the key because that's what SETUP needs — the split
+                    is setup vs runtime, not a secret the defender must never see.
+
+They're separate because they're used at different times, not because the run spec is secret: it carries
+nothing that would matter if it leaked anyway (see docs/security-model.md).
 
 Both are provider-agnostic DTOs the environment produces (MHBench via environment/deployer.py).
 DefenderEnvSpec also carries `topology_spec` (a path); the defender runners build Perry's network
@@ -24,7 +29,7 @@ from pydantic import BaseModel, Field
 
 
 class DefenderHost(BaseModel):
-    """A host in the defended estate, at the defender's knowledge level."""
+    """Identity of a host in the defended estate, at the defender's knowledge level (part of the run spec)."""
     name: str
     ip: Optional[str] = None
     role: Optional[str] = None   # e.g. "webserver", "database" (derived from the host name)
@@ -32,8 +37,8 @@ class DefenderHost(BaseModel):
 
 class DefenderBox(BaseModel):
     """The always-provisioned box the defender RUNS on, in an isolated ("super-secret") subnet: it can
-    reach the victims + the telemetry relay but is hidden from the attacker. Agent-facing identity only
-    (the defender knows its own box); the harness reaches it via a SetupAccess entry of the same name.
+    reach the victims + the telemetry relay but is hidden from the attacker. Part of the run spec (the
+    defender knows its own box); the harness reaches it at setup time via a SetupAccess entry of the same name.
 
     REQUIREMENT (design, not a self-reported field): the environment MUST give this box internet EGRESS
     (outbound-only, for the LLM API) and NO ingress from the internet. See docs/security-model.md
@@ -44,7 +49,7 @@ class DefenderBox(BaseModel):
 
 
 class DefenderEnvSpec(BaseModel):
-    """Agent-facing. objective + host inventory + the defender's own box; no creds/routing."""
+    """The run spec: objective + host inventory + the defender's own box; no creds/routing."""
     objective: str = "none"
     hosts: list[DefenderHost] = Field(default_factory=list)
     box: Optional[DefenderBox] = None    # the always-provisioned defender box (env guarantees one)

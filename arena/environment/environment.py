@@ -41,3 +41,23 @@ class EnvironmentConfig(BaseModel):
         """The value the internal readers key off (experiment.environment_spec) — the topology PATH.
         The deployer resolves it via resolve_topology_path; the short label is its stem."""
         return self.environment_spec
+
+
+def build_environment(value):
+    """Build the executable EnvironmentPlugin from an EnvironmentConfig, its explicit
+    {environment_plugin, environment_spec} dict, or an already-built plugin. Lazy imports inside (the
+    plugins import deployer/capacity) avoid an import cycle at module load. The env analog of
+    attacker.run_attacker / defender.run_defender living beside its config (re-exported from __init__)."""
+    from .plugins.base import EnvironmentPlugin
+    from . import plugins  # noqa: F401 — triggers plugin auto-discovery
+
+    if isinstance(value, EnvironmentPlugin):
+        return value
+    cfg = value if isinstance(value, EnvironmentConfig) else EnvironmentConfig.model_validate(value)
+    plugin_cls = EnvironmentPlugin._registry.get(cfg.environment_plugin)
+    if plugin_cls is None:
+        raise ValueError(
+            f"Unknown environment_plugin {cfg.environment_plugin!r}. "
+            f"Available: {list(EnvironmentPlugin._registry)}"
+        )
+    return plugin_cls(type=cfg.environment_plugin, environment_spec=cfg.environment_spec)
