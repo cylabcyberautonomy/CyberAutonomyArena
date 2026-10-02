@@ -95,7 +95,7 @@ class DefenderPlugin(BaseModel):
         raising here just fails the defender start (see run_defender()'s caller).
 
         `bastion_ip` is this experiment's own bastion floating IP (from MHBench
-        provisioning) - NOT the same as cfg.host_ip (the harness's own fixed
+        provisioning) - NOT the same as cfg.arena_host_ip (the harness's own fixed
         address, used for Elasticsearch). Any AnsibleRunner use needs THIS one to
         SSH-ProxyCommand into the experiment's internal hosts at all.
 

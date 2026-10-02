@@ -77,6 +77,14 @@ used by a *subset* is **copied into each** plugin (not put on the base, which wo
 that don't use it, and not shared via a cross-plugin helper module). The one exception is code shared by
 standalone *runner scripts* (which can't inherit a base) — that stays a module, labelled as such.
 
+**Plugin code paths.** A plugin that shells out to an external codebase (Incalmo, MHBench, the
+Defense/Perry defender repo, Velociraptor, Sliver, the bg-traffic repo) needs that checkout's path set in
+`config.yaml`. **Set only the paths for the plugins you actually use** — `mhbench_dir` is always required
+(the environment backend); the rest are needed only when you run a plugin that uses them. See the README's
+*Config reference* for the per-plugin table. (Today these live in the top-level arena config, and one path
+can back several plugins — `deception_dir` is the single Defense/Perry checkout for `llm_soc`/`deception`/
+`prompt_injection`. Longer term they belong in each plugin's own config, same as the cloud-backend block.)
+
 **Running the tests** (fast, cloud-free — run before committing):
 ```
 pytest tests/

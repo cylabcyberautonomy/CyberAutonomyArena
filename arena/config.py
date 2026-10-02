@@ -13,7 +13,7 @@ class ExperimentManagerConfig(BaseModel):
     incalmo_dir: Path
     incalmo_python: Optional[Path] = None
     mhbench_dir: Path
-    host_ip: str
+    arena_host_ip: str  # the arena/manager host's own IP as reachable from the deployed VMs; handed to defenders as their config's management_ip so their self-protection never acts against the harness host. NOT the per-experiment bastion (that is returned by the environment's provision()).
     output_dir: Path = _HERE / "output"
     ansible_log_dir: str = "experiment/ansible"  # per-experiment subpath under output_dir/<exp>/ for per-host ansible logs
     registry_path: Path = _HERE / "experiment_registry.yaml"

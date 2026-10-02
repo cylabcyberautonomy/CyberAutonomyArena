@@ -1,4 +1,4 @@
-# Example arena config. Copy this to config.yaml and edit the paths + host_ip:
+# Example arena config. Copy this to config.yaml and edit the paths + arena_host_ip:
 #
 #   cp example_config.yaml config.yaml
 #
@@ -22,7 +22,7 @@ mhbench_dir: /path/to/MHBench
 # Its one use: handed to the defender (as its config's management_ip) so the defender's
 # self-protection never acts against the harness host. (The telemetry relay + fallback
 # defender-box location is gcp_relay_ip, not this.)
-host_ip: 10.0.0.1
+arena_host_ip: 10.0.0.1
 
 # ---- Python interpreters (default: each repo's own .venv/bin/python) ---------
 # incalmo_python: /path/to/Incalmo/.venv/bin/python

@@ -199,8 +199,8 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
 
 
 def _run_cfg(tmp_path: Path):
-    # the attrs run_defender touches: output_dir, deception_dir, host_ip.
-    return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, host_ip="10.0.0.1",
+    # the attrs run_defender touches: output_dir, deception_dir, arena_host_ip.
+    return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, arena_host_ip="10.0.0.1",
                            defender_ready_timeout_seconds=30.0)
 
 

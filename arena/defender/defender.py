@@ -62,13 +62,13 @@ async def run_defender(
         built["defender_env_spec"] = defender_env_spec.model_dump()
     built["defender_setup_access"] = [a.model_dump() for a in (defender_access or [])]
     built["deception_dir"] = str(cfg.deception_dir)
-    # "management_ip" is the harness's own fixed host (cfg.host_ip), NOT an Elasticsearch address — every
+    # "management_ip" is the harness's own fixed host (cfg.arena_host_ip), NOT an Elasticsearch address — every
     # defender reads its OWN per-experiment ES on the defender box (see DefenderPlugin.prepare_box_es).
     # It is kept only so a defender's self-protection knows not to block the harness/manager host. It is
     # NOT `bastion_ip`/`bastion_ip` below, which is this experiment's own ephemeral bastion floating IP —
     # Perry's AnsibleRunner needs THAT one to SSH-ProxyCommand into the experiment's internal 192.168.x.x
     # hosts (ssh -W %h:%p ... root@<bastion>).
-    built["management_ip"] = cfg.host_ip
+    built["management_ip"] = cfg.arena_host_ip
     built["bastion_ip"] = bastion_ip
     built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
     config_path.write_text(json.dumps(built, indent=2))
