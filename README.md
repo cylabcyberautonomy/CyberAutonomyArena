@@ -56,22 +56,26 @@ Open `http://localhost:8080` in a browser.
 
 ## Config reference
 
-`config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `incalmo_dir`, `mhbench_dir`, and `arena_host_ip` are required.
+`config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).
 
-**Repo paths** — most plugins shell out to an external codebase (its own checkout + venv) that the
-arena does not vendor, so you point the arena at it here. **Set only the paths for the plugins you plan
-to use** — e.g. you don't need `deception_dir` unless you run an `llm_soc`/`deception`/`prompt_injection`
-defender. A `*_python` defaults to `<its_dir>/.venv/bin/python` when omitted.
+**Per-plugin code paths** — most plugins shell out to an external codebase (its own checkout + venv) that
+the arena does not vendor, so you point the arena at it here. There is **one `*_dir` per plugin** (plus an
+optional `*_python` override, defaulting to `<its_dir>/.venv/bin/python`). **Set only the paths for the
+plugins you plan to use.** Redundancy is intentional: plugins that share a repo each name it, so no single
+field silently backs several.
 
 | Key | Needed by | What it points at |
 |---|---|---|
-| `mhbench_dir` | **always** (the environment backend) | MHBench repo. Env specs resolve as `<mhbench_dir>/environments/<spec>.json`; also holds the scoped keys. |
+| `mhbench_dir` | **always** (the environment backend) | MHBench repo. Env specs resolve as `<mhbench_dir>/environments/<spec>.json`; also holds the scoped keys. A **defender** run needs the `arena-live-provisioning` branch (defender_subnet box + request-ingress CLI). |
 | `mhbench_config` | GCP runs | MHBench `--config` (relative to `mhbench_dir`), e.g. `config/config.gcp.yaml`. Unset = MHBench's OpenStack default. |
-| `incalmo_dir` (+`incalmo_python`) | `incalmo_strategy`, `incalmo_llm` attackers | Incalmo repo (attacker framework). *(Currently schema-required even if you run a different attacker — a known wart.)* |
-| `deception_dir` (+`deception_python`) | `llm_soc`, `deception`, `prompt_injection` defenders | The Defense/Perry repo — **one checkout, three defender plugins** (the name predates that). |
-| `velociraptor_dir` | `velociraptor` defender | Velociraptor defender repo. |
-| `sliver_dir` (+`sliver_python`) | `sliver_llm` attacker | Sliver venv/checkout. Defaults to `<output_dir>/.sliver`. |
-| `bgtraffic_dir` | `caldera_human` traffic | Background-traffic repo. |
+| `incalmo_strategy_dir` (+`_python`) | `incalmo_strategy` attacker | Incalmo repo. |
+| `incalmo_llm_dir` (+`_python`) | `incalmo_llm` attacker | Incalmo repo (same checkout as above; named per plugin). |
+| `sliver_llm_dir` (+`_python`) | `sliver_llm` attacker | Sliver venv/checkout. Defaults to `<output_dir>/.sliver`. |
+| `llm_soc_dir` (+`_python`) | `llm_soc` defender | Defense/Perry repo. |
+| `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
+| `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |
+| `velociraptor_dir` | `velociraptor` defender | Velociraptor repo (holds `bin/velociraptor`; a Go binary, no venv). |
+| `caldera_human_dir` | `caldera_human` traffic | caldera-human-traffic repo (no venv). |
 | `arena_host_ip` | defenders | The arena/manager host's own IP (as seen from the deployed VMs), passed to defenders as `management_ip` for self-protection. **Not** the per-experiment bastion. |
 
 **Tunable parameters** — adjust these to control how the harness runs experiments:

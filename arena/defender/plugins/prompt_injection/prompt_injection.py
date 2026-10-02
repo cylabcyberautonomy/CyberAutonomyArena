@@ -42,6 +42,8 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
 
     type: Literal["prompt_injection"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
+    code_dir_field = "prompt_injection_dir"          # Defense/Perry repo for this defender (per-plugin)
+    code_python_field = "prompt_injection_python"
     # StaticLayeredAll, not AIAttackerDetection. AIAttackerDetection is reactive -
     # it waits on a burst of Falco events and only then deploys - which confounds
     # "all four injection channels" with "reactive timing", so it cannot serve as
@@ -163,10 +165,11 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
-        # Perry ("Deception") is one shared repo/venv backing all of its defender
-        # plugins — reuse the same deception_dir/deception_python config knobs.
-        python = str(cfg.get_deception_python())
-        pythonpath_parts = [str(cfg.deception_dir)]
+        # Perry ("Deception") is one shared repo backing all of its defender plugins, but each names its
+        # OWN code path now (per-plugin) — resolve this plugin's repo + interpreter.
+        repo_dir = self._code_dir(cfg)
+        python = str(self._code_python(cfg))
+        pythonpath_parts = [str(repo_dir)]
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
@@ -176,7 +179,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
             str(Path(__file__).parent / "runner.py"),
             str(config_path),
             "run",
-            cwd=str(cfg.deception_dir),
+            cwd=str(repo_dir),
             env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,
             stderr=subprocess.STDOUT,

@@ -69,6 +69,8 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
 
     type: Literal["llm_soc"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "llm_model"})
+    code_dir_field = "llm_soc_dir"          # Defense/Perry repo for this defender (per-plugin)
+    code_python_field = "llm_soc_python"
     strategy: str  # "FalcoLLM" or "FalcoLLMC2Block"
     # Default to Sonnet-5 on OpenRouter so it shares a route with the 4.5
     # comparison arm (openrouter/anthropic/claude-sonnet-4.5). See
@@ -160,10 +162,11 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
-        # Perry ("Deception") is one shared repo/venv backing all of its defender
-        # plugins — reuse the same deception_dir/deception_python config knobs.
-        python = str(cfg.get_deception_python())
-        pythonpath_parts = [str(cfg.deception_dir)]
+        # Perry ("Deception") is one shared repo backing all of its defender plugins, but each names its
+        # OWN code path now (per-plugin) — resolve this plugin's repo + interpreter.
+        repo_dir = self._code_dir(cfg)
+        python = str(self._code_python(cfg))
+        pythonpath_parts = [str(repo_dir)]
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
@@ -175,7 +178,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             str(Path(__file__).parent / "runner.py"),
             str(config_path),
             "run",
-            cwd=str(cfg.deception_dir),
+            cwd=str(repo_dir),
             env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,
             stderr=subprocess.STDOUT,

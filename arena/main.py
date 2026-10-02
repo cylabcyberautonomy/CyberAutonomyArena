@@ -205,7 +205,12 @@ async def lifespan(app: FastAPI):
     cfg = ExperimentManagerConfig.load()
     logger.warning("arena starting: cloud_backend=%s (config=%s)",
                    cfg.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
-    load_dotenv(cfg.incalmo_dir / ".env")  # LLM keys into os.environ so the Incalmo subprocess (env={**os.environ,…}) always inherits them, however the harness was launched (bare uvicorn or main.sh). override=False → an already-exported key still wins.
+    # LLM keys into os.environ so plugin subprocesses (env={**os.environ,…}) inherit them, however the
+    # harness was launched. The keys historically live in the Incalmo repo's .env; load from whichever
+    # incalmo code dir(s) are configured (per-plugin now). Best-effort; an already-exported key still wins.
+    for _incalmo_dir in (cfg.incalmo_strategy_dir, cfg.incalmo_llm_dir):
+        if _incalmo_dir:
+            load_dotenv(_incalmo_dir / ".env")
     os.environ["OS_CLOUD"] = cfg.os_cloud
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)

@@ -18,6 +18,8 @@ from ..base import DefenderPlugin, PreparedDefender
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     type: Literal["deception"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
+    code_dir_field = "deception_dir"          # Defense/Perry repo for this defender (per-plugin)
+    code_python_field = "deception_python"
     strategy: str  # e.g. "DoNothing", "StaticLayered", "ReactiveLayered"
     arsenal: dict[str, int] = {}
 
@@ -139,7 +141,8 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         # long-running reactive loop ("run" mode -> runner.py calls defender.start(prepared=True)).
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         return await self._run_deception_script(
-            Path(__file__).parent / "runner.py", config_path, cfg, log_path
+            Path(__file__).parent / "runner.py", config_path, cfg, log_path,
+            self._code_dir(cfg), self._code_python(cfg),
         )
 
     # -- per-experiment Elasticsearch on the defender box -----------------------------------------

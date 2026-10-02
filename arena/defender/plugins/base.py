@@ -40,6 +40,18 @@ class DefenderPlugin(BaseModel):
     # NOT the arena-injected ones (defender_env_spec / defender_setup_access / management_ip / …).
     REQUIRED_CONFIG_KEYS: ClassVar[frozenset[str]] = frozenset()
 
+    # Per-plugin external code path: a defender backed by an external repo (the Defense/Perry defenders)
+    # names its own config fields here, so no single field silently backs several plugins. Default None =
+    # self-contained defender (canary) or a backend-specific one (velociraptor reads its own velociraptor_dir).
+    code_dir_field: ClassVar[Optional[str]] = None
+    code_python_field: ClassVar[Optional[str]] = None
+
+    def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_dir(self.code_dir_field)
+
+    def _code_python(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_python(self.code_dir_field, self.code_python_field)
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -222,17 +234,20 @@ class DefenderPlugin(BaseModel):
         config_path: Path,
         cfg: ExperimentManagerConfig,
         log_path: Path,
+        repo_dir: Path,
+        python: Path,
         mode: str = "run",
     ) -> asyncio.subprocess.Process:
-        """Spawn the plugin's runner.py in deception_dir's own venv, with deception_dir on PYTHONPATH so
-        its packages are importable. Shared by every DefenderPlugin subclass backed by that repo
-        (deception/prompt_injection). `mode` is passed as argv[2]: "run" (default) launches the
-        long-running reactive loop and hands the live process back WITHOUT waiting; "prepare" runs the
-        strategy's external arming to completion and exits (see _run_prepare_and_wait)."""
+        """Spawn the plugin's runner.py in its repo's own venv, with the repo on PYTHONPATH so its
+        packages are importable. Shared by every DefenderPlugin subclass backed by the Defense/Perry repo
+        (llm_soc/deception/prompt_injection) — each passes its OWN resolved repo_dir + python (per-plugin
+        config paths). `mode` is passed as argv[2]: "run" (default) launches the long-running reactive loop
+        and hands the live process back WITHOUT waiting; "prepare" runs the strategy's external arming to
+        completion and exits (see _run_prepare_and_wait)."""
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
-        python = str(cfg.get_deception_python())
-        pythonpath_parts = [str(cfg.deception_dir)]
+        python = str(python)
+        pythonpath_parts = [str(repo_dir)]
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
@@ -242,7 +257,7 @@ class DefenderPlugin(BaseModel):
             str(script_path),
             str(config_path),
             mode,
-            cwd=str(cfg.deception_dir),
+            cwd=str(repo_dir),
             env={**os.environ, "PYTHONPATH": pythonpath},
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -269,7 +284,9 @@ class DefenderPlugin(BaseModel):
         Raises if the prepare process exits non-zero or writes no baton."""
         marker = cls.prepared_marker_path(experiment_name, cfg)
         marker.unlink(missing_ok=True)  # drop any stale baton from a prior run of this name
-        proc = await cls._run_deception_script(script_path, config_path, cfg, log_path, mode="prepare")
+        repo_dir = cfg.plugin_dir(cls.code_dir_field)
+        python = cfg.plugin_python(cls.code_dir_field, cls.code_python_field)
+        proc = await cls._run_deception_script(script_path, config_path, cfg, log_path, repo_dir, python, mode="prepare")
         rc = await proc.wait()
         if rc != 0:
             raise RuntimeError(

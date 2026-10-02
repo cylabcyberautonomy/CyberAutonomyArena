@@ -79,11 +79,14 @@ standalone *runner scripts* (which can't inherit a base) — that stays a module
 
 **Plugin code paths.** A plugin that shells out to an external codebase (Incalmo, MHBench, the
 Defense/Perry defender repo, Velociraptor, Sliver, the bg-traffic repo) needs that checkout's path set in
-`config.yaml`. **Set only the paths for the plugins you actually use** — `mhbench_dir` is always required
-(the environment backend); the rest are needed only when you run a plugin that uses them. See the README's
-*Config reference* for the per-plugin table. (Today these live in the top-level arena config, and one path
-can back several plugins — `deception_dir` is the single Defense/Perry checkout for `llm_soc`/`deception`/
-`prompt_injection`. Longer term they belong in each plugin's own config, same as the cloud-backend block.)
+`config.yaml`. There is **one `*_dir` field per plugin** (plus an optional `*_python` override, defaulting
+to `<its_dir>/.venv/bin/python`); **set only the paths for the plugins you use** — `mhbench_dir` is the one
+always required (the environment backend). A plugin resolves its own path via `cfg.plugin_dir(self.code_dir_field)`
+/ `cfg.plugin_python(...)`, where `code_dir_field`/`code_python_field` are ClassVars the plugin declares
+(e.g. `llm_soc_dir`, `incalmo_llm_dir`). Redundancy is intentional: plugins sharing a repo (the two incalmo
+attackers; the three Defense/Perry defenders) each name it, so no field silently backs several. See the
+README's *Config reference* for the full table. (These still live in the top-level arena config; longer term
+they belong in each plugin's own config, same as the cloud-backend block.)
 
 **Running the tests** (fast, cloud-free — run before committing):
 ```

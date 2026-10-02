@@ -34,10 +34,10 @@ from . import ansible as bg_ansible
 
 
 def _resolve_bgtraffic_dir(cfg: ExperimentManagerConfig) -> Path:
-    d = getattr(cfg, "bgtraffic_dir", None)
+    d = getattr(cfg, "caldera_human_dir", None)
     if not d:
         raise RuntimeError(
-            "traffic=caldera_human requested but cfg.bgtraffic_dir is unset — point it at a "
+            "traffic=caldera_human requested but cfg.caldera_human_dir is unset — point it at a "
             "checkout of the caldera-human-traffic repo in config.yaml."
         )
     return Path(d)

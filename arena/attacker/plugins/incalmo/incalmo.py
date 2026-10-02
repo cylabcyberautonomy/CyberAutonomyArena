@@ -82,22 +82,23 @@ asyncio.run(run_incalmo_strategy(config, task_id=sys.argv[2]))
 """
 
 
-def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
+def _preflight_incalmo_host(incalmo_dir: Path, incalmo_python: Path) -> None:
     """Fail fast (before any C2 is launched) if the Incalmo host-side prerequisites for
     running the attacker are missing. These live in `incalmo_dir` — a separate repo from the
     harness — and are gitignored there, so a fresh Incalmo checkout won't have them and the
     failure would otherwise surface late and cryptically (a dangling-symlink ENOENT on the
-    interpreter, or a FileNotFoundError deep inside strategy init)."""
+    interpreter, or a FileNotFoundError deep inside strategy init). `incalmo_dir`/`incalmo_python`
+    are the per-plugin code path + interpreter the caller resolved from cfg."""
     # 1. The attacker process runs under this interpreter (see run()). A fresh Incalmo checkout
     #    has no .venv; Path.exists() also returns False for a dangling symlink, so this equally
     #    catches a .venv left pointing at an interpreter that isn't on this host (e.g. one written
     #    by the C2 container before venv isolation).
-    py = cfg.get_incalmo_python()
+    py = incalmo_python
     if not py.exists():
         raise RuntimeError(
             f"Incalmo attacker interpreter not found: {py}\n"
             f"Build the Incalmo host virtualenv before running an Incalmo attacker:\n"
-            f"    cd {cfg.incalmo_dir} && uv sync"
+            f"    cd {incalmo_dir} && uv sync"
         )
     # 2. Incalmo's ConfigService reads ./config/config.json (relative to incalmo_dir, the attacker's
     #    cwd). Its c2c_server is overridden by the C2C_SERVER env var we pass, but the low-level
@@ -107,9 +108,9 @@ def _preflight_incalmo_host(cfg: ExperimentManagerConfig) -> None:
     #    from discovery — the attacker then never reaches them. Seed the file when absent, then
     #    normalize blacklist_ips below so such a config can't blind the attacker. Per-run exclusions,
     #    if ever needed, belong in the run's AttackerConfig, not this shared file.
-    config_json = cfg.incalmo_dir / "config" / "config.json"
+    config_json = incalmo_dir / "config" / "config.json"
     if not config_json.exists():
-        example = cfg.incalmo_dir / "config" / "config_example.json"
+        example = incalmo_dir / "config" / "config_example.json"
         if not example.exists():
             raise RuntimeError(
                 f"Incalmo config missing: {config_json} (and no {example} to seed it from).\n"
@@ -148,6 +149,18 @@ class _IncalmoAttacker(AttackerPlugin):
     # The C2 image is built with Docker on the harness host before it is shipped to the foothold.
     requires_docker: ClassVar[bool] = True
 
+    # Per-plugin code path: each Incalmo attacker names its own config fields (both point at the Incalmo
+    # repo — redundant by design). Subclasses set these; the shared code resolves via self so the right
+    # field is read per plugin.
+    code_dir_field: ClassVar[str] = "incalmo_strategy_dir"
+    code_python_field: ClassVar[str] = "incalmo_strategy_python"
+
+    def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_dir(self.code_dir_field)
+
+    def _code_python(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_python(self.code_dir_field, self.code_python_field)
+
     @classmethod
     def example_prepared(cls) -> PreparedAttacker:
         """build_config() reads the C2 URLs off its own baton — hand it a filled-in one for offline tests."""
@@ -156,7 +169,7 @@ class _IncalmoAttacker(AttackerPlugin):
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, access=None) -> PreparedAttacker:
         # Validate host-side prerequisites before launching any C2, so a missing venv/config
         # aborts cleanly with a precise fix instead of failing partway through attacker start.
-        _preflight_incalmo_host(cfg)
+        _preflight_incalmo_host(self._code_dir(cfg), self._code_python(cfg))
         # Bring up the C2 on the attacker's foothold, prep the foothold, and block until an agent
         # beacons in. Transactional: tear down a partial C2 on failure.
         foothold_access = self.primary_access(access) if access else None
@@ -184,7 +197,8 @@ class _IncalmoAttacker(AttackerPlugin):
         self, experiment_name: str, cfg: ExperimentManagerConfig, bastion_ip: Optional[str] = None,
         foothold_access=None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        return await start_c2c_server(experiment_name, cfg, bastion_ip, foothold_access=foothold_access)
+        return await start_c2c_server(experiment_name, cfg, bastion_ip, foothold_access=foothold_access,
+                                      incalmo_dir=self._code_dir(cfg))
 
     async def wait_c2c_ready(self, local_url: str, experiment_name: str) -> None:
         await wait_for_c2c_ready(local_url, experiment_name)
@@ -275,9 +289,9 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
-            str(cfg.get_incalmo_python()), "-c", _RUNNER,
+            str(self._code_python(cfg)), "-c", _RUNNER,
             str(config_path), experiment_name,
-            cwd=str(cfg.incalmo_dir),
+            cwd=str(self._code_dir(cfg)),
             env={
                 **os.environ,
                 "C2C_SERVER": prepared.local_url,
@@ -287,7 +301,7 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
                 # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
                 "C2C_SERVER_AGENTS": prepared.remote_url or prepared.local_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
-                "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
+                "PYTHONPATH": str(self._code_dir(cfg) / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -300,6 +314,8 @@ class IncalmoStrategyAttacker(_IncalmoAttacker, config_type="incalmo_strategy"):
 
 class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
     type: Literal["incalmo_llm"]
+    code_dir_field: ClassVar[str] = "incalmo_llm_dir"
+    code_python_field: ClassVar[str] = "incalmo_llm_python"
     REQUIRED_CONFIG_KEYS = frozenset(
         {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"})
     planning_llm: str
@@ -382,9 +398,9 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
         return await asyncio.create_subprocess_exec(
-            str(cfg.get_incalmo_python()), "-c", _RUNNER,
+            str(self._code_python(cfg)), "-c", _RUNNER,
             str(config_path), experiment_name,
-            cwd=str(cfg.incalmo_dir),
+            cwd=str(self._code_dir(cfg)),
             env={
                 **os.environ,
                 "C2C_SERVER": prepared.local_url,
@@ -394,7 +410,7 @@ class IncalmoLLMAttacker(_IncalmoAttacker, config_type="incalmo_llm"):
                 # So agents get the foothold's in-env address; the LLM's own C2 API uses the tunnel.
                 "C2C_SERVER_AGENTS": prepared.remote_url or prepared.local_url,
                 "INCALMO_OUTPUT_DIR": str(output_root(experiment_name, cfg) / experiment_name / "attacker"),
-                "PYTHONPATH": str(cfg.incalmo_dir / ".venv" / "lib" / "python3.13" / "site-packages"),
+                "PYTHONPATH": str(self._code_dir(cfg) / ".venv" / "lib" / "python3.13" / "site-packages"),
             },
             stdout=log_file,
             stderr=subprocess.STDOUT,

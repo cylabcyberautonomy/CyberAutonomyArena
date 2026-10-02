@@ -61,7 +61,11 @@ async def run_defender(
     if defender_env_spec is not None:
         built["defender_env_spec"] = defender_env_spec.model_dump()
     built["defender_setup_access"] = [a.model_dump() for a in (defender_access or [])]
-    built["deception_dir"] = str(cfg.deception_dir)
+    # The Defense/Perry defenders (llm_soc/deception/prompt_injection) each name their own code path now;
+    # inject the running plugin's dir under the stable runner key "deception_dir". A self-contained defender
+    # (canary) or one with its own path (velociraptor) declares no code_dir_field, so it gets nothing here.
+    if type(defender).code_dir_field:
+        built["deception_dir"] = str(cfg.plugin_dir(type(defender).code_dir_field))
     # "management_ip" is the harness's own fixed host (cfg.arena_host_ip), NOT an Elasticsearch address — every
     # defender reads its OWN per-experiment ES on the defender box (see DefenderPlugin.prepare_box_es).
     # It is kept only so a defender's self-protection knows not to block the harness/manager host. It is

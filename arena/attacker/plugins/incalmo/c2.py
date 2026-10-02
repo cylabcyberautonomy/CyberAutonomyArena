@@ -111,7 +111,7 @@ def _close_master(access: SetupAccess, ctl: str) -> None:
         pass
 
 
-def _ensure_image_built_sync(cfg) -> None:
+def _ensure_image_built_sync(cfg, incalmo_dir) -> None:
     """Build incalmo/c2c on the harness host (once per process) so it can be shipped to foothold."""
     global _built
     if _built:
@@ -119,7 +119,7 @@ def _ensure_image_built_sync(cfg) -> None:
     logger.info("[foothold-c2] building C2 image %s on the harness host", _C2C_IMAGE)
     subprocess.run(
         ["docker", "build", "-t", _C2C_IMAGE, "-f", "docker/c2server/Dockerfile", "."],
-        cwd=str(cfg.incalmo_dir), check=True,
+        cwd=str(incalmo_dir), check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800,
     )
     _built = True
@@ -134,7 +134,7 @@ def _free_local_port() -> int:
         s.close()
 
 
-def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | None = None) -> tuple[str, str, str]:
+def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | None = None, incalmo_dir=None) -> tuple[str, str, str]:
     """Run the C2 on the foothold and open a tunnel to it for the attacker LLM. Reaches the foothold
     only via the env-provided SetupAccess (scoped key + bastion routing) — never a management key off
     disk. `bastion_ip` is accepted for log messages only; the routing is opaque in access.ssh_common_args.
@@ -156,7 +156,7 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | N
     # unlink the socket file: a half-open master PROCESS would otherwise linger holding the path.
     _close_master(access, ctl)
 
-    _ensure_image_built_sync(cfg)
+    _ensure_image_built_sync(cfg, incalmo_dir)
 
     # 1. Wait for foothold to be SSH-reachable through the bastion, using a PLAIN (non-multiplexed) ssh.
     #    Decoupled from the ControlMaster deliberately: the old poll ran ControlMaster=auto, so its FIRST
@@ -225,7 +225,7 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | N
     #    runDeployAgent.sh, template_payloads/) that the C2's /agent/download endpoint needs; dropping
     #    those breaks agent deployment ("No sandcat agent beaconed within 600s"). So the foothold C2 keeps its
     #    tooling but starts with no stale generated payloads, and only writes its OWN run's at runtime.
-    incalmo_dir = Path(cfg.incalmo_dir)
+    incalmo_dir = Path(incalmo_dir)
     tar = subprocess.Popen(
         ["tar", "czf", "-", "--exclude=.git", "--exclude=.venv", "--exclude=.venv-c2c",
          "--exclude=incalmo/frontend", "--exclude=output", "--exclude=__pycache__",
@@ -383,6 +383,7 @@ def sweep_stale_tunnels() -> None:
 
 async def start_c2c_server(
     experiment_name: str, cfg: ExperimentManagerConfig, bastion_ip: str | None = None, foothold_access=None,
+    incalmo_dir=None,
 ) -> tuple[str, str, str]:
     """Bring up the Incalmo C2 on the attacker's foothold and return once it is serving.
 
@@ -401,7 +402,7 @@ async def start_c2c_server(
             "(scoped key + routing) was passed to start_c2c_server()")
     loop = asyncio.get_event_loop()
     sentinel, remote_url, local_url = await loop.run_in_executor(
-        None, setup_c2, experiment_name, cfg, foothold_access, bastion_ip)
+        None, setup_c2, experiment_name, cfg, foothold_access, bastion_ip, incalmo_dir)
     log(experiment_name, f"C2 on foothold: agents -> {remote_url}, harness (tunnel) -> {local_url}")
     return sentinel, remote_url, local_url
 
