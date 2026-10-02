@@ -749,7 +749,45 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
     and exceptions, so a slot is never leaked. Priority-ordered: a labeled-priority experiment
     takes the next freed active slot ahead of normal queued ones."""
     async with _inflight_gate.acquire(_gate_priority(experiment)):
-        await _run_experiment(experiment)
+        timeout = getattr(cfg, "experiment_timeout_seconds", None)
+        if not timeout:
+            await _run_experiment(experiment)
+            return
+        # Overall experiment wall-clock backstop: bound the WHOLE lifecycle so a total hang (a wedged
+        # provision/configure/collect/teardown the per-phase waits don't catch) can't run forever or
+        # strand VMs. On the deadline, _run_experiment is cancelled mid-phase and we force the cleanup it
+        # didn't reach. (CancelledError is a BaseException, so _run_experiment's own `except Exception`
+        # handlers don't swallow it; its `finally`/`async with` still release the deploy slot + locks.)
+        try:
+            await asyncio.wait_for(_run_experiment(experiment), timeout)
+        except asyncio.TimeoutError:
+            await _handle_experiment_timeout(experiment)
+
+
+async def _handle_experiment_timeout(experiment: Experiment) -> None:
+    """The overall experiment cap (cfg.experiment_timeout_seconds) fired: _run_experiment was cancelled
+    mid-phase, so the teardown it would have run didn't. Force it here — kill the attacker process (its
+    handle was local to the cancelled coroutine, but its pid is on the experiment), tear the environment
+    down (reclaims VMs + capacity, stops the C2, best-effort log collection), and mark a terminal
+    ExperimentTimedOut (no retry) — distinct from the attacker's SCORED TimedOut.
+
+    Residual: a defender runner subprocess, if one was running, is orphaned by the cancel (its handle was
+    local to _run_experiment). The env teardown deletes the box it reads from, so it errors out, and
+    _clean_slate sweeps leftover harness-side processes on the next restart."""
+    name = experiment.experiment_name
+    exp_log = get_logger(name)
+    cap = getattr(cfg, "experiment_timeout_seconds", None)
+    exp_log.error("[%s] Experiment exceeded the overall wall-clock cap (%ss) — aborting and tearing down", name, cap)
+    experiment.error = f"Experiment exceeded the overall wall-clock cap ({cap}s)"
+    if experiment.pid:
+        _force_kill_attacker(experiment.pid, exp_log)  # generic pid/pgid SIGKILL despite the name
+    try:
+        await _teardown(experiment)  # reclaim VMs + capacity; stop C2; best-effort collect
+    except Exception:
+        exp_log.exception("[%s] Teardown after experiment timeout failed", name)
+    experiment.status = ExperimentStatus.EXPERIMENT_TIMEOUT
+    await registry.update(experiment)
+    _write_result(experiment)
 
 
 def _attacker_command_recorder(experiment: Experiment):

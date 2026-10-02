@@ -53,6 +53,7 @@ class ExperimentStatus(str, Enum):
     FINISHED = "Finished"
     TIMEDOUT = "TimedOut"   # terminal: hit the harness-enforced attacker wall-clock cap (not a failure — no retry)
     BLOCKED = "Blocked"     # terminal: the attacker LLM was refused by a provider guardrail (not a harness failure — no retry)
+    EXPERIMENT_TIMEOUT = "ExperimentTimedOut"  # terminal: hit the overall experiment wall-clock cap (cfg.experiment_timeout_seconds) — a safety abort of a hung run (VMs reclaimed), distinct from the attacker's scored TimedOut; no retry
 
 
 class ExperimentSpecs(BaseModel):
