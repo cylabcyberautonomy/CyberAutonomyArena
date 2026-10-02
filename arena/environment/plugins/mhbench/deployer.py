@@ -346,7 +346,10 @@ def _provision_sync(
     topology_path = resolve_topology_path(environment_spec, cfg)
     python = mhbench_dir / ".venv" / "bin" / "python"
     cli = mhbench_dir / "cli.py"
-    provision_result_path = output_root(experiment_name, cfg) / experiment_name / "experiment" / "provision_result.json"
+    # .resolve() to an absolute path: MHBench's cli runs with cwd=mhbench_dir (below), so a relative
+    # output path (e.g. the default `output_dir: output`) would make it write provision_result.json
+    # relative to mhbench_dir while the arena looks for it relative to its own cwd — a FileNotFoundError.
+    provision_result_path = (output_root(experiment_name, cfg) / experiment_name / "experiment" / "provision_result.json").resolve()
 
     cmd = [
         str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
