@@ -851,8 +851,16 @@ async def _run_experiment(experiment: Experiment) -> None:
     deploy_slot_held = False
     try:
         vm_specs = await experiment.environment.capacity(experiment, cfg)
-        # Admission counts only the topology VMs (incl. the management host). VMs a plugin may
-        # deploy later (e.g. defender decoys) are not pre-reserved.
+        # Admission counts the topology VMs (incl. the management host) PLUS the defender's declared
+        # VM budget — the max extra hosts a running defender may spin up via EnvActionRequests (opt-in;
+        # default [] so a defender that never mutates topology reserves topology+0 and nothing changes).
+        # Pre-reserving the budget here is what lets a mid-run add_host draw from already-held capacity
+        # and never block or oversubscribe the cluster — closing the old "defender decoys are not
+        # pre-reserved" gap. Guarded getattr mirrors box_ingress(): a pre-merge defender requests none.
+        if experiment.defender is not None:
+            _vm_budget = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+            if _vm_budget:
+                vm_specs = list(vm_specs) + [tuple(s) for s in _vm_budget]
 
         def _record_reservation(res) -> None:
             # Runs INSIDE the tracker's lock at the moment of admission, so the registry
@@ -927,6 +935,21 @@ async def _run_experiment(experiment: Experiment) -> None:
             "defender box. Use a defender-capable (instrumented) environment, or remove the defender.",
         )
         return
+
+    # Second contract: a defender that declares a VM budget (it intends to mutate topology mid-run via
+    # EnvActionRequests) REQUIRES an environment that honours those events. Pairing a budget with a
+    # static environment is a contract violation — fail here, up front, rather than letting the defender
+    # discover its first add_host is unsupported mid-attack.
+    if experiment.defender is not None:
+        _budget = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+        if _budget and not experiment.environment.supports_dynamic_topology():
+            await _handle_failure(
+                experiment,
+                "Interface contract violated: the defender declares a VM budget (dynamic topology "
+                "mutation) but the environment does not support it. Use a dynamic-topology environment, "
+                "or remove the defender's defender_vm_budget().",
+            )
+            return
 
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # the foothold, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
