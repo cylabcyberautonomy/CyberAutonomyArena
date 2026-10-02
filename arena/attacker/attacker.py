@@ -48,16 +48,17 @@ async def run_attacker(
 ) -> asyncio.subprocess.Process:
     experiment_name = experiment.experiment_name
     env_spec = experiment._attacker_env_spec  # adversary-safe spec the arena attached (env-produced)
+
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    # The attacker consumes the attacker-facing env spec + its OWN opaque setup handle (`prepared`).
-    # The arena never inspects `prepared`: a C2 attacker reads its own C2 URLs off it inside
-    # build_config()/run(); a shell agent ignores it. No C2 plumbing threads through the arena.
     built = attacker.build_config(experiment_name, env_spec, prepared)
+
     type(attacker).validate_built_config(built)  # fail fast if the config drifts from the runner contract
+    
     config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
-    # run_start launches the process AND emits RUNNING (attacker-emitted; the arena waits for it).
+
     process = await attacker.run_start(experiment, prepared, config_path, cfg)
     log(experiment_name, f"Attacker process started (pid={process.pid})")
+    
     return process

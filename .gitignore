@@ -25,5 +25,5 @@ experiment_registry*.yaml
 # Dashboard-written attacker spec files (submission-time artifacts)
 submitted_specs/
 
-# Offline scoring/analysis tools — parked locally, not shipped (for now)
+# Offline scoring/analysis tools — parked locally, not shipped (for now!)
 /scoring/
