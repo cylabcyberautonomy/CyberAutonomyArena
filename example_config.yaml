@@ -17,8 +17,11 @@ incalmo_dir: /path/to/Incalmo
 # Local checkout of MHBench — the environment backend that deploys the victim topology.
 mhbench_dir: /path/to/MHBench
 
-# This host's address as reachable by the deployed VMs (the management/bastion-facing
-# IP). Used as the default telemetry-relay / fallback defender-box location.
+# The arena/manager host's own IP — the machine running the arena, as seen from the deployed
+# environment. NOT the per-experiment bastion (that one is ephemeral, assigned at provisioning).
+# Its one use: handed to the defender (as its config's management_ip) so the defender's
+# self-protection never acts against the harness host. (The telemetry relay + fallback
+# defender-box location is gcp_relay_ip, not this.)
 host_ip: 10.0.0.1
 
 # ---- Python interpreters (default: each repo's own .venv/bin/python) ---------
@@ -42,7 +45,11 @@ host_ip: 10.0.0.1
 # output_dir:    output                     # per-experiment logs & results
 # registry_path: experiment_registry.yaml   # live state of all experiments
 
-# ---- Cloud backend -----------------------------------------------------------
+# ---- MHBench environment-backend settings ------------------------------------
+# NOTE: these describe how the MHBench ENVIRONMENT plugin deploys (which cloud, MHBench --config,
+# mgmt-host IP) — they are not arena behavior. They live here only because the config is currently
+# monolithic; properly they belong in the environment plugin's own config and should move there (the
+# arena is meant to be backend-neutral). Only the environment plugin should read these.
 os_cloud: openstack          # the clouds.yaml entry name to authenticate with
 cloud_backend: openstack     # "openstack" (default) or "gcp"
 # gcp routes MHBench through mhbench_config and skips the OpenStack clean-slate:
@@ -69,6 +76,9 @@ max_retries: 3
 #   m2.large: 8     # -> e2-standard-8
 
 # ---- Timeouts ----------------------------------------------------------------
-# attacker_timeout_seconds: 2700        # real wall-clock cap on the attacker; unset = no cap
+# attacker_timeout_seconds: 2700        # real wall-clock cap on the attacker (scored TimedOut); unset = no cap
+# experiment_timeout_seconds: 7200      # overall cap on the WHOLE run (provision -> ... -> teardown); unset = no cap.
+#                                       # Safety backstop for a total hang: aborts + tears down (ExperimentTimedOut),
+#                                       # distinct from attacker_timeout_seconds (which is a scored attacker cap).
 defender_ready_timeout_seconds: 1800    # max time for a defender to finish arming
 # ansible_verbosity: 0                  # 0-4 (-vvvv); also reads $ANSIBLE_VERBOSITY
