@@ -532,25 +532,70 @@ def test_environment_plugin_lifecycle_and_signals():
     assert lc.status == EnvironmentSignal.DEPLOYED
     assert lc.history == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
     assert seen == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
-    assert {"Deploying", "Deployed", "Configuring", "Configured", "TearingDown", "TornDown", "Failed"} \
-        == {s.value for s in EnvironmentSignal}
+    assert {"Deploying", "Deployed", "Configuring", "Configured", "Serving", "Idle",
+            "TearingDown", "TornDown", "Failed"} == {s.value for s in EnvironmentSignal}
 
 
 def test_environment_commands_arena_to_env():
-    """The arena also has commands it SENDS to the environment (Provision/Configure/Teardown),
-    recorded for an auditable command/ack trace. There is deliberately NO run/start command — the
-    environment just idles as VMs once configured."""
+    """The arena has commands it SENDS to the environment, recorded for an auditable command/ack trace.
+    The environment now HAS an active phase: between CONFIGURED and teardown the arena ACTIVATEs it as a
+    request-serving window (a running defender may mutate the topology via EnvActionRequest events) and
+    DEACTIVATEs it when the attack ends — it is not a busy loop, just the window in which env-mutation
+    events are honoured."""
     from arena.environment import EnvironmentLifecycle, EnvironmentCommand
     cmds = {c.value for c in EnvironmentCommand}
-    assert cmds == {"Provision", "Configure", "Teardown"}
-    assert not any("run" in c.lower() or "start" in c.lower() for c in cmds), \
-        "environment must have no run/start command"
+    assert cmds == {"Provision", "Configure", "Activate", "Deactivate", "Teardown"}
     sent = []
     lc = EnvironmentLifecycle(on_command=lambda c: sent.append(c))
     lc.send(EnvironmentCommand.PROVISION)
+    lc.send(EnvironmentCommand.ACTIVATE)
+    lc.send(EnvironmentCommand.DEACTIVATE)
     lc.send(EnvironmentCommand.TEARDOWN)
-    assert lc.commands == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
-    assert sent == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
+    assert lc.commands == [EnvironmentCommand.PROVISION, EnvironmentCommand.ACTIVATE,
+                           EnvironmentCommand.DEACTIVATE, EnvironmentCommand.TEARDOWN]
+    assert sent == lc.commands
+
+
+def test_environment_request_trace_and_primitive_defaults():
+    """The env↔defender dynamic interface: a running defender sends EnvActionRequest events; the
+    lifecycle records each serviced one (experiment data), and the EnvironmentPlugin primitives default
+    to UNSUPPORTED so a static environment is unaffected until a backend opts in."""
+    import asyncio
+    from arena.environment import (
+        EnvironmentLifecycle, EnvActionRequest, EnvActionResult, EnvActionKind, EnvRequestUnsupported,
+    )
+    from arena.environment.plugins.base import EnvironmentPlugin
+
+    # request DTO validates from a plain dict (how the Defense-repo orchestrator emits it)
+    req = EnvActionRequest.model_validate({"kind": "AddHost", "name": "decoy0", "role": "apache_vuln"})
+    assert req.kind is EnvActionKind.ADD_HOST and req.name == "decoy0"
+    assert EnvActionResult(kind=req.kind, ok=True, name="decoy0", ip="1.2.3.4").ok
+
+    # request trace
+    rec = []
+    lc = EnvironmentLifecycle(on_request=rec.append)
+    lc.record_request({"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"})
+    assert lc.requests == rec == [{"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"}]
+
+    # primitive defaults: unsupported + static-topology flag, so a non-dynamic env is unaffected
+    class _Static(EnvironmentPlugin, config_type="static_env_contract_test"):
+        environment_spec: str = "x"
+    st = _Static(environment_spec="x")
+    assert st.supports_dynamic_topology() is False
+    for kind in (EnvActionKind.ADD_HOST, EnvActionKind.REMOVE_HOST, EnvActionKind.REBUILD_HOST):
+        try:
+            asyncio.run(st.handle_env_request(None, None, EnvActionRequest(kind=kind), None))
+            assert False, f"{kind} should be unsupported by default"
+        except EnvRequestUnsupported:
+            pass
+
+
+def test_defender_vm_budget_optional_default():
+    """defender_vm_budget() is opt-in: the base default is [] (no extra VMs), so a defender that never
+    changes topology needs no change and reserves topology+0 at admission."""
+    from arena.defender.plugins.base import DefenderPlugin
+    # DefenderPlugin is abstract; the method ignores self, so call it unbound with a dummy self.
+    assert DefenderPlugin.defender_vm_budget(object()) == []
 
 
 def test_experiment_environment_property_returns_plugin():

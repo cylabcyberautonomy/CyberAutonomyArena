@@ -90,6 +90,21 @@ class DefenderPlugin(BaseModel):
         canary that runs no telemetry checks opens nothing."""
         return {}
 
+    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
+        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
+        specs — the same shape EnvironmentPlugin.capacity() returns, so the arena simply appends them to
+        the topology's footprint at admission. The cluster then holds room for `topology + this budget`
+        BEFORE the experiment is admitted, so every mid-run add_host draws from an already-reserved pool
+        and can never block or oversubscribe; the arena rejects an add that would exceed the ceiling.
+
+        OPT-IN, like box_ingress(): a defender that never changes topology (canary, velociraptor, a
+        passive SOC) returns [] (default) and needs no other change — the whole dynamic-host path is
+        inert for it (topology + 0 reserved, no env↔defender dynamic contract). Only a defender that
+        actually requests hosts (a deception/decoy strategy) overrides this. Pairing a non-empty budget
+        with an environment whose supports_dynamic_topology() is False is a contract violation the arena
+        catches at deploy time."""
+        return []
+
     async def setup(
         self,
         experiment_name: str,

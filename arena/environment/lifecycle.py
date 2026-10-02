@@ -24,11 +24,18 @@ from typing import Callable, Optional
 
 class EnvironmentCommand(str, Enum):
     """Arena -> environment. The arena SENDS these to drive each phase; recorded for an auditable
-    command/ack trace. NOTE: there is deliberately NO 'start/run' command — unlike the attacker, the
-    environment has no active run phase; once provisioned+configured it just idles as VMs in the
-    background until torn down."""
+    command/ack trace.
+
+    The environment now HAS an active phase: between CONFIGURED and teardown the arena ACTIVATEs it as a
+    request-serving service so a running defender can mutate the topology (add_host / rebuild_host /
+    remove_host) via EnvActionRequest events (see env_requests.py). This is NOT a busy loop — the
+    environment has no autonomous work; ACTIVATE just opens the window in which the arena honours those
+    events, and DEACTIVATE closes it. (A defender that declares no defender_vm_budget() never sends any,
+    so the window is inert for it.)"""
     PROVISION = "Provision"   # bring the network + VMs up
     CONFIGURE = "Configure"   # run setup on the hosts
+    ACTIVATE = "Activate"     # open the request-serving window (defender may now mutate topology)
+    DEACTIVATE = "Deactivate" # close the request-serving window (attack phase over)
     TEARDOWN = "Teardown"     # tear it all down (collect runs best-effort just before)
 
 
@@ -38,6 +45,8 @@ class EnvironmentSignal(str, Enum):
     DEPLOYED = "Deployed"         # provision finished
     CONFIGURING = "Configuring"   # configure started (ansible on the hosts)
     CONFIGURED = "Configured"     # configure finished; environment ready
+    SERVING = "Serving"           # ack of ACTIVATE — the request-serving window is open
+    IDLE = "Idle"                 # ack of DEACTIVATE — the window is closed; just idling until teardown
     TEARING_DOWN = "TearingDown"  # teardown started
     TORN_DOWN = "TornDown"        # teardown finished; resources reclaimed
     FAILED = "Failed"             # a phase raised
@@ -46,13 +55,17 @@ class EnvironmentSignal(str, Enum):
 class EnvironmentLifecycle:
     def __init__(self,
                  on_emit: Optional[Callable[[EnvironmentSignal, Optional[str]], None]] = None,
-                 on_command: Optional[Callable[[EnvironmentCommand], None]] = None):
-        # on_emit persists each env->arena signal; on_command records each arena->env command.
-        # Both called synchronously (the environment is driven in-process by the arena).
+                 on_command: Optional[Callable[[EnvironmentCommand], None]] = None,
+                 on_request: Optional[Callable[[dict], None]] = None):
+        # on_emit persists each env->arena signal; on_command records each arena->env command;
+        # on_request records each serviced defender->env mutation event. All called synchronously
+        # (the environment is driven in-process by the arena).
         self._on_emit = on_emit
         self._on_command = on_command
+        self._on_request = on_request
         self._history: list[EnvironmentSignal] = []
         self._commands: list[EnvironmentCommand] = []
+        self._requests: list[dict] = []
         self._status: Optional[EnvironmentSignal] = None
         self._error: Optional[str] = None
 
@@ -69,8 +82,24 @@ class EnvironmentLifecycle:
         return list(self._commands)
 
     @property
+    def requests(self) -> list[dict]:
+        """The trace of defender->env mutation events serviced in the SERVING window (one entry per
+        EnvActionRequest), so the recorded experiment shows exactly what the defender asked the
+        environment to do and when — e.g. "AddHost decoy0 -> ok at T+5m". Experiment data, like the
+        command/signal history."""
+        return list(self._requests)
+
+    @property
     def error(self) -> Optional[str]:
         return self._error
+
+    def record_request(self, entry: dict) -> None:
+        """Arena -> lifecycle: record one serviced env-mutation event. `entry` is a small plain dict
+        (kind, target/name, ok, ip, error, ts) the arena builds from the EnvActionRequest + its result —
+        kept dependency-free (no env_requests import) so the lifecycle stays a pure signal channel."""
+        self._requests.append(entry)
+        if self._on_request is not None:
+            self._on_request(entry)
 
     def send(self, command: EnvironmentCommand) -> None:
         """Arena -> environment: record the command that drives the next phase (in-process the arena
