@@ -1,6 +1,5 @@
-from .environment import DeployedEnvironment
+from .environment import DeployedEnvironment, EnvironmentConfig, build_environment
 from .lifecycle import EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
-from .environment import EnvironmentConfig, build_environment
 
 __all__ = ["DeployedEnvironment", "EnvironmentLifecycle", "EnvironmentSignal",
            "EnvironmentCommand", "EnvironmentConfig", "build_environment"]
