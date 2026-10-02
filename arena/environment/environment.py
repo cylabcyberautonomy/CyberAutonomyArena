@@ -17,6 +17,8 @@ unrecognized shape or an unknown plugin is an error.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel, model_validator
 
 
@@ -41,6 +43,15 @@ class EnvironmentConfig(BaseModel):
         """The value the internal readers key off (experiment.environment_spec) — the topology PATH.
         The deployer resolves it via resolve_topology_path; the short label is its stem."""
         return self.environment_spec
+
+
+class DeployedEnvironment(BaseModel):
+    """The provisioning RESULT the environment hands back after provision() — distinct from
+    EnvironmentConfig above (the submission input). Backend-neutral: topology_spec is the resolved
+    identifier; ip/spec are MHBench-specific carryovers (the foothold address + the short env name)."""
+    topology_spec: str
+    ip: Optional[str] = None    # kali floating IP (the attacker foothold address)
+    spec: Optional[str] = None  # environment name passed to Incalmo as "environment"
 
 
 def build_environment(value):

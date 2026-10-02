@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
 from ...ui_schema import PluginUISchema
-from ..models import DeployedEnvironment
+from ..environment import DeployedEnvironment
 from ..lifecycle import EnvironmentLifecycle
 
 if TYPE_CHECKING:

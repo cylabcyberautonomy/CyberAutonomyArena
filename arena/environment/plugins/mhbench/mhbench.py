@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from ....config import ExperimentManagerConfig
 from ....ui_schema import PluginUISchema
-from ...models import DeployedEnvironment
+from ...environment import DeployedEnvironment
 from ...lifecycle import EnvironmentLifecycle, EnvironmentSignal
 from ..base import EnvironmentPlugin
 

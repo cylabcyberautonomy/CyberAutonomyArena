@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from ....config import ExperimentManagerConfig
-from ...models import DeployedEnvironment
+from ...environment import DeployedEnvironment
 from ....experiment import Experiment
 from ....experiment_log import init_logger, log, output_root
 
