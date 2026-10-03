@@ -29,6 +29,17 @@ class PreparedDefender(BaseModel):
     whose full arming the marker covers."""
     armed_in_setup: bool = False
 
+    # Setup-produced state the runner config needs — the data baton, symmetric with PreparedAttacker
+    # carrying its C2 URLs. Phase A (box-ES / box-agent standup, run BEFORE build_config) fills these in,
+    # and build_config() bakes them into the config it emits — so they are no longer patched into the
+    # already-written config. All optional: a defender with no box telemetry (canary) leaves them None.
+    es_url: Optional[str] = None          # harness-host -> box ES ssh -L tunnel URL (http://127.0.0.1:<lport>)
+    falco_index: Optional[str] = None     # falco index name on the box ES
+    sysflow_index: Optional[str] = None   # sysflow index name on the box ES
+    box_agent_host: Optional[str] = None  # box-agent endpoint (dynamic defenders only)
+    box_agent_port: Optional[int] = None
+    box_agent_token: Optional[str] = None
+
 
 class DefenderPlugin(BaseModel):
     _registry: ClassVar[dict[str, type["DefenderPlugin"]]] = {}
