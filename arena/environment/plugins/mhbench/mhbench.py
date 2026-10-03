@@ -193,23 +193,27 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         await request_ingress_env(experiment, bastion_ip, cfg, ingress)
 
     async def _teardown_dynamic_hosts(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
-        """Delete any VMs standing on this experiment's networks that aren't topology hosts (decoys) -
-        before the network teardown. A defender's DeployDecoy actuator creates OpenStack servers directly
-        via openstacksdk, outside the topology JSON, so teardown_environment has no idea they exist; if
-        left alive they keep this experiment's security groups "in use", and MHBench's teardown deletes in
-        order and aborts on the first ConflictException, leaking every network/subnet/security-group for
-        the whole experiment right along with the decoy (confirmed live, repeatedly). Reaping stray VMs on
-        our own networks is the environment's job, not the defender's (the defender is backend-agnostic;
-        deleting a VM is not).
+        """Delete the dynamically-added VMs (decoys) on this experiment's networks before the network
+        teardown — an ENVIRONMENT responsibility, driven by the env, never by the arena or the defender.
 
-        Identified by the experiment-name prefix, not a decoy name pattern: every server MHBench
-        provisions is named "<experiment_name>-<host>" (see HostDeployer._n), while DeployDecoy creates
-        servers under the bare `action.host_name` with no prefix. So on this experiment's own networks,
-        "unprefixed" is exactly "not a real topology host" - i.e. a decoy. Cross-referencing the network
-        name ("<experiment_name>-<subnet_name>") keeps this scoped to this experiment even under
-        concurrency. Looked up via Neutron ports (device_id=server.id), not server.addresses: addresses is
-        empty while a server is still BUILD (a slow/stuck decoy - exactly the case this must catch), but a
-        port with its network exists as soon as create_server() returns.
+        How the env KNOWS which VMs to reap (the feedback loop): under box-only execution the defender
+        never touches the cloud. Every dynamic host is created BY THIS ENVIRONMENT, through add_host
+        (defender -> env UDS channel -> MHBench), and create_one_host stamps metadata
+        arena_dynamic_host="true" on it (see src/deployment/host_deployer.py). That tag — persisted on the
+        cloud VM, so it survives a manager restart (the in-memory registry does not) — is the record this
+        sweep reads back: a tagged server on one of this experiment's networks is a decoy to reap; a real
+        topology host is untagged and left alone. Reaping matters because a live decoy keeps this
+        experiment's security groups "in use", and MHBench's ordered teardown aborts on the first
+        ConflictException, leaking every network/subnet/security-group for the whole experiment along with
+        the decoy (confirmed live, repeatedly).
+
+        The `not name.startswith("<experiment_name>-")` clause is a legacy fallback for the now-removed
+        arena-side DeployDecoy actuator, which created bare-named (unprefixed) servers directly; the
+        current add_host path PREFIXES decoy names like topology hosts, so those are caught by the TAG,
+        not the prefix. Scope is kept to this experiment by cross-referencing the network name
+        ("<experiment_name>-<subnet_name>"), via Neutron ports (device_id=server.id) not server.addresses:
+        addresses is empty while a server is still BUILD (a slow/stuck decoy — exactly the case this must
+        catch), but a port with its network exists as soon as create_server() returns.
 
         Best-effort: never fails teardown. No-op on backends without this escape hatch."""
         if cfg.env_backend.cloud_backend == "gcp":

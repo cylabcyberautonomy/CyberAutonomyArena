@@ -155,7 +155,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             "server_ip": self._server_ip,          # the defender box (server runs here)
             "server_proxy": self._server_proxy,    # bastion ProxyCommand so the runner can SSH to the box
             "expected_clients": self._expected_clients,
-            "ssh_key": self._ssh_key or str(Path("~/.ssh/id_ed25519").expanduser()),
+            "ssh_key": self._ssh_key,   # the injected scoped defender key (set in setup(); no god-key fallback)
             "response_mode": self.response_mode,
             "poll_interval": self.poll_interval,
             "ready_timeout": 600,
