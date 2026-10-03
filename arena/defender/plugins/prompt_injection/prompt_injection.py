@@ -41,7 +41,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     """
 
     type: Literal["prompt_injection"]
-    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy"})
     code_dir_field = "prompt_injection_dir"          # Defense/Perry repo for this defender (per-plugin)
     executes_from_box = True                           # box-only execution: deploy the box agent + arm the env channel
     code_python_field = "prompt_injection_python"
@@ -125,11 +125,12 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
     ) -> dict:
+        # No topology_spec: this defender builds its Perry Network from the arena-injected
+        # defender_env_spec (the env resolves backend names), not a backend topology.
         return {
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "arsenal": self.arsenal,
-            "topology_spec": environment.topology_spec if environment else None,
         }
 
     async def prepare(

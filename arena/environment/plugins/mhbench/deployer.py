@@ -155,6 +155,83 @@ def _role_from_name(name: str) -> Optional[str]:
     return re.sub(r"\d+$", "", name) or None
 
 
+def _host_users(vm_type: str) -> list[str]:
+    """Login accounts a host of this MHBench vm_type actually has — the ENVIRONMENT knows them (the
+    defender must not guess backend vm_types). A decoy defender plants its honey-credential trail by
+    iterating a host's users (an ssh key in ~/.ssh + a matching ~/.ssh/config entry pointing at the
+    decoy); over an empty list that does nothing, so the decoys got honey accounts but nothing pointed
+    at them. Names come from what MHBench bakes: `ubuntu` on every cloud image, plus `tomcat` on
+    webservers (created by setup_struts.yml — the account a Struts RCE lands in). The attacker box
+    deliberately gets none: planting credentials there hands them to the attacker rather than baiting a
+    lateral move. (Ported from the old defender-side topology.py shim — this knowledge belongs to the
+    env.)"""
+    if vm_type.startswith("kali"):
+        return []
+    if vm_type.startswith("webserver"):
+        return ["ubuntu", "tomcat"]
+    return ["ubuntu"]
+
+
+def _defender_subnets(topology_path: Path, project_name: Optional[str]):
+    """Resolve the full subnet structure the defender's run spec exposes — backend names included.
+
+    This is the knowledge the old defender-side topology.py reached into MHBench for; it now lives in
+    the ENVIRONMENT, which owns the backend. Each DefenderSubnet carries the REAL Neutron network name
+    ("<project>-<subnet>") + security-group name ("<project>-<subnet>_sg") MHBench provisions (see
+    NetworkDeployer._n / Subnet.sg_name), so a decoy defender attaches a decoy by name without knowing
+    the convention. The attacker/entry flags come from the topology's subnet_connections."""
+    from ....defender.env_spec import DefenderSubnet, DefenderHost  # lazy: avoid import cycle
+
+    topo = json.loads(Path(topology_path).read_text())
+    nets = topo.get("networks", [])
+    if not nets:
+        return [], None, None
+    network_data = nets[0]
+    subnet_connections = topo.get("subnet_connections", [])
+
+    def _n(name: str) -> str:
+        return f"{project_name}-{name}" if project_name else name
+
+    # The attacker's first hop: subnets adjacent to the attacker's own (raw, un-prefixed names, since
+    # subnet_connections uses them). Lets deception place a honey credential on the path in any topology.
+    attacker_raw = next(
+        (sd["name"] for sd in network_data["subnets"]
+         if any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"])),
+        None,
+    )
+    entry_raw = set()
+    for conn in (subnet_connections or []):
+        endpoints = {conn.get("from_subnet"), conn.get("to_subnet")}
+        if attacker_raw in endpoints:
+            entry_raw |= endpoints - {attacker_raw, None}
+
+    subnets = []
+    for sd in network_data["subnets"]:
+        is_attacker = any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"])
+        hosts = []
+        for h in sd["hosts"]:
+            ip = h.get("ip_address")
+            hosts.append(DefenderHost(
+                name=h["name"],
+                ip=str(ip) if ip else None,
+                role=_role_from_name(h["name"]),
+                users=_host_users(h.get("vm_type", "")),
+                # Runs sysflow/falco: MHBench attaches start_sysflow/start_defender_services to exactly
+                # the "*_instrumented" vm_types (src/registry/online_registry.yaml); the env ships their
+                # telemetry to the box. kali_running has no stack, so it's excluded.
+                telemetry=h.get("vm_type", "").endswith("_instrumented"),
+            ))
+        subnets.append(DefenderSubnet(
+            name=sd["name"],
+            network=_n(sd["name"]),            # the real Neutron network DeployDecoy attaches to
+            sec_group=_n(f"{sd['name']}_sg"),  # the subnet's security group
+            hosts=hosts,
+            attacker=is_attacker,
+            entry=sd["name"] in entry_raw,
+        ))
+    return subnets, network_data.get("name"), _n("management_sg")
+
+
 def _bastion_proxy_args(bastion_ip: Optional[str], key: str) -> str:
     if not bastion_ip:
         return ""
@@ -294,21 +371,31 @@ async def inject_scoped_keys_env(experiment: Experiment, bastion_ip: Optional[st
 
 
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
-    """Build the agent-facing DefenderEnvSpec (objective + host inventory at the defender's knowledge
-    level — no creds/routing). Carries topology_spec, which the defender runners read."""
+    """Build the agent-facing DefenderEnvSpec — the self-describing run spec: objective, flat victim
+    inventory, AND the full subnet structure with backend-resolved network/sg NAMES (so a decoy defender
+    builds Perry's Network straight from here without parsing a backend topology — the old defender-side
+    topology.py shim is gone). No creds/routing."""
     from ....defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
-    hosts = []
     topo = deployed.topology_spec if deployed else None
+    project_name = deployed.project_name if deployed else None
+    hosts = []
+    subnets, network_name, management_sg = [], None, None
     if topo and Path(topo).exists():
         for h in _iter_victims(topo):
             ip = h.get("ip_address")
-            hosts.append(DefenderHost(name=h["name"], ip=str(ip) if ip else None,
-                                      role=_role_from_name(h["name"])))
+            hosts.append(DefenderHost(
+                name=h["name"], ip=str(ip) if ip else None, role=_role_from_name(h["name"]),
+                users=_host_users(h.get("vm_type", "")),
+                telemetry=h.get("vm_type", "").endswith("_instrumented"),
+            ))
+        subnets, network_name, management_sg = _defender_subnets(Path(topo), project_name)
     return DefenderEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
         hosts=hosts,
+        subnets=subnets,
+        network_name=network_name,
+        management_sg=management_sg,
         box=defender_box_spec(deployed, cfg),
-        topology_spec=topo,
     )
 
 
@@ -379,6 +466,10 @@ def _provision_sync(
         topology_spec=str(topology_path),
         ip=kali_ip,
         spec=Path(environment_spec).stem,
+        # The project/prefix MHBench provisions Neutron names under (--project-name below). The defender
+        # spec resolves "<project_name>-<subnet>" network/sg names from this, so the defender never has to
+        # know the backend naming convention.
+        project_name=experiment_name,
     ), bastion_ip
 
 

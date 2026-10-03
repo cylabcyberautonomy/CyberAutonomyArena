@@ -405,8 +405,8 @@ _EXPECTED_ATTACKER_CONFIG_KEYS = {
 _EXPECTED_DEFENDER_CONFIG_KEYS = {
     "canary":           {"experiment_name", "checks", "fail_closed"},
     "llm_soc":          {"experiment_name", "strategy", "llm_model"},
-    "deception":        {"experiment_name", "strategy", "topology_spec"},
-    "prompt_injection": {"experiment_name", "strategy", "topology_spec"},
+    "deception":        {"experiment_name", "strategy"},
+    "prompt_injection": {"experiment_name", "strategy"},
     "velociraptor":     {"experiment_name", "topology_spec", "response_mode"},
 }
 

@@ -30,7 +30,8 @@ strategy triggers the Falco install below (see _NEEDS_FALCO); the static
 variants get NoTelemetry and never touch Elasticsearch.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
-  experiment_name, topology_spec, deception_dir, management_ip, log_dir
+  experiment_name, deception_dir, management_ip, log_dir,
+  and the arena-injected defender_env_spec (the env run spec Perry's Network is built from)
 """
 import json
 import os
@@ -49,20 +50,16 @@ if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
 # The three defender runners are standalone scripts, not package modules, so the
-# plugins/ directory (which holds the shared topology builder) has to go on
+# plugins/ directory (which holds the shared perry_network builder) has to go on
 # sys.path explicitly - the same way deception_dir does above.
 _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
 
-from topology import (
-    build_network,
-    host_users,
-)
+from perry_network import build_network_from_spec
 
 from elasticsearch import Elasticsearch
 from config.config import Config
-from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
@@ -153,11 +150,10 @@ sysflow_index = config.get("sysflow_index", "sysflow")
 # from inside the environment; the controller only talks to the box agent + the env UDS channel.
 
 
-topology_spec = config.get("topology_spec")
-network = None
-if topology_spec:
-    topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
+# Build Perry's Network from the ENVIRONMENT-produced run spec (defender_env_spec), not a backend
+# topology: the env resolved the Neutron network/sg names + per-host users. Backend-agnostic defender
+# (see plugins/perry_network.py). telemetry_hosts is unused here (this runner never repoints sensors).
+network, _telemetry_hosts = build_network_from_spec(config.get("defender_env_spec"))
 
 if network is not None and strategy_name in _NEEDS_FALCO:
     # Box mode: the environment owns sensor shipping (falcosidekick -> relay -> box:9200), so the

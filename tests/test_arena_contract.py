@@ -740,7 +740,8 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
         pytest.skip(f"{ENV_SPEC} not found")
 
     env = build_environment(ENV)
-    deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM)
+    deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM,
+                                   project_name="ci_proj")
     from arena.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=md, env_backend=EnvBackendConfig(mhbench_config=None))
 
@@ -765,6 +766,16 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert names and "attacker" not in names  # kali excluded
     assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
     assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
+    # Env-resolved subnet structure (the decoy defenders build Perry's Network from this, NOT the backend
+    # topology — topology.py is gone). The env resolves the backend network/sg NAMES, per-host users, and
+    # the attacker-segment flag, so the defender stays backend-agnostic.
+    assert dspec.subnets, "defender_spec must carry the subnet structure"
+    assert dspec.management_sg == "ci_proj-management_sg"
+    ws = next((s for s in dspec.subnets if any(h.role == "webserver" for h in s.hosts)), None)
+    assert ws is not None and ws.network == f"ci_proj-{ws.name}" and ws.sec_group == f"ci_proj-{ws.name}_sg"
+    assert any("tomcat" in h.users for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
+    atk = next((s for s in dspec.subnets if s.attacker), None)
+    assert atk is not None, "the attacker's own segment must be flagged so decoys avoid it"
     # defender: setup access = one SetupAccess per victim (+ the defender box), with creds
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     acc_names = {a.name for a in dacc}

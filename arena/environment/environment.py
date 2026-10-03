@@ -52,6 +52,8 @@ class DeployedEnvironment(BaseModel):
     topology_spec: str
     ip: Optional[str] = None    # kali floating IP (the attacker foothold address)
     spec: Optional[str] = None  # environment name passed to Incalmo as "environment"
+    project_name: Optional[str] = None  # the backend project/prefix for this deploy (MHBench --project-name);
+    #                                     the env resolves "<project_name>-<subnet>" network/sg names from it.
 
 
 def build_environment(value):
