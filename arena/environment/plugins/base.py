@@ -50,13 +50,6 @@ class EnvironmentPlugin(BaseModel):
         return getattr(self, "environment_spec", "")
 
     # -- lifecycle ---------------------------------------------------------
-    async def capacity(
-        self, experiment: "Experiment", cfg: ExperimentManagerConfig
-    ) -> list[tuple[int, int, int]]:
-        """(vcpus, ram_mb, disk_gb) for each VM in the topology, incl. the management host —
-        the environment's real footprint, for the CapacityTracker's admission math."""
-        raise NotImplementedError(f"{type(self).__name__} must implement capacity()")
-
     async def provision(
         self, experiment: "Experiment", c2c_url: Optional[str], cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

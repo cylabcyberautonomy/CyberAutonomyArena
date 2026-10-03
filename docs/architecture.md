@@ -11,7 +11,7 @@ An experiment pairs three pluggable systems. Two are required, one optional:
 
 | System          | Role                                                              | Required? |
 |-----------------|------------------------------------------------------------------|-----------|
-| **environment** | deploys the network the experiment runs on, sizes it for admission, issues scoped access, produces the agent-facing specs | yes |
+| **environment** | deploys the network the experiment runs on, issues scoped access, produces the agent-facing specs | yes |
 | **attacker**    | the offensive agent, run from a foothold the environment provides | yes |
 | **defender**    | the defensive system — detection, deception, and/or active response | optional |
 
@@ -21,8 +21,8 @@ Each is a plugin: a class that subclasses its system's base (`EnvironmentPlugin`
 
 ## The arena vs. the plugins
 
-`arena/main.py` is **the arena**. It owns the experiment lifecycle, admission/queueing, and
-the status stream — and it drives each system *only* through its base-class interface. It never reaches
+`arena/main.py` is **the arena**. It owns the experiment lifecycle (purely sequential — one experiment at
+a time) and the status stream — and it drives each system *only* through its base-class interface. It never reaches
 inside a plugin, and no plugin reaches into the arena. That boundary is the whole design: the arena is
 backend-agnostic, and a plugin is free to be as backend-specific as it needs, as long as it honours the
 contract.
@@ -66,7 +66,7 @@ written against neutral specs instead of parsing a particular backend's topology
 
 ## Lifecycle, in one line
 
-`capacity → provision → configure → (defender arm) → attacker run → collect → teardown`, with a
+`provision → configure → (defender arm) → attacker run → collect → teardown`, with a
 readiness handshake gating the attacker on the defender being armed. See
 [lifecycle.md](lifecycle.md) for the full flow and the handshake, [plugins.md](plugins.md) for how to add
 a plugin of each type, and [security-model.md](security-model.md) for the no-god-key and

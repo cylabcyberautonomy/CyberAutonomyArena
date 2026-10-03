@@ -55,7 +55,7 @@ def _trace_entry(request, result) -> dict:
     }
 
 
-async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
+async def handle_env_action(payload: dict, *, registry, cfg) -> dict:
     """Authorize, budget-check, dispatch, and record ONE env-mutation event. Returns a plain dict with
     the EnvActionResult fields plus an internal "status" (HTTP status the transport should use, popped
     before the body is returned over the wire). Pure: no socket/transport here, so it is unit-testable.
@@ -98,16 +98,11 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
             lc.record_request(_trace_entry(req, result))
         return {**result.model_dump(mode="json"), "status": 200}
 
-    # --- dispatch (serialise cloud mutations under the same lock provisioning uses) -----------------
-    async def _dispatch():
-        return await exp.environment.handle_env_request(exp, exp.deployed_environment, req, cfg)
-
+    # --- dispatch ----------------------------------------------------------
+    # The arena is purely sequential (one experiment at a time), so there is no provisioning lock to
+    # serialise cloud mutations against — the dispatch runs directly.
     try:
-        if lock is not None:
-            async with lock.acquire(0):
-                result = await _dispatch()
-        else:
-            result = await _dispatch()
+        result = await exp.environment.handle_env_request(exp, exp.deployed_environment, req, cfg)
     except EnvRequestUnsupported as e:
         result = EnvActionResult(kind=req.kind, ok=False, error=str(e))
     except Exception as e:  # noqa: BLE001 — a backend failure must degrade gracefully, not wedge the run
@@ -124,7 +119,7 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
     return {**result.model_dump(mode="json"), "status": 200}
 
 
-def build_env_action_app(registry, cfg, lock):
+def build_env_action_app(registry, cfg):
     """A tiny FastAPI app with the single action route, for serving over a UDS."""
     from fastapi import FastAPI, Body
     from fastapi.responses import JSONResponse
@@ -133,14 +128,14 @@ def build_env_action_app(registry, cfg, lock):
 
     @app.post("/environment/action")
     async def _action(payload: dict = Body(...)):  # noqa: ANN202, B008
-        res = await handle_env_action(payload, registry=registry, cfg=cfg, lock=lock)
+        res = await handle_env_action(payload, registry=registry, cfg=cfg)
         status = res.pop("status", 200)
         return JSONResponse(res, status_code=status)
 
     return app
 
 
-async def serve_env_actions(socket_path: str, registry, cfg, lock) -> None:
+async def serve_env_actions(socket_path: str, registry, cfg) -> None:
     """Run the UDS server until cancelled (started as a lifespan task). Removes a stale socket file first
     so a crashed prior manager doesn't block bind."""
     import uvicorn
@@ -151,6 +146,6 @@ async def serve_env_actions(socket_path: str, registry, cfg, lock) -> None:
     except OSError:
         pass
     Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
-    config = uvicorn.Config(build_env_action_app(registry, cfg, lock), uds=socket_path, log_level="warning")
+    config = uvicorn.Config(build_env_action_app(registry, cfg), uds=socket_path, log_level="warning")
     server = uvicorn.Server(config)
     await server.serve()

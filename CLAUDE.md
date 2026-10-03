@@ -112,7 +112,7 @@ cheap no-cloud adapter probe). Run that before shipping a plugin that touches a 
 
 ```
 arena/
-  main.py       the arena: the experiment lifecycle + admission/queueing
+  main.py       the arena: the experiment lifecycle (purely sequential — one experiment at a time)
   config.py     ExperimentManagerConfig (paths, limits, backend selection)
   experiment/   the Experiment model + its persisted state
   environment/  environment plugin type (backend-neutral interface); plugins/mhbench/ is the MHBench backend
@@ -124,18 +124,17 @@ arena/
 
 ## Adding an ENVIRONMENT plugin
 
-Deploys and tears down the network, sizes it for admission (so experiments can run in parallel), and
-**produces everything the attacker and defender need to reach it**. Subclass `EnvironmentPlugin`
+Deploys and tears down the network, and **produces everything the attacker and defender need to reach
+it**. Subclass `EnvironmentPlugin`
 (`environment/plugins/base.py`) with a `config_type`.
 
 The environment package ROOT is backend-neutral — it holds only the interface (`plugins/base.py`), the
-config/models/lifecycle, the admission gate (`capacity.py:CapacityTracker`), and the `build_environment`
-factory. A backend's whole implementation lives inside ITS plugin; MHBench is just one plugin, not the
+config/models/lifecycle, and the `build_environment` factory. A backend's whole implementation lives inside ITS plugin; MHBench is just one plugin, not the
 environment interface.
 
 Existing: `plugins/mhbench/` — the MHBench backend as a PACKAGE: `deployer.py` (provision/configure +
-spec/access production), `capacity.py` (`count_vm_specs` topology sizing), `collect.py`/`rotate.py`/
-`teardown.py`, and `mhbench.py` (the `EnvironmentPlugin` that delegates to them). Deploys a multi-host
+spec/access production), `collect.py`/`rotate.py`/`teardown.py`, and `mhbench.py` (the `EnvironmentPlugin`
+that delegates to them). Deploys a multi-host
 MHBench topology (e.g. the Equifax-breach scenarios) on OpenStack (default) or GCP; issues the per-system
 scoped keys during `configure` and produces the agent-facing specs + `SetupAccess`. The environment root
 is backend-neutral: a second backend implements the same `EnvironmentPlugin` interface as its own plugin,
@@ -143,7 +142,6 @@ with no change to the arena.
 
 **Lifecycle the arena drives:**
 ```python
-async def capacity(self, experiment, cfg) -> list[tuple[int, int, int]]:   # (vcpus, ram_mb, disk_gb) per VM
 async def provision(self, experiment, c2c_url, cfg, lc=None) -> tuple[DeployedEnvironment, mgmt_ip]:
     """Spin the network up. Emit DEPLOYING -> DEPLOYED (or FAILED) on `lc`."""
 async def configure(self, experiment, mgmt_ip, c2c_url, cfg, lc=None) -> None:
