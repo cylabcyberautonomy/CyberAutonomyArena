@@ -106,7 +106,7 @@ def _mhbench_dir() -> Path | None:
 
 def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
-    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "sliver_llm"} <= set(AttackerPlugin._registry)
+    assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "sliver_llm", "llm_c2"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
     assert {"caldera_human"} <= set(TrafficPlugin._registry)
 

@@ -71,6 +71,7 @@ field silently backs several.
 | `incalmo_strategy_dir` (+`_python`) | `incalmo_strategy` attacker | Incalmo repo. |
 | `incalmo_llm_dir` (+`_python`) | `incalmo_llm` attacker | Incalmo repo (same checkout as above; named per plugin). |
 | `sliver_llm_dir` (+`_python`) | `sliver_llm` attacker | Sliver venv/checkout. Defaults to `<output_dir>/.sliver`. |
+| `llm_c2_dir` (+`_python`) | `llm_c2` attacker | Incalmo repo (supplies the C2 stack for the bare LLM + C2 loop). |
 | `llm_soc_dir` (+`_python`) | `llm_soc` defender | Defense/Perry repo. |
 | `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
 | `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |

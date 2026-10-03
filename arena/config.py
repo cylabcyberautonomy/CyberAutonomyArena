@@ -65,6 +65,8 @@ class ExperimentManagerConfig(BaseModel):
     incalmo_llm_python: Optional[Path] = None
     sliver_llm_dir: Optional[Path] = None            # Sliver operator venv — sliver_llm attacker; defaults to <output_dir>/.sliver
     sliver_llm_python: Optional[Path] = None
+    llm_c2_dir: Optional[Path] = None             # Incalmo repo — llm_c2 attacker (bare LLM + C2); supplies the C2 stack
+    llm_c2_python: Optional[Path] = None
     llm_soc_dir: Optional[Path] = None               # Defense/Perry repo — llm_soc defender
     llm_soc_python: Optional[Path] = None
     deception_dir: Optional[Path] = None             # Defense/Perry repo — deception defender

@@ -400,6 +400,7 @@ _EXPECTED_ATTACKER_CONFIG_KEYS = {
     "cai_llm":          {"model", "objective", "foothold_ip"},
     "terminus_llm":     {"model", "objective", "foothold_ip", "max_turns"},
     "sliver_llm":       {"operator_cfg", "listener_addr", "model", "objective", "max_turns"},
+    "llm_c2":        {"c2c_server", "model", "objective", "max_turns"},
     "openshell":        {"agent", "provider_type", "model", "policy", "objective", "foothold_ip", "agent_cmd_template"},
 }
 _EXPECTED_DEFENDER_CONFIG_KEYS = {

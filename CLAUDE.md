@@ -212,9 +212,14 @@ Existing:
   shell in a read-terminal → think → type-command loop on the foothold.
 - `plugins/cai/` — the CAI (Cybersecurity AI) framework's offensive agent, run on the foothold as a shell
   agent.
-- `plugins/sliver/` — `sliver_llm`: the Sliver counterpart of `c2_llm` (bare LLM + `run_command` over a
-  [Sliver](https://github.com/BishopFox/sliver) C2). Its own C2 lifecycle (`sliver_c2.py`); NOT
-  live-validated.
+- `plugins/llm_c2/` — `llm_c2`: a **bare LLM with raw C2 access** — the C2 analog of the shell agents.
+  It reuses Incalmo's C2 stack for setup (C2 on the foothold, first sandcat agent beacons in) but drives it
+  with a minimal LLM loop (`run_command` over the C2 HTTP API) — no Incalmo framework/abstractions/strategies.
+  Self-contained like the two incalmo attackers (its own `c2.py`/`foothold.py`/`aux/`), pointing at the
+  Incalmo repo via `llm_c2_dir`. NOT live-validated.
+- `plugins/sliver/` — `sliver_llm`: the Sliver counterpart of `llm_c2` (the same bare LLM + `run_command`
+  loop over a [Sliver](https://github.com/BishopFox/sliver) C2 instead of Incalmo's). Its own C2 lifecycle
+  (`sliver_c2.py`); NOT live-validated.
 
 **The interface:**
 ```python

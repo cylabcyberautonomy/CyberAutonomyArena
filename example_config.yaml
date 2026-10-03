@@ -35,6 +35,8 @@ arena_host_ip: 10.0.0.1
 # incalmo_llm_python:      /path/to/Incalmo/.venv/bin/python
 # sliver_llm_dir:          /path/to/sliver     # defaults to <output_dir>/.sliver, built on first use
 # sliver_llm_python:       /path/to/sliver/.venv/bin/python
+# llm_c2_dir:           /path/to/Incalmo    # bare LLM + Incalmo C2 (no framework); supplies the C2 stack
+# llm_c2_python:        /path/to/Incalmo/.venv/bin/python
 #
 # Defenders (llm_soc / deception / prompt_injection all live in the Defense/Perry repo):
 # llm_soc_dir:             /path/to/Defense-MHBench-compatible
