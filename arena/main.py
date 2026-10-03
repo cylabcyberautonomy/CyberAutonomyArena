@@ -204,15 +204,15 @@ async def lifespan(app: FastAPI):
     global cfg, registry, _openstack_lock, _configure_lock, _collect_lock, _attacker_setup_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
-    logger.warning("arena starting: cloud_backend=%s (config=%s)",
-                   cfg.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
+    logger.warning("arena starting: env_backend.cloud_backend=%s (config=%s)",
+                   cfg.env_backend.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
     # LLM keys into os.environ so plugin subprocesses (env={**os.environ,…}) inherit them, however the
     # harness was launched. The keys historically live in the Incalmo repo's .env; load from whichever
     # incalmo code dir(s) are configured (per-plugin now). Best-effort; an already-exported key still wins.
     for _incalmo_dir in (cfg.incalmo_strategy_dir, cfg.incalmo_llm_dir):
         if _incalmo_dir:
             load_dotenv(_incalmo_dir / ".env")
-    os.environ["OS_CLOUD"] = cfg.os_cloud
+    os.environ["OS_CLOUD"] = cfg.env_backend.os_cloud
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
@@ -220,11 +220,10 @@ async def lifespan(app: FastAPI):
     _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent C2-attacker bring-up (gated by requires_docker)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments; overflow waits in QUEUED (priority-ordered)
-    if cfg.cloud_backend == "gcp":
-        # HARD GATE: a GCP manager must never run the all-projects OpenStack clean-slate.
-        logger.warning("cloud_backend=gcp — SKIPPING OpenStack clean-slate; this manager will not touch the shared OpenStack cloud")
-    else:
-        await _clean_slate()
+    # Always run clean-slate — the arena manages its OpenStack infra directly (the old gcp-skip gate is
+    # gone now that the backend is the environment's concern, not an arena-level switch). _clean_slate is
+    # internally best-effort, so it logs and continues if OpenStack isn't reachable.
+    await _clean_slate()
     # The registry is the tracker's source of truth: the VM count is derived on every check
     # from which experiments currently hold VMs (capacity._holds_vms), not from paired
     # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
@@ -453,9 +452,8 @@ async def _clean_slate() -> None:
     # shared OpenStack cloud's resources (all-projects wipe) and (b) pkill the OTHER manager's
     # in-flight MHBench/ansible subprocesses on this shared host. GCP experiments are torn down
     # per-experiment via MHBench (config.gcp.yaml); leftover GCP resources are handled there.
-    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
-        logger.info("cloud_backend=gcp — skipping OpenStack clean-slate (isolated GCP manager)")
-        return
+    # (The old gcp-skip gate is removed: clean-slate always runs now that the backend is the environment's
+    # concern, not an arena switch.)
     # Reap MHBench provision/configure/collect subprocesses (+ their ansible children) left over from a
     # prior harness that died without cleaning up: orphaned to init, they keep hammering torn-down bastions
     # for the full check_if_host_up timeout (~18 min) and write stale host-logs into reused same-name output

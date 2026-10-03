@@ -56,7 +56,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import resolve_topology_path
         topology_path = resolve_topology_path(self.environment_spec, cfg)
         return await count_vm_specs(topology_path, cfg.mhbench_dir,
-                                    flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
+                                    flavor_cpu_cost=(cfg.env_backend.gcp_flavor_cpu_cost or None))
 
     async def provision(
         self, experiment: "Experiment", c2c_url: Optional[str], cfg: ExperimentManagerConfig,
@@ -166,7 +166,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
         # The management host's internal IP is constant across runs (management.host_ip); reuse the
         # gcp_relay_ip default which already names it.
-        return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
+        return cfg.env_backend.gcp_relay_ip
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import defender_box_spec
@@ -212,13 +212,13 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         port with its network exists as soon as create_server() returns.
 
         Best-effort: never fails teardown. No-op on backends without this escape hatch."""
-        if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+        if cfg.env_backend.cloud_backend == "gcp":
             return  # GCP decoys are named/reaped by MHBench's own teardown; no stray-VM sweep needed
         import asyncio
         import openstack
 
         def _sync() -> None:
-            conn = openstack.connect(cloud=cfg.os_cloud)
+            conn = openstack.connect(cloud=cfg.env_backend.os_cloud)
             prefix = f"{experiment.experiment_name}-"
             for server in conn.compute.servers():
                 if (server.name or "").startswith(prefix):

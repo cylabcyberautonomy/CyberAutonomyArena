@@ -59,7 +59,7 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> Path:
     falling back to the default all three MHBench configs use."""
     default = Path("~/.ssh/id_ed25519").expanduser()
     try:
-        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
+        rel = cfg.env_backend.mhbench_config or "config/config.yaml"
         data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
         backend = data.get("backend", "openstack")
         block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
