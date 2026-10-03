@@ -137,7 +137,9 @@ perry_cfg.experiment_name = experiment_name
 # is choosing the concrete orchestrator + its cloud handle, both of which live in
 # Defense-MHBench-compatible. Everything else here is backend-agnostic.
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
-openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
+# Skip the cloud handle in dynamic-topology mode (RemoteEnvOrchestrator holds no cloud cred — the god-key
+# removal): the defender forwards infra ops to the environment instead.
+openstack_conn = openstack.connect() if (cloud_backend != "gcp" and not config.get("env_action_socket")) else None
 management_ip = config["management_ip"]
 # The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel the
 # plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
@@ -208,7 +210,13 @@ print(
     flush=True,
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-if cloud_backend == "gcp":
+if config.get("env_action_socket"):
+    # Dynamic topology mode: no cloud cred — payload-named decoy VM-create goes to the environment (UDS),
+    # host actions to the box agent (see RemoteEnvOrchestrator).
+    from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+    orchestrator = RemoteEnvOrchestrator.from_config(
+        config, experiment_name=experiment_name, network=network, action_logger=action_logger)
+elif cloud_backend == "gcp":
     from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
     orchestrator = GCPOrchestrator(
         ansible_runner=ansible_runner,

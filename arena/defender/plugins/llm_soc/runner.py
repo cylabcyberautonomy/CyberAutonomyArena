@@ -90,7 +90,9 @@ perry_cfg.experiment_name = experiment_name
 # would have the environment hand the defender an orchestrator/backend handle, removing this read too.
 # Defaults to 'openstack' so that path is byte-for-byte unchanged.
 cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
-openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
+# Skip the cloud handle entirely in dynamic-topology mode (RemoteEnvOrchestrator holds no cloud cred —
+# this is the actual god-key removal): the defender forwards infra ops to the environment instead.
+openstack_conn = openstack.connect() if (cloud_backend != "gcp" and not config.get("env_action_socket")) else None
 management_ip = config["management_ip"]
 # The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel
 # the plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow"
@@ -165,7 +167,14 @@ telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
     es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-if cloud_backend == "gcp":
+if config.get("env_action_socket"):
+    # Dynamic topology mode: the defender holds NO cloud credential. It forwards infra actions to the
+    # arena environment over the UDS channel and host actions to the box agent (see RemoteEnvOrchestrator).
+    # openstack.connect() was already skipped above when env_action_socket is set.
+    from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+    orchestrator = RemoteEnvOrchestrator.from_config(
+        config, experiment_name=experiment_name, network=network, action_logger=action_logger)
+elif cloud_backend == "gcp":
     # GCPOrchestrator exists only on the Defense repo's gcp-backend branch; import it lazily
     # inside this branch so the OpenStack path never depends on it. It wires BlockIP via the
     # backend-agnostic ansible actuator (iptables over the bastion), needing no openstack_conn.

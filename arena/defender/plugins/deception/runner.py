@@ -86,7 +86,9 @@ perry_cfg.experiment_name = experiment_name
 # plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
 # No shared harness ES. The env relay already ships sensors to the box (victim -> relay -> box:9200), so
 # this runner does NO sysflow-repoint. Plain HTTP, security disabled (https raised WRONG_VERSION_NUMBER).
-openstack_conn = openstack.connect()
+# Skip the cloud handle in dynamic-topology mode (RemoteEnvOrchestrator holds no cloud cred — the god-key
+# removal): the defender forwards infra ops to the environment instead of calling nova directly.
+openstack_conn = None if config.get("env_action_socket") else openstack.connect()
 management_ip = config["management_ip"]
 es_url = config["es_url"]
 # request_timeout=30 (not the 10s default): this run's box ES is installed + started FRESH in
@@ -166,15 +168,22 @@ telemetry_analysis = analysis_cls(
     es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-orchestrator = OpenstackOrchestrator(
-    openstack_conn=openstack_conn,
-    ansible_runner=ansible_runner,
-    external_elasticsearch_server=es_url,
-    elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-    config=perry_cfg,
-    network=network,
-    action_logger=action_logger,
-)
+if config.get("env_action_socket"):
+    # Dynamic topology mode: no cloud cred — decoy VM-create goes to the environment (UDS), the decoy's
+    # sensor/vuln setup + honey-cred/fake-data host actions go to the box agent.
+    from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+    orchestrator = RemoteEnvOrchestrator.from_config(
+        config, experiment_name=experiment_name, network=network, action_logger=action_logger)
+else:
+    orchestrator = OpenstackOrchestrator(
+        openstack_conn=openstack_conn,
+        ansible_runner=ansible_runner,
+        external_elasticsearch_server=es_url,
+        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
+        config=perry_cfg,
+        network=network,
+        action_logger=action_logger,
+    )
 
 strategy = strategy_cls(
     arsenal=arsenal,
