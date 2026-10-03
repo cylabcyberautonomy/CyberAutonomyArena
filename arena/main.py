@@ -3,7 +3,6 @@ import heapq
 import json
 import logging
 import os
-import secrets
 import shutil
 import signal
 from contextlib import asynccontextmanager
@@ -1048,16 +1047,15 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
-                # Arm the dynamic topology-mutation window IFF this defender declared a VM budget. We mint
-                # a per-experiment token (only the defender config receives it, below), seed the remaining
-                # budget, and attach a persistent env lifecycle to record the request trace. The window
-                # stays CLOSED (_env_serving=False) until the attack phase starts (ACTIVATE, below) so no
-                # event is honoured during arming. A defender with no budget arms nothing here.
+                # Arm the dynamic topology-mutation window IFF this defender declared a VM budget: seed the
+                # remaining budget and attach a persistent env lifecycle to record the request trace. The
+                # window stays CLOSED (_env_serving=False) until the attack phase starts (ACTIVATE, below)
+                # so no event is honoured during arming. No token: the env channel is a UDS unreachable
+                # from in-env (see env_action_server.py). A defender with no budget arms nothing here.
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _env_action_token = None
-                if _budget_specs:
-                    _env_action_token = secrets.token_urlsafe(24)
-                    experiment._env_action_token = _env_action_token
+                _env_dynamic = bool(_budget_specs)
+                if _env_dynamic:
+                    experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)
                     experiment._env_serving = False
                     experiment._env_lifecycle = _env_lc(experiment)
@@ -1069,8 +1067,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                     bastion_ip,
                     defender_env_spec=_dfn_env_spec,
                     defender_access=_dfn_access,
-                    env_action_socket=(resolve_socket_path(cfg) if _env_action_token else None),
-                    env_action_token=_env_action_token,
+                    env_action_socket=(resolve_socket_path(cfg) if _env_dynamic else None),
                 )
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
@@ -1144,7 +1141,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     # Open the env-mutation serving window for the attack phase: a defender that armed a VM budget may now
     # send EnvActionRequest events (add/rebuild/remove host). Events were rejected (409, window closed)
     # throughout arming; they are rejected again once the attack ends (DEACTIVATE, in the finally below).
-    if getattr(experiment, "_env_action_token", None):
+    if getattr(experiment, "_env_dynamic", False):
         experiment._env_serving = True
         experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
         experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
@@ -1204,7 +1201,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     finally:
         # Close the env-mutation serving window first: the attack is over, so any late defender event is
         # rejected (409) before we stop the defender process.
-        if getattr(experiment, "_env_action_token", None) and getattr(experiment, "_env_serving", False):
+        if getattr(experiment, "_env_dynamic", False) and getattr(experiment, "_env_serving", False):
             experiment._env_serving = False
             experiment._env_lifecycle.send(EnvironmentCommand.DEACTIVATE)
             experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)

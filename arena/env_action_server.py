@@ -3,17 +3,18 @@ RemoteEnvOrchestrator (Defense repo) POSTs EnvActionRequest events to.
 
 SECURITY (why a Unix domain socket, not a TCP port) — see the env_requests.py header and docs/
 security-model.md. The adversary agent executes on an in-env VM (the foothold); this channel must be
-reachable by the defender runner (a subprocess co-located on the harness host) yet UNREACHABLE by any
-in-env VM. A UDS has no network port at all, so it is categorically unreachable from the victim/attacker
-subnets regardless of how the public API is bound (uvicorn defaults to loopback, but a manager launched
-with --host 0.0.0.0 would expose a TCP route — a UDS removes that failure mode entirely). Defense in
-depth, three independent layers, any one of which blocks the adversary:
+reachable by the defender controller (a subprocess co-located on the harness host) yet UNREACHABLE by
+any in-env VM. A UDS has no network port at all, so it is categorically unreachable from the
+victim/attacker subnets regardless of how the public API is bound (uvicorn defaults to loopback, but a
+manager launched with --host 0.0.0.0 would expose a TCP route — a UDS removes that failure mode
+entirely). The transport IS the boundary, so there is deliberately NO authentication token here: a
+token would be pure redundancy against a path nothing hostile can take. (Contrast the box-agent channel,
+a TCP service INSIDE the environment, which keeps its token because it is reachable from in-env.) This
+reasoning holds only while the channel stays a UDS; a move to TCP would require restoring a token.
 
-  1. transport     — UDS on the harness host; no VM can reach it.
-  2. authentication — a per-experiment bearer token, injected ONLY into the defender config (never the
-                      attacker's, which carries no management address at all).
-  3. authorization  — a bounded primitive vocabulary (add/rebuild/remove host) within the defender's
-                      pre-reserved VM budget, only while the serving window is open.
+The serving window + bounded primitive vocabulary remain — not as security layers but as correctness:
+topology mutation is valid only while the attack runs (ACTIVATE..DEACTIVATE) and only for the primitives
+within the defender's pre-reserved VM budget; each serviced event is recorded as experiment data.
 
 The handler (handle_env_action) is kept pure and transport-free so it is unit-testable without sockets;
 serve_env_actions wraps it in a tiny UDS-bound FastAPI/uvicorn server started from the arena lifespan.
@@ -60,11 +61,16 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
     before the body is returned over the wire). Pure: no socket/transport here, so it is unit-testable.
 
     The serving-window state is read off the LIVE Experiment object (registry.get) that the run loop
-    stamps: _env_action_token, _env_serving, _env_budget_remaining, _env_lifecycle."""
+    stamps: _env_serving, _env_budget_remaining, _env_lifecycle.
+
+    NO authentication token: this channel is a Unix domain socket on the harness host, unreachable from
+    any in-env VM (where the adversary runs), so the transport IS the boundary — a per-experiment token
+    would be pure redundancy. (The box-agent channel, a TCP service inside the environment, keeps its
+    token because it IS reachable from in-env.) This holds only while the channel stays a UDS; if it ever
+    becomes a TCP port, restore the token."""
     from .environment import EnvActionKind, EnvActionRequest, EnvActionResult, EnvRequestUnsupported
 
     name = payload.get("experiment_name")
-    token = payload.get("token")
     action = payload.get("action") or {}
 
     # --- existence ---------------------------------------------------------
@@ -72,12 +78,6 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
         exp = registry.get(name)
     except (KeyError, TypeError):
         return {"ok": False, "error": "unknown experiment", "status": 404}
-
-    # --- authentication (constant-time compare) ----------------------------
-    import hmac
-    expected = getattr(exp, "_env_action_token", None)
-    if not expected or not isinstance(token, str) or not hmac.compare_digest(token, expected):
-        return {"ok": False, "error": "unauthorized", "status": 403}
 
     # --- serving window ----------------------------------------------------
     if not getattr(exp, "_env_serving", False):

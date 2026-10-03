@@ -590,11 +590,10 @@ def test_environment_request_trace_and_primitive_defaults():
             pass
 
 
-def test_env_action_handler_auth_window_budget():
-    """The defender→env action handler enforces, in order: experiment existence (404), bearer token
-    (403 — an adversary without the defender-only token cannot act even if it reached the socket), an
-    OPEN serving window (409), and the pre-reserved VM budget ceiling; it records every serviced event
-    and degrades an unsupported primitive to ok=False instead of crashing."""
+def test_env_action_handler_window_budget():
+    """The defender→env action handler enforces, in order: experiment existence (404), an OPEN serving
+    window (409), and the pre-reserved VM budget ceiling; it records every serviced event and degrades an
+    unsupported primitive to ok=False instead of crashing. No token check — the UDS is the boundary."""
     import asyncio
     from types import SimpleNamespace
     from arena.env_action_server import handle_env_action
@@ -615,7 +614,7 @@ def test_env_action_handler_auth_window_budget():
 
     lc = EnvironmentLifecycle()
     exp = SimpleNamespace(experiment_name="ci_dyn", environment=_DynEnv(environment_spec="x"),
-                          deployed_environment=None, _env_action_token="secret-token",
+                          deployed_environment=None,
                           _env_serving=True, _env_budget_remaining=1, _env_lifecycle=lc)
 
     class _Reg:
@@ -626,10 +625,9 @@ def test_env_action_handler_auth_window_budget():
 
     reg = _Reg()
     run = lambda p: asyncio.run(handle_env_action(p, registry=reg, cfg=None, lock=None))  # noqa: E731
-    add = {"experiment_name": "ci_dyn", "token": "secret-token", "action": {"kind": "AddHost", "name": "decoy0"}}
+    add = {"experiment_name": "ci_dyn", "action": {"kind": "AddHost", "name": "decoy0"}}
 
-    assert run({"experiment_name": "nope", "token": "x", "action": {"kind": "AddHost"}})["status"] == 404
-    assert run({**add, "token": "WRONG"})["status"] == 403          # adversary without the token is blocked
+    assert run({"experiment_name": "nope", "action": {"kind": "AddHost"}})["status"] == 404
     exp._env_serving = False
     assert run(add)["status"] == 409                                 # closed window rejects everything
     exp._env_serving = True
