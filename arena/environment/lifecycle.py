@@ -117,9 +117,9 @@ class EnvironmentLifecycle:
             self._on_emit(signal, error)
 
 
-def signal_persister(experiment):
+def signal_recorder(experiment):
     """on_emit callback that records each environment signal onto the experiment (environment_status),
-    mirroring attacker/lifecycle.py and defender/lifecycle.py's signal_persister. Sync (no I/O) — the
+    mirroring attacker/lifecycle.py and defender/lifecycle.py's signal_recorder. Sync (no I/O) — the
     arena persists to disk at phase boundaries. Simpler than the other two: the environment has no
     per-phase timestamp fields, only the status."""
     def _on_emit(signal: EnvironmentSignal, error) -> None:

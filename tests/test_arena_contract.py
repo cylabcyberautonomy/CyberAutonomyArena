@@ -416,12 +416,12 @@ def test_defender_lifecycle_signals_and_persist():
     records each onto the Experiment (defender_status + timestamps) — mirroring the attacker."""
     import asyncio
     from arena.defender.lifecycle import (
-        DefenderLifecycle, DefenderSignal, DefenderLifecycleError, signal_persister,
+        DefenderLifecycle, DefenderSignal, DefenderLifecycleError, signal_recorder,
     )
     from arena.experiment.models import Experiment, ExperimentStatus
 
     exp = Experiment("ci_lc", ExperimentStatus.QUEUED, ENV, defender=None)
-    lc = DefenderLifecycle(on_emit=signal_persister(exp))
+    lc = DefenderLifecycle(on_emit=signal_recorder(exp))
 
     async def drive():
         for sig in (DefenderSignal.SETUP_STARTED, DefenderSignal.READY,
@@ -439,7 +439,7 @@ def test_defender_lifecycle_signals_and_persist():
 
     # FAILED short-circuits a pending wait for a later signal
     exp2 = Experiment("ci_lc2", ExperimentStatus.QUEUED, ENV, defender=None)
-    lc2 = DefenderLifecycle(on_emit=signal_persister(exp2))
+    lc2 = DefenderLifecycle(on_emit=signal_recorder(exp2))
 
     async def fail():
         await lc2.emit(DefenderSignal.SETUP_STARTED)

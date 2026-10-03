@@ -16,7 +16,7 @@ from typing import Literal
 import pytest
 
 from arena.defender.lifecycle import (
-    DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_persister,
+    DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_recorder,
 )
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
 from arena.defender.defender import run_defender
@@ -105,7 +105,7 @@ def test_full_defender_handshake_with_readiness_gate(tmp_path):
     cfg = _cfg(tmp_path)
     exp = Experiment("def_handshake", ExperimentStatus.QUEUED,
                      {"environment_plugin": "mhbench", "environment_spec": "equifax_small"}, defender=None)
-    lc = DefenderLifecycle(on_emit=signal_persister(exp))
+    lc = DefenderLifecycle(on_emit=signal_recorder(exp))
     process = SimpleNamespace(returncode=None)
 
     async def drive():
@@ -137,7 +137,7 @@ def test_failed_short_circuits_a_pending_wait(tmp_path):
     defender must not leave the arena blocked waiting for READY forever."""
     exp = Experiment("def_failed", ExperimentStatus.QUEUED,
                      {"environment_plugin": "mhbench", "environment_spec": "equifax_small"}, defender=None)
-    lc = DefenderLifecycle(on_emit=signal_persister(exp))
+    lc = DefenderLifecycle(on_emit=signal_recorder(exp))
 
     async def drive():
         await lc.emit(DefenderSignal.SETUP_STARTED)

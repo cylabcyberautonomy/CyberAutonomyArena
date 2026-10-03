@@ -14,10 +14,10 @@ from fastapi import FastAPI, HTTPException
 
 from .attacker import run_attacker
 from .attacker.lifecycle import (
-    AttackerLifecycle, AttackerSignal, AttackerCommand, signal_persister as _attacker_signal_persister,
+    AttackerLifecycle, AttackerSignal, AttackerCommand, signal_recorder as _attacker_signal_recorder,
 )
 from .defender.lifecycle import (
-    DefenderLifecycle, DefenderSignal, DefenderCommand, signal_persister as _defender_signal_persister,
+    DefenderLifecycle, DefenderSignal, DefenderCommand, signal_recorder as _defender_signal_recorder,
 )
 
 
@@ -37,7 +37,7 @@ async def _stop_defender_process(experiment, process) -> None:
         await lc.emit(DefenderSignal.STOPPED)
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
-from .environment.lifecycle import signal_persister as _env_signal_persister
+from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
@@ -50,7 +50,7 @@ def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecy
     system's signal (environment_status), on_command records the arena's command (environment_last_command)
     — so the arena->env command and the env->arena signal (Provision→Deploying→Deployed, etc.) are both
     visible per phase, distinct from the whole-experiment status. If `command` is given it is sent now."""
-    persist = _env_signal_persister(experiment)  # stamps environment_status (mirrors attacker/defender)
+    persist = _env_signal_recorder(experiment)  # stamps environment_status (mirrors attacker/defender)
 
     def _on_emit(signal: EnvironmentSignal, error) -> None:
         persist(signal, error)
@@ -983,7 +983,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     # setup_started -> ready -> running -> (stopping ->) stopped, recording each signal on the
     # experiment. Attach the channel now so the attacker's run_setup/run_stop templates can emit.
     attacker_lc = AttackerLifecycle(
-        on_emit=_attacker_signal_persister(experiment),
+        on_emit=_attacker_signal_recorder(experiment),
         on_command=_attacker_command_recorder(experiment),
     )
     experiment._attacker_lifecycle = attacker_lc
@@ -1036,7 +1036,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
                 # arena records each phase so an observer sees where the defender is and a hang shows
                 # as a stalled status, not one opaque "failed to arm".
-                defender_lc = DefenderLifecycle(on_emit=_defender_signal_persister(experiment))
+                defender_lc = DefenderLifecycle(on_emit=_defender_signal_recorder(experiment))
                 experiment._defender_lifecycle = defender_lc
                 await defender_lc.send(DefenderCommand.START_SETUP)
                 await defender_lc.emit(DefenderSignal.SETUP_STARTED)

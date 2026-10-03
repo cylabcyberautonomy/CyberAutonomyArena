@@ -109,9 +109,9 @@ class AttackerLifecycle:
                     raise TimeoutError(f"timed out waiting for attacker signal {signal.value}")
 
 
-def signal_persister(experiment):
+def signal_recorder(experiment):
     """on_emit callback that records each attacker signal onto the experiment (status + the matching
-    timestamp), mirroring defender/lifecycle.py's signal_persister. Sync (no I/O) — the arena calls
+    timestamp), mirroring defender/lifecycle.py's signal_recorder. Sync (no I/O) — the arena calls
     registry.update() at phase boundaries to persist to disk."""
     _ts_field = {
         AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
