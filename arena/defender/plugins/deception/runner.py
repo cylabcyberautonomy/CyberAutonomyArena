@@ -45,10 +45,13 @@ from defender.strategy import (
     StaticLayered,
     ReactiveLayered,
     ReactiveStandalone,
-    HoneyShell,
     NaiveDecoyCredential,
     NaiveDecoyHost,
 )
+try:  # HoneyShell exists only on newer Defense branches; optional so this runner loads without it.
+    from defender.strategy import HoneyShell
+except ImportError:
+    HoneyShell = None
 
 STRATEGY_MAP = {
     "DoNothing": DoNothing,
@@ -56,10 +59,11 @@ STRATEGY_MAP = {
     "StaticLayered": StaticLayered,
     "ReactiveLayered": ReactiveLayered,
     "ReactiveStandalone": ReactiveStandalone,
-    "HoneyShell": HoneyShell,
     "NaiveDecoyCredential": NaiveDecoyCredential,
     "NaiveDecoyHost": NaiveDecoyHost,
 }
+if HoneyShell is not None:
+    STRATEGY_MAP["HoneyShell"] = HoneyShell
 
 experiment_name = config["experiment_name"]
 log_dir = Path(config["log_dir"])
