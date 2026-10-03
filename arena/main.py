@@ -1045,21 +1045,22 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
-                # Arm the dynamic topology-mutation window IFF this defender declared a VM budget: seed the
-                # remaining budget and attach a persistent env lifecycle to record the request trace. The
-                # window stays CLOSED (_env_serving=False) until the attack phase starts (ACTIVATE, below)
-                # so no event is honoured during arming. No token: the env channel is a UDS unreachable
-                # from in-env (see env_action_server.py). A defender with no budget arms nothing here.
+                # Arm the dynamic topology-mutation window. Box-only execution: a defender that
+                # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
+                # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
+                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
+                # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
+                # not only during the attack. It stays open through the attack and closes at DEACTIVATE
+                # (finally). No token: the env channel is a UDS unreachable from in-env.
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                # Box-only execution: a defender that executes_from_box ALWAYS gets the box agent + env
-                # channel — there is no arena-execution path. The VM budget is separate: it only sets how
-                # many hosts add_host may create (0 is fine for a defender that only blocks/restores).
                 _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
                 if _env_dynamic:
                     experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)
-                    experiment._env_serving = False
                     experiment._env_lifecycle = _env_lc(experiment)
+                    experiment._env_serving = True
+                    experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
+                    experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,
@@ -1139,13 +1140,8 @@ async def _run_experiment(experiment: Experiment) -> None:
         except Exception:
             exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
-    # Open the env-mutation serving window for the attack phase: a defender that armed a VM budget may now
-    # send EnvActionRequest events (add/rebuild/remove host). Events were rejected (409, window closed)
-    # throughout arming; they are rejected again once the attack ends (DEACTIVATE, in the finally below).
-    if getattr(experiment, "_env_dynamic", False):
-        experiment._env_serving = True
-        experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
-        experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
+    # The env-mutation serving window was already opened before the defender's prepare() (so static decoy
+    # deploy during arming is honoured); it stays open through the attack and closes at DEACTIVATE (finally).
 
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
