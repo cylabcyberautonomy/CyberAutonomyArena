@@ -235,6 +235,45 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         except Exception:  # noqa: BLE001 — a decoy sweep failure must not block reclaiming the env's VMs
             pass
 
+    # -- dynamic topology mutation (defender-driven, during the run) ------------------------------
+    def supports_dynamic_topology(self) -> bool:
+        """MHBench honours EnvActionRequests via per-host CLI subcommands (below)."""
+        return True
+
+    async def add_host(self, experiment, deployed, request, cfg):
+        """Provision ONE host via MHBench (cloud op stays in MHBench — no god-key leaves the env) and
+        return its name/ip + a DEFENDER-SCOPED, box-relative SetupAccess so the box agent can configure
+        it in-env. role maps to the backend image inside MHBench (e.g. apache_vuln -> webserver image)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync, new_host_setup_access
+        res = await asyncio.to_thread(
+            _host_op_sync, "add-host", experiment.experiment_name, self.environment_spec, cfg,
+            name=request.name, role=(request.role or "decoy"), subnet=request.subnet)
+        ip, name = res.get("ip"), (res.get("name") or request.name)
+        return EnvActionResult(
+            kind=EnvActionKind.ADD_HOST, ok=bool(ip), name=name, ip=ip,
+            access=new_host_setup_access(name, ip, cfg) if ip else None,
+            error=None if ip else "MHBench add-host returned no ip")
+
+    async def rebuild_host(self, experiment, deployed, request, cfg):
+        """Rebuild one existing host from its base image (restore a compromised VM)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync
+        await asyncio.to_thread(_host_op_sync, "rebuild-host", experiment.experiment_name,
+                                self.environment_spec, cfg, target=request.target)
+        return EnvActionResult(kind=EnvActionKind.REBUILD_HOST, ok=True, name=request.target)
+
+    async def remove_host(self, experiment, deployed, request, cfg):
+        """Delete one existing host (returns its budget slot to the defender's pool)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync
+        await asyncio.to_thread(_host_op_sync, "remove-host", experiment.experiment_name,
+                                self.environment_spec, cfg, target=request.target)
+        return EnvActionResult(kind=EnvActionKind.REMOVE_HOST, ok=True, name=request.target)
+
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

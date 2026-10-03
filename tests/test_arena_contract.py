@@ -652,6 +652,38 @@ def test_env_action_handler_auth_window_budget():
     assert run(add)["ok"] is False
 
 
+def test_mhbench_dynamic_topology_primitives(monkeypatch):
+    """The MHBench env plugin fulfils EnvActionRequests by shelling to per-host CLI subcommands:
+    supports_dynamic_topology() is True; add_host returns name/ip + a box-relative scoped SetupAccess;
+    rebuild/remove pass the target through. Subprocess is stubbed (no cloud)."""
+    import asyncio
+    from arena.environment import EnvActionRequest, EnvActionKind, build_environment
+    import arena.environment.plugins.mhbench.deployer as dep
+
+    env = build_environment(ENV)
+    assert env.supports_dynamic_topology() is True
+
+    calls = {}
+
+    def fake_host_op(op, exp, spec, cfg, **kw):
+        calls[op] = kw
+        return {"name": kw.get("name") or "decoy0", "ip": "192.168.0.42"} if op == "add-host" else {"ok": True}
+
+    monkeypatch.setattr(dep, "_host_op_sync", fake_host_op)
+    monkeypatch.setattr(dep, "_mhbench_ssh_key", lambda cfg: "/scoped/defender_key")
+
+    exp = type("E", (), {"experiment_name": "ci_dyn"})()
+    add = asyncio.run(env.add_host(exp, None, EnvActionRequest(kind=EnvActionKind.ADD_HOST, name="decoy0", role="apache_vuln", subnet="victim_net"), None))
+    assert add.ok and add.ip == "192.168.0.42" and add.name == "decoy0"
+    assert add.access is not None and add.access.host == "192.168.0.42" and add.access.ssh_common_args == ""  # box-relative
+    assert calls["add-host"] == {"name": "decoy0", "role": "apache_vuln", "subnet": "victim_net"}
+
+    reb = asyncio.run(env.rebuild_host(exp, None, EnvActionRequest(kind=EnvActionKind.REBUILD_HOST, target="192.168.0.11"), None))
+    assert reb.ok and reb.name == "192.168.0.11" and calls["rebuild-host"] == {"target": "192.168.0.11"}
+    rem = asyncio.run(env.remove_host(exp, None, EnvActionRequest(kind=EnvActionKind.REMOVE_HOST, target="192.168.0.12"), None))
+    assert rem.ok and calls["remove-host"] == {"target": "192.168.0.12"}
+
+
 def test_defender_vm_budget_optional_default():
     """defender_vm_budget() is opt-in: the base default is [] (no extra VMs), so a defender that never
     changes topology needs no change and reserves topology+0 at admission."""

@@ -483,3 +483,48 @@ async def request_ingress_env(experiment: Experiment, bastion_ip: Optional[str],
 # NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its
 # own foothold prep (attacker plugin's prepare_foothold, via SetupAccess), so the environment never
 # runs an attacker play. (User-adjudicated: the attacker owns its own foothold prep.)
+
+
+# --- dynamic topology mutation (defender-driven, during the run) --------------------------------------
+# One MHBench CLI shell-out per primitive, mirroring _provision_sync. The arena calls these (via the
+# plugin's add_host/rebuild_host/remove_host) when a running defender sends an EnvActionRequest. MHBench
+# owns the actual cloud op (single-host create/rebuild/delete on its selected backend), so the god-key
+# never leaves the environment and GCP vs OpenStack is MHBench's concern.
+def _host_op_sync(op: str, experiment_name: str, environment_spec: str, cfg: ExperimentManagerConfig,
+                  *, name: Optional[str] = None, role: Optional[str] = None,
+                  subnet: Optional[str] = None, target: Optional[str] = None) -> dict:
+    """Run one MHBench per-host CLI subcommand (add-host / rebuild-host / remove-host) and return its
+    JSON result ({name, ip} for add-host; {ok: true} otherwise)."""
+    mhbench_dir = cfg.mhbench_dir
+    topology_path = resolve_topology_path(environment_spec, cfg)
+    python = mhbench_dir / ".venv" / "bin" / "python"
+    cli = mhbench_dir / "cli.py"
+    out_path = (output_root(experiment_name, cfg) / experiment_name / "experiment" / f"{op}_result.json").resolve()
+    cmd = [str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
+           op, str(topology_path), "--project-name", experiment_name, "--output-file", str(out_path)]
+    if name:
+        cmd += ["--name", name]
+    if role:
+        cmd += ["--role", role]
+    if subnet:
+        cmd += ["--subnet", subnet]
+    if target:
+        cmd += ["--target", target]
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
+    mhbench_log.parent.mkdir(parents=True, exist_ok=True)
+    log(experiment_name, f"MHBench {op} via CLI (log: {mhbench_log})...")
+    with open(mhbench_log, "a") as lf:
+        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        raise _mhbench_error(op, result.returncode, mhbench_log)
+    return json.loads(out_path.read_text()) if out_path.exists() else {}
+
+
+def new_host_setup_access(name: str, ip: str, cfg: ExperimentManagerConfig):
+    """SetupAccess for a freshly added host, as consumed BY THE DEFENDER BOX (in-env): scoped key +
+    EMPTY routing — the box reaches victims directly on its own subnet, with no bastion hop (unlike the
+    harness-side victim access, which proxies through the bastion). The key path is aligned on the box by
+    the defender deploy step."""
+    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    return SetupAccess(name=name, host=str(ip), user="root",
+                       ssh_key=_mhbench_ssh_key(cfg), ssh_common_args="")
