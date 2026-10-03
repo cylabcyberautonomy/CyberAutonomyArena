@@ -1053,7 +1053,10 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # so no event is honoured during arming. No token: the env channel is a UDS unreachable
                 # from in-env (see env_action_server.py). A defender with no budget arms nothing here.
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _env_dynamic = bool(_budget_specs)
+                # Box-only execution: a defender that executes_from_box ALWAYS gets the box agent + env
+                # channel — there is no arena-execution path. The VM budget is separate: it only sets how
+                # many hosts add_host may create (0 is fine for a defender that only blocks/restores).
+                _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
                 if _env_dynamic:
                     experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)

@@ -61,7 +61,19 @@ async def run_defender(
     # instead of computing its own SSH key / parsing the topology.
     if defender_env_spec is not None:
         built["defender_env_spec"] = defender_env_spec.model_dump()
-    built["defender_setup_access"] = [a.model_dump() for a in (defender_access or [])]
+    # Box-only execution: scope the controller's setup access to the DEFENDER BOX only. The controller is
+    # NOT handed victim-reaching entries — it never acts on victims directly; it asks the box agent (which
+    # alone holds victim access, shipped there by prepare_box_agent) and the env. This makes "executes from
+    # the box" structural: the controller has no victim target+key to act from the arena with. (Residual:
+    # the box key is today the same scoped key that also opens victims — a box-key != victim-key split is a
+    # further hardening.) prepare_box_es/prepare_box_agent still find the box entry they need.
+    _access = list(defender_access or [])
+    if getattr(type(defender), "executes_from_box", False) and defender_env_spec is not None:
+        _box = getattr(defender_env_spec, "box", None)
+        _box_ip = getattr(_box, "ip", None) if _box else None
+        if _box_ip:
+            _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
+    built["defender_setup_access"] = [a.model_dump() for a in _access]
     # The Defense/Perry defenders (llm_soc/deception/prompt_injection) each name their own code path now;
     # inject the running plugin's dir under the stable runner key "deception_dir". A self-contained defender
     # (canary) or one with its own path (velociraptor) declares no code_dir_field, so it gets nothing here.

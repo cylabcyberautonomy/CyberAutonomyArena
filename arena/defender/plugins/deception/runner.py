@@ -30,10 +30,8 @@ if _plugins_dir not in sys.path:
 
 from topology import build_network, host_users, telemetry_host_ips
 
-import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
-from ansible.AnsibleRunner import AnsibleRunner
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
@@ -41,7 +39,6 @@ from defender.arsenal.CountArsenal import CountArsenal
 from defender.telemetry.SimpleTelemetryAnalysis import SimpleTelemetryAnalysis
 from defender.telemetry.ReactiveCredentials import ReactiveCredentials
 from defender.telemetry.telemetry_service import TelemetryService
-from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import (
     DoNothing,
     StaticStandalone,
@@ -86,9 +83,8 @@ perry_cfg.experiment_name = experiment_name
 # plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
 # No shared harness ES. The env relay already ships sensors to the box (victim -> relay -> box:9200), so
 # this runner does NO sysflow-repoint. Plain HTTP, security disabled (https raised WRONG_VERSION_NUMBER).
-# Skip the cloud handle in dynamic-topology mode (RemoteEnvOrchestrator holds no cloud cred — the god-key
-# removal): the defender forwards infra ops to the environment instead of calling nova directly.
-openstack_conn = None if config.get("env_action_socket") else openstack.connect()
+# No cloud handle: the defender holds NO cloud credential (the environment touches the cloud on its
+# behalf). Backend choice is entirely the environment's concern now.
 management_ip = config["management_ip"]
 es_url = config["es_url"]
 # request_timeout=30 (not the 10s default): this run's box ES is installed + started FRESH in
@@ -99,26 +95,9 @@ es_conn = Elasticsearch(es_url, request_timeout=30)
 falco_index = config.get("falco_index", "falco")
 sysflow_index = config.get("sysflow_index", "sysflow")
 
-# bastion_ip is THIS experiment's own bastion floating IP (from MHBench
-# provisioning) - not the same as management_ip above (the harness's own fixed
-# address). AnsibleRunner needs the bastion specifically: its inventory's
-# ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
-# experiment's internal 192.168.x.x hosts at all.
-# SCOPED defender key from the harness-injected SetupAccess (defender_setup_access): fail closed,
-# never fall back to perry_cfg's management (god) key on disk. AnsibleRunner uses this key for both
-# its bastion `-W` jump and the victim hop; the forward-only jump creds make that safe.
-def _scoped_ssh_key(cfg_dict):
-    for a in cfg_dict.get("defender_setup_access", []):
-        if a.get("ssh_key"):
-            return os.path.expanduser(a["ssh_key"])
-    raise RuntimeError("no scoped ssh_key in defender_setup_access; refusing to use the management key")
-
-ansible_runner = AnsibleRunner(
-    ssh_key_path=_scoped_ssh_key(config),
-    management_ip=config["bastion_ip"],
-    ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
-    log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
-)
+# No harness-side AnsibleRunner / scoped victim key here any more: the defender does NOT reach victims
+# from the arena. The box agent (deployed in prepare_box_agent) holds the scoped key and runs ansible
+# from inside the environment; the controller only talks to the box agent + the env UDS channel.
 
 
 
@@ -168,22 +147,12 @@ telemetry_analysis = analysis_cls(
     es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-if config.get("env_action_socket"):
-    # Dynamic topology mode: no cloud cred — decoy VM-create goes to the environment (UDS), the decoy's
-    # sensor/vuln setup + honey-cred/fake-data host actions go to the box agent.
-    from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
-    orchestrator = RemoteEnvOrchestrator.from_config(
-        config, experiment_name=experiment_name, network=network, action_logger=action_logger)
-else:
-    orchestrator = OpenstackOrchestrator(
-        openstack_conn=openstack_conn,
-        ansible_runner=ansible_runner,
-        external_elasticsearch_server=es_url,
-        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-        config=perry_cfg,
-        network=network,
-        action_logger=action_logger,
-    )
+# BOX-ONLY EXECUTION — the single, enforced path. No cloud credential, no arena victim access: decoy
+# VM-create goes to the environment (UDS), the decoy's sensor setup + honey-cred/fake-data host actions go
+# to the box agent, which runs them from INSIDE the environment. No legacy arena-execution orchestrator.
+from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+orchestrator = RemoteEnvOrchestrator.from_config(
+    config, experiment_name=experiment_name, network=network, action_logger=action_logger)
 
 strategy = strategy_cls(
     arsenal=arsenal,

@@ -35,10 +35,8 @@ _deception_dir = config.get("deception_dir", "")
 if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
-import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
-from ansible.AnsibleRunner import AnsibleRunner
 from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
@@ -52,7 +50,6 @@ from defender.arsenal.CountArsenal import CountArsenal
 # rather than restoring a whole host, so a false positive is cheaper).
 from defender.telemetry import FalcoBasicAnalysis, FalcoAgressiveAnalysis
 from defender.telemetry.telemetry_service import TelemetryService
-from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import FalcoLLM, FalcoLLMC2Block
 
 STRATEGY_MAP = {
@@ -83,16 +80,9 @@ perry_cfg = Config(**perry_config_data)
 # (database0-23 among them) and restored its own host0 off the back of that.
 perry_cfg.experiment_name = experiment_name
 
-# PERRY SEAM (cross-repo, not harness-side): the concrete orchestrator (OpenstackOrchestrator vs
-# GCPOrchestrator) and its cloud handle live in Defense-MHBench-compatible, so selecting between them
-# is the one place the runner still reads the backend. Everything else the defender does is now
-# backend-agnostic (it reads its own box ES; the env owns sensor shipping). A future cross-repo change
-# would have the environment hand the defender an orchestrator/backend handle, removing this read too.
-# Defaults to 'openstack' so that path is byte-for-byte unchanged.
-cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
-# Skip the cloud handle entirely in dynamic-topology mode (RemoteEnvOrchestrator holds no cloud cred —
-# this is the actual god-key removal): the defender forwards infra ops to the environment instead.
-openstack_conn = openstack.connect() if (cloud_backend != "gcp" and not config.get("env_action_socket")) else None
+# No cloud handle: the defender holds NO cloud credential (it never touches the cloud API — the
+# environment does, on its behalf, via the env action channel). The backend (OpenStack/GCP) is entirely
+# the environment's concern now; the defender is backend-agnostic.
 management_ip = config["management_ip"]
 # The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel
 # the plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow"
@@ -109,28 +99,9 @@ es_conn = Elasticsearch(es_url, request_timeout=30)
 falco_index = config.get("falco_index", "falco")
 sysflow_index = config.get("sysflow_index", "sysflow")
 
-# bastion_ip is THIS experiment's own bastion floating IP (from MHBench
-# provisioning) - not the same as management_ip above (the harness's own fixed
-# address). AnsibleRunner needs the bastion specifically: its inventory's
-# ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
-# experiment's internal 192.168.x.x hosts at all.
-# SCOPED defender key from the harness-injected SetupAccess (defender_setup_access): the per-system
-# key that works forward-only through the bastion and on the box+victims. Fail closed — never fall
-# back to perry_cfg's management (god) key on disk, which would defeat the per-system key scoping.
-# AnsibleRunner uses this key for BOTH its bastion `-W` jump and the victim hop, so the scoped key
-# covers the whole chain (the forward-only jump creds make the bastion `-W` safe).
-def _scoped_ssh_key(cfg_dict):
-    for a in cfg_dict.get("defender_setup_access", []):
-        if a.get("ssh_key"):
-            return os.path.expanduser(a["ssh_key"])
-    raise RuntimeError("no scoped ssh_key in defender_setup_access; refusing to use the management key")
-
-ansible_runner = AnsibleRunner(
-    ssh_key_path=_scoped_ssh_key(config),
-    management_ip=config["bastion_ip"],
-    ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
-    log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
-)
+# No harness-side AnsibleRunner / scoped victim key here any more: the defender does NOT reach victims
+# from the arena. The box agent (deployed in prepare_box_agent) holds the scoped key and runs ansible
+# from inside the environment; the controller only talks to the box agent + the env UDS channel.
 
 
 # Build Perry's Network from the ENVIRONMENT-provided DefenderEnvSpec (agent-facing host inventory:
@@ -167,36 +138,13 @@ telemetry_analysis = TELEMETRY_MAP[config["strategy"]](
     es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-if config.get("env_action_socket"):
-    # Dynamic topology mode: the defender holds NO cloud credential. It forwards infra actions to the
-    # arena environment over the UDS channel and host actions to the box agent (see RemoteEnvOrchestrator).
-    # openstack.connect() was already skipped above when env_action_socket is set.
-    from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
-    orchestrator = RemoteEnvOrchestrator.from_config(
-        config, experiment_name=experiment_name, network=network, action_logger=action_logger)
-elif cloud_backend == "gcp":
-    # GCPOrchestrator exists only on the Defense repo's gcp-backend branch; import it lazily
-    # inside this branch so the OpenStack path never depends on it. It wires BlockIP via the
-    # backend-agnostic ansible actuator (iptables over the bastion), needing no openstack_conn.
-    from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
-    orchestrator = GCPOrchestrator(
-        ansible_runner=ansible_runner,
-        external_elasticsearch_server=es_url,
-        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-        config=perry_cfg,
-        network=network,
-        action_logger=action_logger,
-    )
-else:
-    orchestrator = OpenstackOrchestrator(
-        openstack_conn=openstack_conn,
-        ansible_runner=ansible_runner,
-        external_elasticsearch_server=es_url,
-        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-        config=perry_cfg,
-        network=network,
-        action_logger=action_logger,
-    )
+# BOX-ONLY EXECUTION — the single, enforced execution path. The defender holds NO cloud credential and
+# does NOT reach victims from the arena: it forwards infra actions to the arena environment (UDS) and host
+# actions to the box agent, which runs them from INSIDE the environment. There is deliberately no legacy
+# arena-execution orchestrator (OpenstackOrchestrator/GCPOrchestrator) any more — box execution is the only way.
+from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+orchestrator = RemoteEnvOrchestrator.from_config(
+    config, experiment_name=experiment_name, network=network, action_logger=action_logger)
 
 # No harness self-protection wrapper: a defender's actions have real consequences. If a strategy blocks
 # an IP it shouldn't (e.g. its own bastion/mgmt), that is the defender's bug to avoid, not the harness's

@@ -682,6 +682,30 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
     assert rem.ok and calls["remove-host"] == {"target": "192.168.0.12"}
 
 
+def test_defender_box_only_execution_enforced():
+    """ENFORCEMENT (box execution is the ONLY path): the box-executing defenders have NO arena-execution
+    code — a runner must not call openstack.connect(), construct OpenstackOrchestrator/GCPOrchestrator, or
+    build an AnsibleRunner to reach victims from the arena. And each declares executes_from_box so the
+    arena always deploys the box agent + arms the env channel. This turns "runs from the box" from a
+    convention into an invariant: re-introducing an arena-execution path fails this test."""
+    import pathlib
+    from arena.defender.plugins.base import DefenderPlugin
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "arena" / "defender" / "plugins"
+    forbidden = ("openstack.connect(", "OpenstackOrchestrator(", "GCPOrchestrator(", "AnsibleRunner(",
+                 "import OpenstackOrchestrator", "import GCPOrchestrator", "import openstack")
+    for plug in ("llm_soc", "deception", "prompt_injection"):
+        src = (root / plug / "runner.py").read_text()
+        for bad in forbidden:
+            assert bad not in src, f"{plug}/runner.py has a re-introduced arena-execution path: {bad!r}"
+
+    for ct in ("llm_soc", "deception", "prompt_injection"):
+        cls = DefenderPlugin._registry[ct]
+        assert getattr(cls, "executes_from_box", False) is True, f"{ct} must set executes_from_box=True"
+    # base default off — checks-only / self-contained defenders don't box-execute via this path
+    assert DefenderPlugin.executes_from_box is False
+
+
 def test_defender_vm_budget_optional_default():
     """defender_vm_budget() is opt-in: the base default is [] (no extra VMs), so a defender that never
     changes topology needs no change and reserves topology+0 at admission."""

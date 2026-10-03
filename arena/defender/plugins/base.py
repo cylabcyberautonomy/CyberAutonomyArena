@@ -46,6 +46,12 @@ class DefenderPlugin(BaseModel):
     code_dir_field: ClassVar[Optional[str]] = None
     code_python_field: ClassVar[Optional[str]] = None
 
+    # Whether this defender executes its actions FROM THE DEFENDER BOX (in-env) via the box agent +
+    # the env action channel, rather than from the arena host. When True the arena always deploys the box
+    # agent and arms the env channel (box execution is the ONLY path — there is no arena-execution
+    # orchestrator any more). Checks-only/self-contained defenders (canary, velociraptor) leave it False.
+    executes_from_box: ClassVar[bool] = False
+
     def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
         return cfg.plugin_dir(self.code_dir_field)
 
