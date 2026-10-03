@@ -1,32 +1,26 @@
 #!/usr/bin/env bash
 # Box-side bootstrap for the defender box agent (the defender's in-environment effector).
 #
-# Runs ON the defender box (Ubuntu 20.04 / py3.8, with internet egress — unlike the victims). The agent is
-# SELF-CONTAINED: it imports no Perry Python (which needs py3.10+), only ansible_runner + the shipped
-# `ansible/` YAML tree, so it runs fine on the box's py3.8 with ansible-core<2.14. prepare_box_agent
-# (harness side) has already placed /root/box_agent_agent.py, /root/ansible/, /root/scoped_key and
-# /root/box_agent_config.json. Idempotent: skips the venv build if present, always (re)starts the agent.
+# The defender box is Ubuntu 20.04 / py3.8 with BROKEN apt (the cloud mirror has no Release file) and NO
+# venv module — but WORKING pip + PyPI egress. So skip venv/apt entirely: pip-install ansible into the
+# user site and run the agent with the system python3. The agent is SELF-CONTAINED (imports no Perry
+# Python, only ansible_runner + the shipped ansible/ YAMLs), so py3.8 is fine with ansible-core<2.14
+# (2.14+ needs a py3.9 control node). prepare_box_agent has placed /root/box_agent_agent.py, /root/ansible/,
+# /root/scoped_key and /root/box_agent_config.json. Idempotent; always (re)starts the agent.
 set -euo pipefail
 
-VENV=/root/box_agent_venv
+export PATH="$HOME/.local/bin:$PATH"
 
-if [ ! -x "$VENV/bin/python" ]; then
-    # Bare ubuntu_base (focal) lacks ensurepip/venv; the box has egress, so install from the mirror.
-    if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq || true
-        apt-get install -y -qq python3-venv python3-pip || true
-    fi
-    python3 -m venv "$VENV"
-    "$VENV/bin/pip" install --quiet --upgrade pip
-    # ansible-core 2.14+ requires py3.9 as the control node; the box is py3.8, so pin <2.14 (it still
-    # manages modern hosts). No Perry deps — the agent runs playbook YAMLs directly.
-    "$VENV/bin/pip" install --quiet "ansible-core<2.14" "ansible-runner<2.4"
+if ! python3 -c "import ansible_runner" >/dev/null 2>&1; then
+    python3 -m pip install --user --quiet --upgrade pip 2>/dev/null || true
+    python3 -m pip install --user --quiet "ansible-core<2.14" "ansible-runner<2.4"
 fi
 
 pkill -f "box_agent_agent.py" 2>/dev/null || true
 sleep 1
-PYTHONPATH="" nohup "$VENV/bin/python" /root/box_agent_agent.py \
+# ansible_runner shells to the ansible-playbook binary via PATH (installed to ~/.local/bin by pip --user),
+# so the agent process must carry that PATH. PYTHONPATH cleared so nothing shadows the stdlib/site imports.
+PATH="$HOME/.local/bin:$PATH" PYTHONPATH="" nohup python3 /root/box_agent_agent.py \
     --config /root/box_agent_config.json > /root/box_agent.log 2>&1 &
 sleep 2
 echo "box-agent started (pid $(pgrep -f 'box_agent_agent.py' | head -1 || echo '?'))"

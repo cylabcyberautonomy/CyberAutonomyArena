@@ -201,6 +201,11 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         box_cfg = {
             "token": token, "host": "127.0.0.1", "port": 8900,
             "ssh_key_path": "/root/scoped_key", "ansible_dir": "/root/ansible", "log_dir": "/root",
+            # A decoy's SysFlow exports to the box's OWN ES, reached from the decoy at the box's in-env
+            # address (the box runs ES on :9200 from prepare_box_es). Plain HTTP, no auth (box ES has
+            # security disabled). NOTE live-unknown: decoy->box:9200 routing + box ES binding 0.0.0.0.
+            "es_address": f"http://{box_ip}:9200",
+            "es_index": cfgd.get("sysflow_index", "sysflow"),
         }
         subprocess.run([*ssh_base, target, "cat > /root/box_agent_config.json"],
                        input=_json.dumps(box_cfg), text=True, check=True, timeout=60)
