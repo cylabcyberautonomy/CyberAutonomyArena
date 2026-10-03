@@ -220,13 +220,19 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         def _sync() -> None:
             conn = openstack.connect(cloud=cfg.env_backend.os_cloud)
             prefix = f"{experiment.experiment_name}-"
-            for server in conn.compute.servers():
-                if (server.name or "").startswith(prefix):
-                    continue  # a real MHBench-provisioned host, not a decoy
+            for server in conn.compute.servers(details=True):
+                name = server.name or ""
+                md = server.metadata or {}
+                # A decoy is either tagged arena_dynamic_host (the add-host path, which PREFIXES the name
+                # like a topology host) OR unprefixed (the legacy DeployDecoy actuator, now removed, made
+                # bare-named decoys). A real topology host is prefixed AND untagged -> skipped.
+                is_decoy = md.get("arena_dynamic_host") == "true" or not name.startswith(prefix)
+                if not is_decoy:
+                    continue
                 network_ids = {port.network_id for port in conn.network.ports(device_id=server.id)}
                 network_names = {conn.network.get_network(nid).name for nid in network_ids}
-                if not any(name.startswith(prefix) for name in network_names):
-                    continue
+                if not any(nm.startswith(prefix) for nm in network_names):
+                    continue  # not on this experiment's networks
                 conn.compute.delete_server(server, ignore_missing=True)
                 conn.compute.wait_for_delete(server, wait=120)
 
