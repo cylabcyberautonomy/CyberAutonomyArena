@@ -183,13 +183,16 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         target = f"{user}@{box_ip}"
         repo_dir = str(self._code_dir(cfg))
 
-        # 1. ship the Perry runtime to the box (exclude the heavy/irrelevant bits), via the bastion jump.
+        # 1. ship ONLY the ansible/ YAML tree + the standalone agent (the self-contained agent imports no
+        #    Perry Python — which needs py3.10+ — so the box's py3.8 is fine). Via the bastion jump.
         rsync_e = "ssh " + " ".join(shlex.quote(o) for o in ssh_opts)
         subprocess.run(
-            ["rsync", "-a", "--delete", "-e", rsync_e,
-             "--exclude", ".git", "--exclude", ".venv", "--exclude", "__pycache__", "--exclude", "output",
-             repo_dir.rstrip("/") + "/", f"{target}:/root/defense/"],
+            ["rsync", "-a", "--delete", "-e", rsync_e, "--exclude", ".git", "--exclude", "__pycache__",
+             repo_dir.rstrip("/") + "/ansible/", f"{target}:/root/ansible/"],
             check=True, timeout=600)
+        agent_src = Path(repo_dir) / "defender" / "box_agent" / "agent.py"
+        subprocess.run([*ssh_base, target, "cat > /root/box_agent_agent.py"],
+                       input=agent_src.read_text(), text=True, check=True, timeout=60)
         # 2. ship the scoped key the box agent's AnsibleRunner uses to reach victims (box -> victim direct).
         subprocess.run([*ssh_base, target, "cat > /root/scoped_key && chmod 600 /root/scoped_key"],
                        input=Path(key).read_text(), text=True, check=True, timeout=60)
@@ -197,9 +200,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         token = secrets.token_urlsafe(24)
         box_cfg = {
             "token": token, "host": "127.0.0.1", "port": 8900,
-            "ssh_key_path": "/root/scoped_key", "ansible_dir": "/root/defense/ansible", "log_dir": "/root",
-            "management_ip": cfgd.get("bastion_ip"),
-            "perry_config_path": cfgd.get("perry_config_path"),
+            "ssh_key_path": "/root/scoped_key", "ansible_dir": "/root/ansible", "log_dir": "/root",
         }
         subprocess.run([*ssh_base, target, "cat > /root/box_agent_config.json"],
                        input=_json.dumps(box_cfg), text=True, check=True, timeout=60)
