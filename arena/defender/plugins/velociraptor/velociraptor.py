@@ -146,6 +146,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        prepared=None,  # Phase-A baton; velociraptor has no box ES, so it is unused
     ) -> dict:
         # No topology_spec: the monitored estate came from the arena-injected defender_env_spec in setup()
         # (backend-agnostic); the runner drives the already-deployed server and never parses a topology.

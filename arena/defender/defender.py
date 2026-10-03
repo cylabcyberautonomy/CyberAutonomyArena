@@ -54,7 +54,17 @@ async def run_defender(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     await defender.setup(experiment_name, environment, cfg, bastion_ip,
                          defender_env_spec=defender_env_spec, defender_access=defender_access)
-    built = defender.build_config(experiment_name, environment)
+    # PHASE A: produce the baton (this run's per-experiment box ES + ssh -L tunnel, and the box agent when
+    # the run armed dynamic topology) BEFORE build_config — the defender analog of the attacker's
+    # setup()->prepared->build_config. It takes env_spec/access as args (the config isn't written yet) and
+    # returns es_url / falco_index / sysflow_index / box_agent_*, which build_config bakes in. Default no-op
+    # for a defender with no box telemetry (canary / velociraptor).
+    box_prepared = await defender.provision_box(
+        experiment_name, cfg, bastion_ip,
+        defender_env_spec=defender_env_spec, defender_access=defender_access,
+        needs_agent=env_action_socket is not None,
+    )
+    built = defender.build_config(experiment_name, environment, box_prepared)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
     # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
     # routing per victim), both produced by the environment plugin. A migrated defender reads these
@@ -102,9 +112,11 @@ async def run_defender(
     # setup). This BLOCKS and raises on failure, so the slow, failure-prone arming finishes — and fails
     # the experiment — before the attacker starts, instead of racing inside the run loop. run() below
     # then only launches the reactive loop.
-    prepared = await defender.prepare(config_path, experiment_name, cfg)
+    # PHASE B: external arming (decoy / honey-cred deploy) that CONSUMES the written config (es_url and
+    # box_agent_* already baked in by build_config). Blocks + raises on failure, before the attacker starts.
+    armed = await defender.prepare(config_path, experiment_name, cfg)
     log(experiment_name,
-        f"Defender prepared (armed_in_setup={prepared.armed_in_setup}); starting run loop")
+        f"Defender armed (armed_in_setup={armed.armed_in_setup}); starting run loop")
     process = await defender.run(config_path, experiment_name, cfg)
     log(experiment_name, f"Defender process started (pid={process.pid})")
     return process

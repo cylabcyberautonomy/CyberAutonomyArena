@@ -32,7 +32,7 @@ class _FakeDefender(DefenderPlugin, config_type="_fake_defender_test"):
     def ui_schema(cls):
         return {"config_type": "_fake_defender_test", "label": "fake", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    def build_config(self, experiment_name, environment, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def run(self, config_path, experiment_name, cfg):
@@ -167,7 +167,15 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
     def ui_schema(cls):
         return {"config_type": "_order_defender_test", "label": "order", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    async def provision_box(self, experiment_name, cfg, bastion_ip=None,
+                            defender_env_spec=None, defender_access=None, needs_agent=False):
+        _ORDER_CALLS.append("provision_box")  # Phase A: produce the baton BEFORE build_config
+        return PreparedDefender(es_url="http://127.0.0.1:1")
+
+    def build_config(self, experiment_name, environment, prepared=None):
+        _ORDER_CALLS.append("build_config")
+        # the Phase-A baton reaches build_config (not patched into the written config afterward)
+        assert prepared is not None and prepared.es_url == "http://127.0.0.1:1"
         return {"experiment_name": experiment_name}
 
     async def prepare(self, config_path, experiment_name, cfg):
@@ -187,7 +195,7 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
     def ui_schema(cls):
         return {"config_type": "_prepare_fails_defender_test", "label": "pfail", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    def build_config(self, experiment_name, environment, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def prepare(self, config_path, experiment_name, cfg):
@@ -224,7 +232,9 @@ def test_run_defender_runs_prepare_before_run(tmp_path):
     completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
     _ORDER_CALLS.clear()
     proc = asyncio.run(run_defender(_OrderDefender(), None, "ord", _run_cfg(tmp_path)))
-    assert _ORDER_CALLS == ["prepare", "run"]
+    # the unified lifecycle: Phase A baton (provision_box) -> build_config(baton) -> Phase B arming
+    # (prepare) -> run, mirroring the attacker's setup()->build_config(prepared)->start().
+    assert _ORDER_CALLS == ["provision_box", "build_config", "prepare", "run"]
     assert proc.pid == 4321
 
 

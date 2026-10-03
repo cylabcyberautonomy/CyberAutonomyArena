@@ -245,11 +245,38 @@ class DefenderPlugin(BaseModel):
                 )
             await asyncio.sleep(2)
 
+    @staticmethod
+    def _baton_keys(prepared: "PreparedDefender") -> dict:
+        """The subset of the Phase-A baton that goes into the runner config, skipping None. A telemetry
+        defender's build_config() does `built.update(self._baton_keys(prepared))` so es_url / falco_index /
+        sysflow_index / box_agent_* are baked in — replacing the old 'prepare patches the written config'."""
+        fields = ("es_url", "falco_index", "sysflow_index",
+                  "box_agent_host", "box_agent_port", "box_agent_token")
+        return {f: getattr(prepared, f) for f in fields if getattr(prepared, f, None) is not None}
+
+    async def provision_box(
+        self,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        bastion_ip: Optional[str] = None,
+        defender_env_spec=None,
+        defender_access=None,
+        needs_agent: bool = False,
+    ) -> "PreparedDefender":
+        """PHASE A — produce the baton BEFORE build_config (symmetric with the attacker's setup()→prepared).
+        A telemetry defender overrides this to stand up its per-experiment box ES (+ the box agent when
+        needs_agent) and return a PreparedDefender carrying es_url / falco_index / sysflow_index /
+        box_agent_* — which build_config() then bakes into the runner config. Taking env_spec/access as
+        args (not reading a written config) is what lets it run before build_config. Default: an empty
+        baton, for a defender with no box telemetry (canary / velociraptor)."""
+        return PreparedDefender()
+
     @abstractmethod
     def build_config(
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        prepared: "PreparedDefender",
     ) -> dict: ...
 
     @abstractmethod

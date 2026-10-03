@@ -124,14 +124,44 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        prepared: PreparedDefender,
     ) -> dict:
         # No topology_spec: this defender builds its Perry Network from the arena-injected
         # defender_env_spec (the env resolves backend names), not a backend topology.
-        return {
+        built = {
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "arsenal": self.arsenal,
         }
+        built.update(self._baton_keys(prepared))  # box ES tunnel url + indices + box agent (Phase A)
+        return built
+
+    async def provision_box(
+        self,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        bastion_ip: Optional[str] = None,
+        defender_env_spec=None,
+        defender_access=None,
+        needs_agent: bool = False,
+    ) -> PreparedDefender:
+        # PHASE A (runs BEFORE build_config): stand up this run's OWN per-experiment ES on the defender box
+        # + the ssh -L tunnel, and — when this run armed dynamic topology (needs_agent) — deploy + start the
+        # box agent so the decoy deploy (Phase B) can route host actions to it. Both take the env-produced
+        # box inventory + access (NOT a written config) and RETURN their values; build_config() bakes them
+        # into the runner config via the baton. Blocking SSH work, so off the event loop.
+        box_cfg = {
+            "defender_env_spec": defender_env_spec.model_dump() if defender_env_spec is not None else {},
+            "defender_setup_access": [a.model_dump() for a in (defender_access or [])],
+        }
+        loop = asyncio.get_event_loop()
+        es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
+        baton = dict(es)
+        if needs_agent:
+            box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
+            agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
+            baton.update(agent)
+        return PreparedDefender(armed_in_setup=False, **baton)
 
     async def prepare(
         self,
@@ -139,20 +169,12 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> PreparedDefender:
-        # 1) Stand up this run's OWN per-experiment ES on the defender box + the ssh -L tunnel
-        #    (prepare_box_es, copied per plugin); injects es_url into the config the subprocesses read.
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.prepare_box_es, config_path, experiment_name, cfg)
-        # 1b) Deploy + start the box agent on the defender box (box-only execution) BEFORE external arming,
-        #     so the decoy deploy below can route host actions to it.
-        import json as _json
-        if _json.loads(Path(config_path).read_text()).get("env_action_socket"):
-            await asyncio.get_event_loop().run_in_executor(
-                None, self.prepare_box_agent, config_path, experiment_name, cfg)
-        # 2) EXTERNAL arming: run the strategy's prepare phase in the deception venv to completion. The
-        #    static StaticLayered* channels (Perry Strategy.ARMS_IN_SETUP) DEPLOY their decoys + plant
-        #    prompt-injection payloads now; AIAttackerDetection is reactive and arms inside its loop, so
-        #    for it this is a no-op. Blocks and RAISES on deploy failure, before the attacker starts.
+        # PHASE B (after build_config + config write): EXTERNAL arming — run the strategy's prepare phase in
+        # the deception venv to completion. The static StaticLayered* channels (Perry Strategy.ARMS_IN_SETUP)
+        # DEPLOY their decoys + plant prompt-injection payloads now; AIAttackerDetection is reactive and arms
+        # inside its loop, so for it this is a no-op. It reads the written config (es_url / box_agent_* already
+        # baked in by build_config from the Phase-A baton). Blocks and RAISES on deploy failure, before the
+        # attacker starts. (Box ES + box agent standup moved to provision_box, Phase A.)
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
         return await self._run_prepare_and_wait(
             Path(__file__).parent / "runner.py", config_path, experiment_name, cfg, log_path
@@ -219,14 +241,14 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     def _box_agent_tunnel_pidfile(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "box_agent_tunnel.pid"
 
-    def prepare_box_agent(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
+    def prepare_box_agent(self, src_cfg: dict, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
         import json as _json
         import secrets
         import shlex
         import socket
         import time
 
-        cfgd = _json.loads(Path(config_path).read_text())
+        cfgd = src_cfg
         box = (cfgd.get("defender_env_spec") or {}).get("box") or {}
         box_ip = box.get("ip")
         if not box_ip:
@@ -297,13 +319,9 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         else:
             raise RuntimeError(f"box agent did not answer /health on {box_ip}:8900 within 120s")
         # 7. inject the reachable host/port/token into the config the runner reads.
-        cfgd["box_agent_host"] = "127.0.0.1"
-        cfgd["box_agent_port"] = lport
-        cfgd["box_agent_token"] = token
-        Path(config_path).write_text(_json.dumps(cfgd, indent=2))
-        return {"box_agent_host": "127.0.0.1", "box_agent_port": lport}
+        return {"box_agent_host": "127.0.0.1", "box_agent_port": lport, "box_agent_token": token}
 
-    def prepare_box_es(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
+    def prepare_box_es(self, box_cfg: dict, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
         """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.
         Writes es_url + falco_index/sysflow_index into the config JSON the runner reads, drops an
         es_tunnel.pid for teardown, and returns the injected dict. Fail-closed: raises if the topology
@@ -313,7 +331,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         import socket
         import time
 
-        cfgd = _json.loads(Path(config_path).read_text())
+        cfgd = box_cfg
         box = (cfgd.get("defender_env_spec") or {}).get("box") or {}
         box_ip = box.get("ip")
         if not box_ip:
@@ -375,10 +393,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         else:
             raise RuntimeError(f"ssh -L tunnel to box ES never became reachable at {es_url}")
 
-        injected = {"es_url": es_url, "falco_index": "falco", "sysflow_index": "sysflow"}
-        cfgd.update(injected)
-        Path(config_path).write_text(_json.dumps(cfgd, indent=2))
-        return injected
+        return {"es_url": es_url, "falco_index": "falco", "sysflow_index": "sysflow"}
 
     @classmethod
     def _teardown_box_es_tunnel(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> None:

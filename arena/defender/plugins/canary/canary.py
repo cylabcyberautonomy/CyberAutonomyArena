@@ -83,6 +83,7 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        prepared=None,  # Phase-A baton; canary has no box telemetry, so it is unused
     ) -> dict:
         # management_ip (harness ES), bastion_ip, log_dir, defender_env_spec (host inventory) and
         # defender_setup_access (per-host key + routing) are injected by defender.run_defender().
