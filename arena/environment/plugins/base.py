@@ -84,7 +84,18 @@ class EnvironmentPlugin(BaseModel):
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        """Emits TEARING_DOWN -> TORN_DOWN (or FAILED) on `lc`."""
+        """Reclaim EVERYTHING this environment created for the experiment, then emit
+        TEARING_DOWN -> TORN_DOWN (or FAILED) on `lc`.
+
+        CONTRACT: "everything" includes hosts added dynamically via add_host DURING the run (decoys,
+        restored VMs), not just the initial topology. The arena does NOT hand teardown a list of what was
+        added — decoy teardown is the ENVIRONMENT's job, never the arena's or the defender's (the defender
+        is backend-agnostic and never touches the cloud). So an environment that implements add_host MUST
+        track what it created and reap it here. HOW it tracks that is this backend's PRIVATE business and
+        is NOT part of this interface — a cloud tag, an own-side registry, or a naming scheme are all fine
+        (MHBench stamps an `arena_dynamic_host` metadata tag on each add_host VM and sweeps tagged servers
+        on this experiment's networks before the topology teardown). A backend that supports_dynamic_topology()
+        but leaks add_host'd hosts here is in violation of this contract."""
         raise NotImplementedError(f"{type(self).__name__} must implement teardown()")
 
     # -- spec production (the env is the producer of the agent-facing specs + setup access) ------
@@ -178,7 +189,11 @@ class EnvironmentPlugin(BaseModel):
     async def add_host(self, experiment, deployed, request, cfg):
         """Provision ONE bare VM (role/image hint + subnet) and return EnvActionResult with its
         name/ip + a DEFENDER-SCOPED SetupAccess. The env does ONLY the cloud step; the defender runs its
-        own sensor-install/vuln/registration over the returned access (the provision/configure split)."""
+        own sensor-install/vuln/registration over the returned access (the provision/configure split).
+
+        CONTRACT: the env MUST record every host it creates here durably enough that teardown() can
+        reclaim it without being told which hosts were added — see teardown()'s contract. The bookkeeping
+        mechanism (tag/registry/naming) is this backend's private choice, NOT part of this interface."""
         from ..env_requests import EnvRequestUnsupported
         raise EnvRequestUnsupported(f"{type(self).__name__} does not support add_host")
 
