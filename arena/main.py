@@ -603,7 +603,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # Defender teardown (harness-side cleanup, e.g. the box ES tunnel) runs before the environment
     # teardown. Best-effort, like the log collection above: a defender teardown failure must not block
     # reclaiming the environment's VMs. (Stray decoy VMs are reaped by the environment's own teardown -
-    # see MHBenchEnvironment._teardown_decoys - not here; deleting a VM is backend-specific and defenders
+    # see MHBenchEnvironment._teardown_dynamic_hosts - not here; deleting a VM is backend-specific and defenders
     # are backend-agnostic.)
     if experiment.defender:
         try:

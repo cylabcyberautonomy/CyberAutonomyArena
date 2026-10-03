@@ -192,7 +192,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import request_ingress_env
         await request_ingress_env(experiment, bastion_ip, cfg, ingress)
 
-    async def _teardown_decoys(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+    async def _teardown_dynamic_hosts(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
         """Delete any VMs standing on this experiment's networks that aren't topology hosts (decoys) -
         before the network teardown. A defender's DeployDecoy actuator creates OpenStack servers directly
         via openstacksdk, outside the topology JSON, so teardown_environment has no idea they exist; if
@@ -288,8 +288,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         if lc:
             lc.emit(EnvironmentSignal.TEARING_DOWN)
         # Sweep stray decoy VMs on this experiment's networks first, so the network teardown below doesn't
-        # abort on a security group a decoy still holds "in use" (see _teardown_decoys).
-        await self._teardown_decoys(experiment, cfg)
+        # abort on a security group a decoy still holds "in use" (see _teardown_dynamic_hosts).
+        await self._teardown_dynamic_hosts(experiment, cfg)
         try:
             await teardown_environment(experiment, cfg)
         except Exception as e:  # noqa: BLE001

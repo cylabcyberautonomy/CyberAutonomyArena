@@ -173,7 +173,7 @@ class DefenderPlugin(BaseModel):
         NOTE: stray VMs a defender stood up outside the topology (decoys) are NOT the
         defender's problem to reap - deleting a VM is backend-specific, and defenders are
         backend-agnostic. The ENVIRONMENT sweeps those on its own networks as the first
-        step of its teardown (see MHBenchEnvironment._teardown_decoys)."""
+        step of its teardown (see MHBenchEnvironment._teardown_dynamic_hosts)."""
 
     # ------------------------------------------------------------------
     # Readiness handshake
