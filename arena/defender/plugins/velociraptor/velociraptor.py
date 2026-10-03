@@ -45,12 +45,6 @@ def _require_velociraptor_dir(cfg: ExperimentManagerConfig) -> Path:
     return Path(d)
 
 
-def _topology_path(cfg: ExperimentManagerConfig, environment_spec: str) -> Path:
-    # environment_spec is a PATH to a topology JSON (absolute, or relative to mhbench_dir).
-    p = Path(environment_spec)
-    return p if p.is_absolute() else cfg.mhbench_dir / p
-
-
 def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:
     return cfg.mhbench_dir / ".venv" / "bin" / "ansible-playbook"
 
@@ -63,7 +57,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     """Velociraptor endpoint DFIR/EDR defender: detection + active response."""
 
     type: Literal["velociraptor"]
-    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "topology_spec", "response_mode"})
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "response_mode"})
     # off | kill | quarantine | both  — what to do when a kill-chain rule fires.
     response_mode: str = "kill"
     poll_interval: float = 15.0
@@ -89,13 +83,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         if bastion_ip is None:
             raise RuntimeError("Velociraptor defender needs the experiment bastion IP (bastion_ip).")
         velo_dir = _require_velociraptor_dir(cfg)
-        spec = environment.topology_spec if environment else None
-        # topology_spec from the environment may be an absolute path; else derive it.
-        topology_path = Path(spec) if spec and Path(spec).exists() else _topology_path(cfg, experiment_name if not spec else spec)
-        if not topology_path.exists():
-            # environment.topology_spec is the canonical path the deployer used.
-            topology_path = Path(environment.topology_spec) if environment else topology_path
-
         # The server runs ON the defender box. Read the box + the SCOPED defender access (key + bastion
         # routing) from the env-produced specs the arena injected (defender_env_spec / defender_access) —
         # NOT a specific backend's deployer — so this stays environment-agnostic. The box + victims sit
@@ -114,7 +101,11 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         self._ssh_key = str(scoped_key)
         self._server_ip = box_ip                 # server runs here; runner drives it over the box's proxy
         self._server_proxy = proxy_common        # runner SSHes to the box via this bastion ProxyCommand
-        victims = deploy.victim_hosts(topology_path)
+        # Victims from the env-produced run spec (backend-agnostic) — NOT a topology parse. The env already
+        # excluded the attacker + the defender box, so this is exactly the monitored estate.
+        victims = deploy.victims_from_spec(defender_env_spec)
+        if not victims:
+            raise RuntimeError("Velociraptor: defender_env_spec carries no victim hosts to monitor.")
         self._expected_clients = len(victims)
         out = _defender_out(experiment_name, cfg)
         log_path = out / "velociraptor_deploy.log"
@@ -130,7 +121,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             None,
             lambda: deploy.run_play(
                 action="install",
-                topology_path=topology_path,
+                victims=victims,
                 server_ip=box_ip,
                 ssh_key=scoped_key,
                 proxy_common=proxy_common,
@@ -156,9 +147,10 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
     ) -> dict:
+        # No topology_spec: the monitored estate came from the arena-injected defender_env_spec in setup()
+        # (backend-agnostic); the runner drives the already-deployed server and never parses a topology.
         return {
             "experiment_name": experiment_name,
-            "topology_spec": environment.topology_spec if environment else None,
             "install_dir": deploy.INSTALL_DIR,
             "server_ip": self._server_ip,          # the defender box (server runs here)
             "server_proxy": self._server_proxy,    # bastion ProxyCommand so the runner can SSH to the box

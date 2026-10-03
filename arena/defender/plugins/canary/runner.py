@@ -2,8 +2,9 @@
 """Canary defender runner — stdlib only (SSH via subprocess, ES via urllib).
 
 argv[1] = config JSON with:
-  experiment_name, topology_spec, checks[], canary_host, telemetry_port,
-  telemetry_timeout_s, fail_closed, ssh_key, management_ip, bastion_ip, log_dir
+  experiment_name, checks[], canary_host, telemetry_port,
+  telemetry_timeout_s, fail_closed, management_ip, bastion_ip, log_dir,
+  and the arena-injected defender_env_spec / defender_setup_access (hosts + scoped access)
 
 Writes <log_dir>/connectivity_report.json, then arms (writes <log_dir>/defender_ready)
 unless fail_closed and a required check failed. Then idles until SIGTERM (the harness

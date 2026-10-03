@@ -40,19 +40,23 @@ class DefenderHost(BaseModel):
 
 
 class DefenderSubnet(BaseModel):
-    """A subnet of the defended estate as the ENVIRONMENT exposes it (part of the run spec).
+    """A subnet of the DEFENDED estate as the environment exposes it (part of the run spec).
+
+    Only the defended estate appears here — the attacker's own segment is NOT included (a real blue team
+    doesn't know where the red team sits; it defends its own assets). So there is no "attacker" flag and
+    no attacker-adjacency hint: those would be attacker-position knowledge the defender shouldn't have.
 
     Backend-neutral to the defender: the environment has already resolved the cloud network /
     security-group NAMES (e.g. MHBench's "<project>-<subnet>" / "<project>-<subnet>_sg"), so a decoy
     defender places a decoy by naming `network`/`sec_group` without knowing the backend convention.
-    The `attacker`/`entry` flags let a strategy avoid the red team's own segment and put honey
-    credentials on the attacker's path, in any topology, without matching hardcoded subnet names."""
+    `perimeter` is the ONE placement hint — the internet-facing / DMZ tier, a legitimate property the org
+    knows about its own estate (from the topology's `perimeter` marker, NOT from the attacker's position)
+    — so deception can bait the ingress path."""
     name: str                            # logical subnet name (e.g. "webserver_subnet")
     network: Optional[str] = None        # backend network to attach a new host to (env-resolved)
     sec_group: Optional[str] = None      # the subnet's security group (env-resolved)
     hosts: list[DefenderHost] = Field(default_factory=list)
-    attacker: bool = False               # the red team's own segment (never place a decoy here)
-    entry: bool = False                  # adjacent to the attacker subnet (honey-cred on the path)
+    perimeter: bool = False              # the internet-facing / DMZ tier (legit estate property; bait here)
 
 
 class DefenderBox(BaseModel):

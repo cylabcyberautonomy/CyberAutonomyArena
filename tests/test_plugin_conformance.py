@@ -407,7 +407,7 @@ _EXPECTED_DEFENDER_CONFIG_KEYS = {
     "llm_soc":          {"experiment_name", "strategy", "llm_model"},
     "deception":        {"experiment_name", "strategy"},
     "prompt_injection": {"experiment_name", "strategy"},
-    "velociraptor":     {"experiment_name", "topology_spec", "response_mode"},
+    "velociraptor":     {"experiment_name", "response_mode"},
 }
 
 

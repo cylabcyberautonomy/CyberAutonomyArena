@@ -50,8 +50,11 @@ def build_network_from_spec(spec: Optional[dict]):
             name=sd.get("network") or sd["name"],
             hosts=hosts,
             sec_group=sd.get("sec_group"),
-            attacker=bool(sd.get("attacker")),
-            entry=bool(sd.get("entry")),
+            # Perry's `entry` = the subnet honey-creds are baited on. Map it from the env's `perimeter`
+            # marker (the internet-facing/DMZ tier) — a legitimate estate property, NOT attacker adjacency.
+            # `attacker` stays at its default False: the attacker's own segment isn't in the spec at all,
+            # so get_random_subnet can never place a decoy there without needing a flag.
+            entry=bool(sd.get("perimeter")),
         ))
     network = Network(
         name=spec.get("network_name") or "network",

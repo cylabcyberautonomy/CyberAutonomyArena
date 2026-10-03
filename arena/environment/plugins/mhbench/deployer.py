@@ -173,13 +173,21 @@ def _host_users(vm_type: str) -> list[str]:
 
 
 def _defender_subnets(topology_path: Path, project_name: Optional[str]):
-    """Resolve the full subnet structure the defender's run spec exposes — backend names included.
+    """Resolve the DEFENDED-estate subnet structure the defender's run spec exposes — backend names
+    included, attacker's segment excluded.
 
     This is the knowledge the old defender-side topology.py reached into MHBench for; it now lives in
     the ENVIRONMENT, which owns the backend. Each DefenderSubnet carries the REAL Neutron network name
     ("<project>-<subnet>") + security-group name ("<project>-<subnet>_sg") MHBench provisions (see
     NetworkDeployer._n / Subnet.sg_name), so a decoy defender attaches a decoy by name without knowing
-    the convention. The attacker/entry flags come from the topology's subnet_connections."""
+    the convention.
+
+    Only the defended estate is included: the attacker's own segment and the defender's own isolated box
+    subnet are skipped (same exclusion as _iter_victims, so `subnets` and the flat `hosts` describe the
+    same estate). A real defender doesn't know where the red team sits, so there is no attacker flag and
+    no attacker-adjacency hint. The one placement hint is `perimeter`, taken straight from the topology's
+    `perimeter` marker (the internet-facing/DMZ tier — a legitimate estate property), NOT inferred from
+    the attacker's position."""
     from ....defender.env_spec import DefenderSubnet, DefenderHost  # lazy: avoid import cycle
 
     topo = json.loads(Path(topology_path).read_text())
@@ -187,27 +195,16 @@ def _defender_subnets(topology_path: Path, project_name: Optional[str]):
     if not nets:
         return [], None, None
     network_data = nets[0]
-    subnet_connections = topo.get("subnet_connections", [])
 
     def _n(name: str) -> str:
         return f"{project_name}-{name}" if project_name else name
 
-    # The attacker's first hop: subnets adjacent to the attacker's own (raw, un-prefixed names, since
-    # subnet_connections uses them). Lets deception place a honey credential on the path in any topology.
-    attacker_raw = next(
-        (sd["name"] for sd in network_data["subnets"]
-         if any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"])),
-        None,
-    )
-    entry_raw = set()
-    for conn in (subnet_connections or []):
-        endpoints = {conn.get("from_subnet"), conn.get("to_subnet")}
-        if attacker_raw in endpoints:
-            entry_raw |= endpoints - {attacker_raw, None}
-
     subnets = []
     for sd in network_data["subnets"]:
-        is_attacker = any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"])
+        if sd["name"] in (_ATTACKER_SUBNET, _DEFENDER_SUBNET):
+            continue
+        if any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"]):
+            continue  # belt-and-suspenders: the attacker's segment by vm_type, however it's named
         hosts = []
         for h in sd["hosts"]:
             ip = h.get("ip_address")
@@ -226,8 +223,7 @@ def _defender_subnets(topology_path: Path, project_name: Optional[str]):
             network=_n(sd["name"]),            # the real Neutron network DeployDecoy attaches to
             sec_group=_n(f"{sd['name']}_sg"),  # the subnet's security group
             hosts=hosts,
-            attacker=is_attacker,
-            entry=sd["name"] in entry_raw,
+            perimeter=bool(sd.get("perimeter", False)),  # the DMZ tier (legit estate property; bait here)
         ))
     return subnets, network_data.get("name"), _n("management_sg")
 

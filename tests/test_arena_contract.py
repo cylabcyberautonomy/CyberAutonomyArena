@@ -383,12 +383,12 @@ def test_defender_canary_build_config_contract():
 
 
 def test_defender_velociraptor_build_config_contract():
-    """Velociraptor is the least MHBench-coupled defender (a good early refactor target);
-    lock its build_config shape too."""
+    """Velociraptor now builds its monitored estate from the arena-injected defender_env_spec (in
+    setup()), not a topology parse — so build_config carries NO topology_spec (backend-agnostic)."""
     dfn = DefenderPlugin._registry["velociraptor"].model_validate({"type": "velociraptor"})
     built = dfn.build_config("ci_exp", FAKE_ENV)
     assert built["experiment_name"] == "ci_exp"
-    assert built["topology_spec"] == FAKE_ENV.topology_spec
+    assert "topology_spec" not in built  # migrated to the injected defender_env_spec
     assert "response_mode" in built
 
 
@@ -767,20 +767,57 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
     assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
     # Env-resolved subnet structure (the decoy defenders build Perry's Network from this, NOT the backend
-    # topology — topology.py is gone). The env resolves the backend network/sg NAMES, per-host users, and
-    # the attacker-segment flag, so the defender stays backend-agnostic.
+    # topology — topology.py is gone). The env resolves the backend network/sg NAMES + per-host users.
     assert dspec.subnets, "defender_spec must carry the subnet structure"
     assert dspec.management_sg == "ci_proj-management_sg"
     ws = next((s for s in dspec.subnets if any(h.role == "webserver" for h in s.hosts)), None)
     assert ws is not None and ws.network == f"ci_proj-{ws.name}" and ws.sec_group == f"ci_proj-{ws.name}_sg"
     assert any("tomcat" in h.users for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
-    atk = next((s for s in dspec.subnets if s.attacker), None)
-    assert atk is not None, "the attacker's own segment must be flagged so decoys avoid it"
+    # The attacker's own segment is NOT in the defended estate (a real blue team doesn't know where the
+    # red team sits) — so there's no attacker subnet and no "attacker" field to leak its position.
+    assert all(s.name != "attacker_subnet" for s in dspec.subnets)
+    assert all(not any(h.role == "kali" for h in s.hosts) for s in dspec.subnets)
+    assert not any(hasattr(s, "attacker") for s in dspec.subnets)
     # defender: setup access = one SetupAccess per victim (+ the defender box), with creds
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     acc_names = {a.name for a in dacc}
     assert names <= acc_names and "defender_box" in acc_names
     assert all(a.ssh_key for a in dacc)
+
+
+def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
+    """_defender_subnets resolves the DEFENDED estate only, backend-agnostically: it excludes the
+    attacker's segment AND the defender's own box subnet, resolves backend network/sg names, carries
+    per-host users, and maps the topology's `perimeter` marker (NOT attacker adjacency) through. Fully
+    self-contained (synthetic topology) so it doesn't depend on which MHBench checkout is configured."""
+    from arena.environment.plugins.mhbench.deployer import _defender_subnets
+    topo = {
+        "name": "net0",
+        "networks": [{"name": "net0", "subnets": [
+            {"name": "webserver_subnet", "perimeter": True, "hosts": [
+                {"name": "webserver0", "vm_type": "webserver_instrumented", "ip_address": "10.0.0.10"}]},
+            {"name": "corporate_subnet", "hosts": [
+                {"name": "database0", "vm_type": "database_instrumented", "ip_address": "10.0.1.10"}]},
+            {"name": "attacker_subnet", "hosts": [
+                {"name": "attacker", "vm_type": "kali_running", "ip_address": "10.0.9.10"}]},
+            {"name": "defender_subnet", "hosts": [
+                {"name": "defender", "vm_type": "ubuntu_base", "ip_address": "10.0.250.10"}]},
+        ]}],
+    }
+    p = tmp_path / "topo.json"
+    p.write_text(json.dumps(topo))
+    subnets, net_name, mgmt_sg = _defender_subnets(p, "proj")
+
+    names = {s.name for s in subnets}
+    assert names == {"webserver_subnet", "corporate_subnet"}  # attacker + defender box excluded
+    assert net_name == "net0" and mgmt_sg == "proj-management_sg"
+    ws = next(s for s in subnets if s.name == "webserver_subnet")
+    assert ws.perimeter is True and ws.network == "proj-webserver_subnet" and ws.sec_group == "proj-webserver_subnet_sg"
+    assert ws.hosts[0].users == ["ubuntu", "tomcat"] and ws.hosts[0].telemetry is True
+    corp = next(s for s in subnets if s.name == "corporate_subnet")
+    assert corp.perimeter is False  # only the marked tier is the bait target
+    # the attacker's position never leaks: no subnet carries an attacker flag
+    assert all(not hasattr(s, "attacker") for s in subnets)
 
 
 def _deployed_for(plugin_name):
