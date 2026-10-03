@@ -43,7 +43,7 @@ import arena.traffic.plugins   # noqa: F401
 import arena.environment.plugins  # noqa: F401 — populate the env registry for registry-driven params
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
-from arena.attacker.plugins.incalmo.incalmo import IncalmoPreparedC2
+from arena.attacker.plugins.incalmo_strategy.incalmo_strategy import IncalmoPreparedC2
 from arena.defender.plugins.base import DefenderPlugin
 from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment import DeployedEnvironment
@@ -784,7 +784,7 @@ def test_defender_box_spec_none_when_no_env():
 def test_c2_builds_ssh_from_scoped_setupaccess():
     """Regression: the foothold C2 reaches the foothold via the SetupAccess (scoped key + env routing),
     not a management key read off disk."""
-    from arena.attacker.plugins.incalmo import c2
+    from arena.attacker.plugins.incalmo_strategy import c2
     fa = SetupAccess(name="foothold", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
                      ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')
     cmd = " ".join(c2._ssh_to_foothold(fa))

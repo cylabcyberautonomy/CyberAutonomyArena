@@ -69,6 +69,15 @@ class AttackerPlugin(BaseModel):
                 f"{cls.__name__}.build_config() omitted required key(s) {sorted(missing)} declared in "
                 f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
 
+    @classmethod
+    def sweep_stale_state(cls, cfg: ExperimentManagerConfig) -> None:
+        """Best-effort: reclaim this attacker TYPE's GLOBAL host-side state that a crashed prior manager
+        may have orphaned (e.g. C2 `ssh -L` tunnels, Docker containers, temp dirs), BEFORE any experiment
+        runs. The arena calls it once per registered attacker plugin on clean-slate — plugin-agnostically,
+        so the core never imports a specific plugin to clean up after it. Default no-op; a C2-based attacker
+        (e.g. Incalmo) overrides it to reap its own leftovers."""
+        return None
+
     @abstractmethod
     def build_config(
         self,

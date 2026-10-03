@@ -201,10 +201,13 @@ Runs an offensive agent from the foothold the environment provides. Subclass `At
 (`attacker/plugins/base.py`) with a `config_type`.
 
 Existing:
-- `plugins/incalmo/` — C2-based attackers (sandcat agents beacon in from the victims). Three
-  `config_type`s share its C2 lifecycle (`_IncalmoAttacker`): `incalmo_strategy` (fixed strategies —
-  GraphSearch, …), `incalmo_llm` (Incalmo's free-form LLM planning loop), and `c2_llm` (a BARE LLM given
-  the raw C2 — a minimal run-command loop, no Incalmo framework; the C2 analog of the shell agents).
+- `plugins/incalmo_strategy/` — Incalmo C2 attacker (sandcat agents beacon in from the victims) driven by a
+  **fixed strategy** (`GraphSearch`, `Darkside`, …).
+- `plugins/incalmo_llm/` — the same Incalmo C2 attacker driven by a **free-form LLM planning loop**
+  (`planning_llm` + `abstraction`). These are two **separate, self-contained plugins** (one per folder): each
+  carries its OWN copy of the Incalmo C2 lifecycle (`c2.py` / `foothold.py` / `aux/`), the same way the three
+  Defense/Perry defenders each copy `box_es_install.sh`. Both point at the same Incalmo repo via their own
+  code-path field (`incalmo_strategy_dir` / `incalmo_llm_dir`).
 - `plugins/terminus/` — Terminus-2, Terminal-Bench 2.0's reference shell agent: an LLM driving a real
   shell in a read-terminal → think → type-command loop on the foothold.
 - `plugins/cai/` — the CAI (Cybersecurity AI) framework's offensive agent, run on the foothold as a shell
@@ -249,9 +252,10 @@ base = access.ssh_base()                         # start()/stop()/collect_logs()
 through the `access` you're handed.
 
 **Running a C2.** Do it in your own `setup()`: bring the C2 up, prep the foothold, block until an agent
-beacons in before returning. There is no shared C2 base class — copy `plugins/incalmo/`'s shape (it keeps
-`launch_c2c`/`wait_c2c_ready`/`wait_c2c_agent`/`stop_c2c` on itself). Set `requires_docker = True` only if
-the C2 runs as a Docker container on the harness host (it gates an early preflight).
+beacons in before returning. There is no shared C2 base class — copy `plugins/incalmo_strategy/`'s shape (it
+keeps `launch_c2c`/`wait_c2c_ready`/`wait_c2c_agent`/`stop_c2c` on itself, plus a `sweep_stale_state()` hook
+to reap orphaned C2 tunnels on clean-slate). Set `requires_docker = True` only if the C2 runs as a Docker
+container on the harness host (it gates an early preflight).
 
 **Lifecycle.** The arena drives setup → ready → running → stopping → stopped and waits on each; you don't
 emit these. Implement `setup`/`start`/`stop`; the base wraps them in `run_setup`/`run_start`/`run_stop`.
