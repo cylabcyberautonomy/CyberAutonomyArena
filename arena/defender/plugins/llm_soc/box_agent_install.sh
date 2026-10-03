@@ -13,14 +13,21 @@ DEF=/root/defense
 VENV=/root/box_agent_venv
 
 if [ ! -x "$VENV/bin/python" ]; then
+    # Bare ubuntu_base may be an older release (py3.8) without ensurepip/venv. The box has internet
+    # egress (unlike victims), so install it from the mirror. Non-fatal if already present.
+    if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq || true
+        apt-get install -y -qq python3-venv python3-pip || true
+    fi
     python3 -m venv "$VENV"
     "$VENV/bin/pip" install --quiet --upgrade pip
-    if [ -f "$DEF/requirements.txt" ]; then
-        "$VENV/bin/pip" install --quiet -r "$DEF/requirements.txt"
-    else
-        # Fallback dep set the box agent's AnsibleExecutor + the host actuators import.
-        "$VENV/bin/pip" install --quiet ansible-core ansible_runner elasticsearch pydantic rich faker
-    fi
+    # Pin ansible to a line whose control node still supports the box's python (ansible-core 2.14+
+    # requires py3.9; ubuntu_base is py3.8). ansible-core 2.13 still manages modern hosts fine.
+    # Minimal set for the BlockIP path; ConfigureDecoy's InstallSysFlow needs the fuller Perry deps
+    # (+ a shipped perry config) — a follow-up.
+    "$VENV/bin/pip" install --quiet "ansible-core<2.14" "ansible-runner<2.4" || \
+        "$VENV/bin/pip" install --quiet ansible-core ansible-runner
 fi
 
 # (re)start the agent: it listens on localhost:8900 on the box; the harness reaches it via the ssh -L
