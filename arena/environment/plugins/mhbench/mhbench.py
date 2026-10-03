@@ -56,7 +56,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import resolve_topology_path
         topology_path = resolve_topology_path(self.environment_spec, cfg)
         return await count_vm_specs(topology_path, cfg.mhbench_dir,
-                                    flavor_cpu_cost=(cfg.gcp_flavor_cpu_cost or None))
+                                    flavor_cpu_cost=(cfg.env_backend.gcp_flavor_cpu_cost or None))
 
     async def provision(
         self, experiment: "Experiment", c2c_url: Optional[str], cfg: ExperimentManagerConfig,
@@ -166,7 +166,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
         # The management host's internal IP is constant across runs (management.host_ip); reuse the
         # gcp_relay_ip default which already names it.
-        return getattr(cfg, "gcp_relay_ip", "10.0.1.10")
+        return cfg.env_backend.gcp_relay_ip
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import defender_box_spec
@@ -192,41 +192,51 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .deployer import request_ingress_env
         await request_ingress_env(experiment, bastion_ip, cfg, ingress)
 
-    async def _teardown_decoys(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
-        """Delete any VMs standing on this experiment's networks that aren't topology hosts (decoys) -
-        before the network teardown. A defender's DeployDecoy actuator creates OpenStack servers directly
-        via openstacksdk, outside the topology JSON, so teardown_environment has no idea they exist; if
-        left alive they keep this experiment's security groups "in use", and MHBench's teardown deletes in
-        order and aborts on the first ConflictException, leaking every network/subnet/security-group for
-        the whole experiment right along with the decoy (confirmed live, repeatedly). Reaping stray VMs on
-        our own networks is the environment's job, not the defender's (the defender is backend-agnostic;
-        deleting a VM is not).
+    async def _teardown_dynamic_hosts(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+        """Delete the dynamically-added VMs (decoys) on this experiment's networks before the network
+        teardown — an ENVIRONMENT responsibility, driven by the env, never by the arena or the defender.
 
-        Identified by the experiment-name prefix, not a decoy name pattern: every server MHBench
-        provisions is named "<experiment_name>-<host>" (see HostDeployer._n), while DeployDecoy creates
-        servers under the bare `action.host_name` with no prefix. So on this experiment's own networks,
-        "unprefixed" is exactly "not a real topology host" - i.e. a decoy. Cross-referencing the network
-        name ("<experiment_name>-<subnet_name>") keeps this scoped to this experiment even under
-        concurrency. Looked up via Neutron ports (device_id=server.id), not server.addresses: addresses is
-        empty while a server is still BUILD (a slow/stuck decoy - exactly the case this must catch), but a
-        port with its network exists as soon as create_server() returns.
+        How the env KNOWS which VMs to reap (the feedback loop): under box-only execution the defender
+        never touches the cloud. Every dynamic host is created BY THIS ENVIRONMENT, through add_host
+        (defender -> env UDS channel -> MHBench), and create_one_host stamps metadata
+        arena_dynamic_host="true" on it (see src/deployment/host_deployer.py). That tag — persisted on the
+        cloud VM, so it survives a manager restart (the in-memory registry does not) — is the record this
+        sweep reads back: a tagged server on one of this experiment's networks is a decoy to reap; a real
+        topology host is untagged and left alone. Reaping matters because a live decoy keeps this
+        experiment's security groups "in use", and MHBench's ordered teardown aborts on the first
+        ConflictException, leaking every network/subnet/security-group for the whole experiment along with
+        the decoy (confirmed live, repeatedly).
+
+        The `not name.startswith("<experiment_name>-")` clause is a legacy fallback for the now-removed
+        arena-side DeployDecoy actuator, which created bare-named (unprefixed) servers directly; the
+        current add_host path PREFIXES decoy names like topology hosts, so those are caught by the TAG,
+        not the prefix. Scope is kept to this experiment by cross-referencing the network name
+        ("<experiment_name>-<subnet_name>"), via Neutron ports (device_id=server.id) not server.addresses:
+        addresses is empty while a server is still BUILD (a slow/stuck decoy — exactly the case this must
+        catch), but a port with its network exists as soon as create_server() returns.
 
         Best-effort: never fails teardown. No-op on backends without this escape hatch."""
-        if getattr(cfg, "cloud_backend", "openstack") == "gcp":
+        if cfg.env_backend.cloud_backend == "gcp":
             return  # GCP decoys are named/reaped by MHBench's own teardown; no stray-VM sweep needed
         import asyncio
         import openstack
 
         def _sync() -> None:
-            conn = openstack.connect(cloud=cfg.os_cloud)
+            conn = openstack.connect(cloud=cfg.env_backend.os_cloud)
             prefix = f"{experiment.experiment_name}-"
-            for server in conn.compute.servers():
-                if (server.name or "").startswith(prefix):
-                    continue  # a real MHBench-provisioned host, not a decoy
+            for server in conn.compute.servers(details=True):
+                name = server.name or ""
+                md = server.metadata or {}
+                # A decoy is either tagged arena_dynamic_host (the add-host path, which PREFIXES the name
+                # like a topology host) OR unprefixed (the legacy DeployDecoy actuator, now removed, made
+                # bare-named decoys). A real topology host is prefixed AND untagged -> skipped.
+                is_decoy = md.get("arena_dynamic_host") == "true" or not name.startswith(prefix)
+                if not is_decoy:
+                    continue
                 network_ids = {port.network_id for port in conn.network.ports(device_id=server.id)}
                 network_names = {conn.network.get_network(nid).name for nid in network_ids}
-                if not any(name.startswith(prefix) for name in network_names):
-                    continue
+                if not any(nm.startswith(prefix) for nm in network_names):
+                    continue  # not on this experiment's networks
                 conn.compute.delete_server(server, ignore_missing=True)
                 conn.compute.wait_for_delete(server, wait=120)
 
@@ -234,6 +244,45 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             await asyncio.get_event_loop().run_in_executor(None, _sync)
         except Exception:  # noqa: BLE001 — a decoy sweep failure must not block reclaiming the env's VMs
             pass
+
+    # -- dynamic topology mutation (defender-driven, during the run) ------------------------------
+    def supports_dynamic_topology(self) -> bool:
+        """MHBench honours EnvActionRequests via per-host CLI subcommands (below)."""
+        return True
+
+    async def add_host(self, experiment, deployed, request, cfg):
+        """Provision ONE host via MHBench (cloud op stays in MHBench — no god-key leaves the env) and
+        return its name/ip + a DEFENDER-SCOPED, box-relative SetupAccess so the box agent can configure
+        it in-env. role maps to the backend image inside MHBench (e.g. apache_vuln -> webserver image)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync, new_host_setup_access
+        res = await asyncio.to_thread(
+            _host_op_sync, "add-host", experiment.experiment_name, self.environment_spec, cfg,
+            name=request.name, role=(request.role or "decoy"), subnet=request.subnet)
+        ip, name = res.get("ip"), (res.get("name") or request.name)
+        return EnvActionResult(
+            kind=EnvActionKind.ADD_HOST, ok=bool(ip), name=name, ip=ip,
+            access=new_host_setup_access(name, ip, cfg) if ip else None,
+            error=None if ip else "MHBench add-host returned no ip")
+
+    async def rebuild_host(self, experiment, deployed, request, cfg):
+        """Rebuild one existing host from its base image (restore a compromised VM)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync
+        await asyncio.to_thread(_host_op_sync, "rebuild-host", experiment.experiment_name,
+                                self.environment_spec, cfg, target=request.target)
+        return EnvActionResult(kind=EnvActionKind.REBUILD_HOST, ok=True, name=request.target)
+
+    async def remove_host(self, experiment, deployed, request, cfg):
+        """Delete one existing host (returns its budget slot to the defender's pool)."""
+        import asyncio
+        from ...env_requests import EnvActionResult, EnvActionKind
+        from .deployer import _host_op_sync
+        await asyncio.to_thread(_host_op_sync, "remove-host", experiment.experiment_name,
+                                self.environment_spec, cfg, target=request.target)
+        return EnvActionResult(kind=EnvActionKind.REMOVE_HOST, ok=True, name=request.target)
 
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
@@ -243,8 +292,8 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         if lc:
             lc.emit(EnvironmentSignal.TEARING_DOWN)
         # Sweep stray decoy VMs on this experiment's networks first, so the network teardown below doesn't
-        # abort on a security group a decoy still holds "in use" (see _teardown_decoys).
-        await self._teardown_decoys(experiment, cfg)
+        # abort on a security group a decoy still holds "in use" (see _teardown_dynamic_hosts).
+        await self._teardown_dynamic_hosts(experiment, cfg)
         try:
             await teardown_environment(experiment, cfg)
         except Exception as e:  # noqa: BLE001

@@ -38,6 +38,7 @@ async def _stop_defender_process(experiment, process) -> None:
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_persister as _env_signal_persister
+from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -203,15 +204,15 @@ async def lifespan(app: FastAPI):
     global cfg, registry, _openstack_lock, _configure_lock, _collect_lock, _attacker_setup_lock, _deploy_buffer, _inflight_gate, _capacity
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
-    logger.warning("arena starting: cloud_backend=%s (config=%s)",
-                   cfg.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
+    logger.warning("arena starting: env_backend.cloud_backend=%s (config=%s)",
+                   cfg.env_backend.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
     # LLM keys into os.environ so plugin subprocesses (env={**os.environ,…}) inherit them, however the
     # harness was launched. The keys historically live in the Incalmo repo's .env; load from whichever
     # incalmo code dir(s) are configured (per-plugin now). Best-effort; an already-exported key still wins.
     for _incalmo_dir in (cfg.incalmo_strategy_dir, cfg.incalmo_llm_dir):
         if _incalmo_dir:
             load_dotenv(_incalmo_dir / ".env")
-    os.environ["OS_CLOUD"] = cfg.os_cloud
+    os.environ["OS_CLOUD"] = cfg.env_backend.os_cloud
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
@@ -219,18 +220,32 @@ async def lifespan(app: FastAPI):
     _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent C2-attacker bring-up (gated by requires_docker)
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
     _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments; overflow waits in QUEUED (priority-ordered)
-    if cfg.cloud_backend == "gcp":
-        # HARD GATE: a GCP manager must never run the all-projects OpenStack clean-slate.
-        logger.warning("cloud_backend=gcp — SKIPPING OpenStack clean-slate; this manager will not touch the shared OpenStack cloud")
-    else:
-        await _clean_slate()
+    # Always run clean-slate — the arena manages its OpenStack infra directly (the old gcp-skip gate is
+    # gone now that the backend is the environment's concern, not an arena-level switch). _clean_slate is
+    # internally best-effort, so it logs and continues if OpenStack isn't reachable.
+    await _clean_slate()
     # The registry is the tracker's source of truth: the VM count is derived on every check
     # from which experiments currently hold VMs (capacity._holds_vms), not from paired
     # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
     _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
                                 max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
-    yield
+    # Defender→environment action channel: a UDS-only listener (no TCP port, so no in-env VM can reach
+    # it) that services EnvActionRequest events from a running defender. Per-manager socket path keeps the
+    # two managers one host may run from colliding. Inert unless a defender arms the serving window.
+    _env_action_socket_path = resolve_socket_path(cfg)
+    _env_action_task = asyncio.create_task(
+        serve_env_actions(_env_action_socket_path, registry, cfg, _openstack_lock)
+    )
+    logger.warning("env-action channel listening on UDS %s", _env_action_socket_path)
+    try:
+        yield
+    finally:
+        _env_action_task.cancel()
+        try:
+            await _env_action_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — never let channel teardown mask shutdown
+            pass
     await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
 
 
@@ -437,9 +452,8 @@ async def _clean_slate() -> None:
     # shared OpenStack cloud's resources (all-projects wipe) and (b) pkill the OTHER manager's
     # in-flight MHBench/ansible subprocesses on this shared host. GCP experiments are torn down
     # per-experiment via MHBench (config.gcp.yaml); leftover GCP resources are handled there.
-    if getattr(cfg, "cloud_backend", "openstack") == "gcp":
-        logger.info("cloud_backend=gcp — skipping OpenStack clean-slate (isolated GCP manager)")
-        return
+    # (The old gcp-skip gate is removed: clean-slate always runs now that the backend is the environment's
+    # concern, not an arena switch.)
     # Reap MHBench provision/configure/collect subprocesses (+ their ansible children) left over from a
     # prior harness that died without cleaning up: orphaned to init, they keep hammering torn-down bastions
     # for the full check_if_host_up timeout (~18 min) and write stale host-logs into reused same-name output
@@ -596,7 +610,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # Defender teardown (harness-side cleanup, e.g. the box ES tunnel) runs before the environment
     # teardown. Best-effort, like the log collection above: a defender teardown failure must not block
     # reclaiming the environment's VMs. (Stray decoy VMs are reaped by the environment's own teardown -
-    # see MHBenchEnvironment._teardown_decoys - not here; deleting a VM is backend-specific and defenders
+    # see MHBenchEnvironment._teardown_dynamic_hosts - not here; deleting a VM is backend-specific and defenders
     # are backend-agnostic.)
     if experiment.defender:
         try:
@@ -858,8 +872,16 @@ async def _run_experiment(experiment: Experiment) -> None:
     deploy_slot_held = False
     try:
         vm_specs = await experiment.environment.capacity(experiment, cfg)
-        # Admission counts only the topology VMs (incl. the management host). VMs a plugin may
-        # deploy later (e.g. defender decoys) are not pre-reserved.
+        # Admission counts the topology VMs (incl. the management host) PLUS the defender's declared
+        # VM budget — the max extra hosts a running defender may spin up via EnvActionRequests (opt-in;
+        # default [] so a defender that never mutates topology reserves topology+0 and nothing changes).
+        # Pre-reserving the budget here is what lets a mid-run add_host draw from already-held capacity
+        # and never block or oversubscribe the cluster — closing the old "defender decoys are not
+        # pre-reserved" gap. Guarded getattr mirrors box_ingress(): a pre-merge defender requests none.
+        if experiment.defender is not None:
+            _vm_budget = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+            if _vm_budget:
+                vm_specs = list(vm_specs) + [tuple(s) for s in _vm_budget]
 
         def _record_reservation(res) -> None:
             # Runs INSIDE the tracker's lock at the moment of admission, so the registry
@@ -934,6 +956,21 @@ async def _run_experiment(experiment: Experiment) -> None:
             "defender box. Use a defender-capable (instrumented) environment, or remove the defender.",
         )
         return
+
+    # Second contract: a defender that declares a VM budget (it intends to mutate topology mid-run via
+    # EnvActionRequests) REQUIRES an environment that honours those events. Pairing a budget with a
+    # static environment is a contract violation — fail here, up front, rather than letting the defender
+    # discover its first add_host is unsupported mid-attack.
+    if experiment.defender is not None:
+        _budget = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+        if _budget and not experiment.environment.supports_dynamic_topology():
+            await _handle_failure(
+                experiment,
+                "Interface contract violated: the defender declares a VM budget (dynamic topology "
+                "mutation) but the environment does not support it. Use a dynamic-topology environment, "
+                "or remove the defender's defender_vm_budget().",
+            )
+            return
 
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # the foothold, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
@@ -1015,6 +1052,22 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
+                # Arm the dynamic topology-mutation window. Box-only execution: a defender that
+                # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
+                # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
+                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
+                # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
+                # not only during the attack. It stays open through the attack and closes at DEACTIVATE
+                # (finally). No token: the env channel is a UDS unreachable from in-env.
+                _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+                _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
+                if _env_dynamic:
+                    experiment._env_dynamic = True
+                    experiment._env_budget_remaining = len(_budget_specs)
+                    experiment._env_lifecycle = _env_lc(experiment)
+                    experiment._env_serving = True
+                    experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
+                    experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
                 defender_process = await run_defender(
                     experiment.defender,
                     experiment.deployed_environment,
@@ -1023,6 +1076,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                     bastion_ip,
                     defender_env_spec=_dfn_env_spec,
                     defender_access=_dfn_access,
+                    env_action_socket=(resolve_socket_path(cfg) if _env_dynamic else None),
                 )
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
@@ -1093,6 +1147,9 @@ async def _run_experiment(experiment: Experiment) -> None:
         except Exception:
             exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
 
+    # The env-mutation serving window was already opened before the defender's prepare() (so static decoy
+    # deploy during arming is honoured); it stays open through the attack and closes at DEACTIVATE (finally).
+
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
         process = await run_attacker(experiment.attacker, experiment, cfg, prepared)
@@ -1146,6 +1203,12 @@ async def _run_experiment(experiment: Experiment) -> None:
         status = ExperimentStatus.ERROR
         experiment.error = f"Error waiting on attacker process — {e}"
     finally:
+        # Close the env-mutation serving window first: the attack is over, so any late defender event is
+        # rejected (409) before we stop the defender process.
+        if getattr(experiment, "_env_dynamic", False) and getattr(experiment, "_env_serving", False):
+            experiment._env_serving = False
+            experiment._env_lifecycle.send(EnvironmentCommand.DEACTIVATE)
+            experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)
         if defender_process:
             try:
                 await _stop_defender_process(experiment, defender_process)

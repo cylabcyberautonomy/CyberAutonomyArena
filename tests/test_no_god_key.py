@@ -41,9 +41,8 @@ _BASELINE = {
     # were fixed on arena-refactor / arena-refactor-defender and their fixes are now MERGED here — they
     # consume the injected scoped SetupAccess and no longer read the god key, so they are OUT of the
     # baseline (the guard is strict for them now).
-    # Velociraptor — DEFERRED: its server runs on the bastion (can't be reached by a scoped key); the
-    # fix is moving the server onto the defender box, then it consumes SetupAccess. Remove after that.
-    "defender/plugins/velociraptor/velociraptor.py": "deferred: server-on-bastion, pending bastion->box migration",
+    # Velociraptor — FIXED (out of baseline): its server runs on the defender box reached via the injected
+    # scoped defender key (box_access.ssh_key -> self._ssh_key in setup()); the old id_ed25519 fallback is gone.
     # Traffic — TABLED: needs its own victims-only scoped key (no adversary/agent, lower risk). Remove
     # when the traffic scoped key lands.
     "traffic/plugins/caldera_human/caldera_human.py": "tabled: needs a victims-only traffic scoped key",

@@ -383,12 +383,12 @@ def test_defender_canary_build_config_contract():
 
 
 def test_defender_velociraptor_build_config_contract():
-    """Velociraptor is the least MHBench-coupled defender (a good early refactor target);
-    lock its build_config shape too."""
+    """Velociraptor now builds its monitored estate from the arena-injected defender_env_spec (in
+    setup()), not a topology parse — so build_config carries NO topology_spec (backend-agnostic)."""
     dfn = DefenderPlugin._registry["velociraptor"].model_validate({"type": "velociraptor"})
     built = dfn.build_config("ci_exp", FAKE_ENV)
     assert built["experiment_name"] == "ci_exp"
-    assert built["topology_spec"] == FAKE_ENV.topology_spec
+    assert "topology_spec" not in built  # migrated to the injected defender_env_spec
     assert "response_mode" in built
 
 
@@ -532,25 +532,186 @@ def test_environment_plugin_lifecycle_and_signals():
     assert lc.status == EnvironmentSignal.DEPLOYED
     assert lc.history == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
     assert seen == [EnvironmentSignal.DEPLOYING, EnvironmentSignal.DEPLOYED]
-    assert {"Deploying", "Deployed", "Configuring", "Configured", "TearingDown", "TornDown", "Failed"} \
-        == {s.value for s in EnvironmentSignal}
+    assert {"Deploying", "Deployed", "Configuring", "Configured", "Serving", "Idle",
+            "TearingDown", "TornDown", "Failed"} == {s.value for s in EnvironmentSignal}
 
 
 def test_environment_commands_arena_to_env():
-    """The arena also has commands it SENDS to the environment (Provision/Configure/Teardown),
-    recorded for an auditable command/ack trace. There is deliberately NO run/start command — the
-    environment just idles as VMs once configured."""
+    """The arena has commands it SENDS to the environment, recorded for an auditable command/ack trace.
+    The environment now HAS an active phase: between CONFIGURED and teardown the arena ACTIVATEs it as a
+    request-serving window (a running defender may mutate the topology via EnvActionRequest events) and
+    DEACTIVATEs it when the attack ends — it is not a busy loop, just the window in which env-mutation
+    events are honoured."""
     from arena.environment import EnvironmentLifecycle, EnvironmentCommand
     cmds = {c.value for c in EnvironmentCommand}
-    assert cmds == {"Provision", "Configure", "Teardown"}
-    assert not any("run" in c.lower() or "start" in c.lower() for c in cmds), \
-        "environment must have no run/start command"
+    assert cmds == {"Provision", "Configure", "Activate", "Deactivate", "Teardown"}
     sent = []
     lc = EnvironmentLifecycle(on_command=lambda c: sent.append(c))
     lc.send(EnvironmentCommand.PROVISION)
+    lc.send(EnvironmentCommand.ACTIVATE)
+    lc.send(EnvironmentCommand.DEACTIVATE)
     lc.send(EnvironmentCommand.TEARDOWN)
-    assert lc.commands == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
-    assert sent == [EnvironmentCommand.PROVISION, EnvironmentCommand.TEARDOWN]
+    assert lc.commands == [EnvironmentCommand.PROVISION, EnvironmentCommand.ACTIVATE,
+                           EnvironmentCommand.DEACTIVATE, EnvironmentCommand.TEARDOWN]
+    assert sent == lc.commands
+
+
+def test_environment_request_trace_and_primitive_defaults():
+    """The env↔defender dynamic interface: a running defender sends EnvActionRequest events; the
+    lifecycle records each serviced one (experiment data), and the EnvironmentPlugin primitives default
+    to UNSUPPORTED so a static environment is unaffected until a backend opts in."""
+    import asyncio
+    from arena.environment import (
+        EnvironmentLifecycle, EnvActionRequest, EnvActionResult, EnvActionKind, EnvRequestUnsupported,
+    )
+    from arena.environment.plugins.base import EnvironmentPlugin
+
+    # request DTO validates from a plain dict (how the Defense-repo orchestrator emits it)
+    req = EnvActionRequest.model_validate({"kind": "AddHost", "name": "decoy0", "role": "apache_vuln"})
+    assert req.kind is EnvActionKind.ADD_HOST and req.name == "decoy0"
+    assert EnvActionResult(kind=req.kind, ok=True, name="decoy0", ip="1.2.3.4").ok
+
+    # request trace
+    rec = []
+    lc = EnvironmentLifecycle(on_request=rec.append)
+    lc.record_request({"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"})
+    assert lc.requests == rec == [{"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"}]
+
+    # primitive defaults: unsupported + static-topology flag, so a non-dynamic env is unaffected
+    class _Static(EnvironmentPlugin, config_type="static_env_contract_test"):
+        environment_spec: str = "x"
+    st = _Static(environment_spec="x")
+    assert st.supports_dynamic_topology() is False
+    for kind in (EnvActionKind.ADD_HOST, EnvActionKind.REMOVE_HOST, EnvActionKind.REBUILD_HOST):
+        try:
+            asyncio.run(st.handle_env_request(None, None, EnvActionRequest(kind=kind), None))
+            assert False, f"{kind} should be unsupported by default"
+        except EnvRequestUnsupported:
+            pass
+
+
+def test_env_action_handler_window_budget():
+    """The defender→env action handler enforces, in order: experiment existence (404), an OPEN serving
+    window (409), and the pre-reserved VM budget ceiling; it records every serviced event and degrades an
+    unsupported primitive to ok=False instead of crashing. No token check — the UDS is the boundary."""
+    import asyncio
+    from types import SimpleNamespace
+    from arena.env_action_server import handle_env_action
+    from arena.environment import EnvActionResult
+    from arena.environment.lifecycle import EnvironmentLifecycle
+    from arena.environment.plugins.base import EnvironmentPlugin
+
+    class _DynEnv(EnvironmentPlugin, config_type="dyn_env_contract_test"):
+        environment_spec: str = "x"
+        def supports_dynamic_topology(self):
+            return True
+        async def add_host(self, experiment, deployed, request, cfg):
+            return EnvActionResult(kind=request.kind, ok=True, name=request.name or "decoy", ip="192.168.9.9")
+        async def remove_host(self, experiment, deployed, request, cfg):
+            return EnvActionResult(kind=request.kind, ok=True, name=request.target)
+        async def rebuild_host(self, experiment, deployed, request, cfg):
+            return EnvActionResult(kind=request.kind, ok=True, name=request.target)
+
+    lc = EnvironmentLifecycle()
+    exp = SimpleNamespace(experiment_name="ci_dyn", environment=_DynEnv(environment_spec="x"),
+                          deployed_environment=None,
+                          _env_serving=True, _env_budget_remaining=1, _env_lifecycle=lc)
+
+    class _Reg:
+        def get(self, name):
+            if name != "ci_dyn":
+                raise KeyError(name)
+            return exp
+
+    reg = _Reg()
+    run = lambda p: asyncio.run(handle_env_action(p, registry=reg, cfg=None, lock=None))  # noqa: E731
+    add = {"experiment_name": "ci_dyn", "action": {"kind": "AddHost", "name": "decoy0"}}
+
+    assert run({"experiment_name": "nope", "action": {"kind": "AddHost"}})["status"] == 404
+    exp._env_serving = False
+    assert run(add)["status"] == 409                                 # closed window rejects everything
+    exp._env_serving = True
+
+    r = run(add)                                                     # success: ok, ip, budget decrement, traced
+    assert r["status"] == 200 and r["ok"] is True and r["ip"] == "192.168.9.9"
+    assert exp._env_budget_remaining == 0
+    r2 = run(add)                                                    # over budget -> graceful ok=False
+    assert r2["ok"] is False and "budget" in r2["error"]
+    run({"experiment_name": "ci_dyn", "token": "secret-token",
+         "action": {"kind": "RemoveHost", "target": "decoy0"}})     # remove returns a budget slot
+    assert exp._env_budget_remaining == 1
+    assert len(lc.requests) >= 3                                     # every serviced event recorded
+
+    # an environment that does not support the primitive degrades to ok=False, not a crash
+    class _Static(EnvironmentPlugin, config_type="static_env_action_test"):
+        environment_spec: str = "x"
+    exp.environment = _Static(environment_spec="x")
+    exp._env_budget_remaining = 1
+    assert run(add)["ok"] is False
+
+
+def test_mhbench_dynamic_topology_primitives(monkeypatch):
+    """The MHBench env plugin fulfils EnvActionRequests by shelling to per-host CLI subcommands:
+    supports_dynamic_topology() is True; add_host returns name/ip + a box-relative scoped SetupAccess;
+    rebuild/remove pass the target through. Subprocess is stubbed (no cloud)."""
+    import asyncio
+    from arena.environment import EnvActionRequest, EnvActionKind, build_environment
+    import arena.environment.plugins.mhbench.deployer as dep
+
+    env = build_environment(ENV)
+    assert env.supports_dynamic_topology() is True
+
+    calls = {}
+
+    def fake_host_op(op, exp, spec, cfg, **kw):
+        calls[op] = kw
+        return {"name": kw.get("name") or "decoy0", "ip": "192.168.0.42"} if op == "add-host" else {"ok": True}
+
+    monkeypatch.setattr(dep, "_host_op_sync", fake_host_op)
+    monkeypatch.setattr(dep, "_mhbench_ssh_key", lambda cfg: "/scoped/defender_key")
+
+    exp = type("E", (), {"experiment_name": "ci_dyn"})()
+    add = asyncio.run(env.add_host(exp, None, EnvActionRequest(kind=EnvActionKind.ADD_HOST, name="decoy0", role="apache_vuln", subnet="victim_net"), None))
+    assert add.ok and add.ip == "192.168.0.42" and add.name == "decoy0"
+    assert add.access is not None and add.access.host == "192.168.0.42" and add.access.ssh_common_args == ""  # box-relative
+    assert calls["add-host"] == {"name": "decoy0", "role": "apache_vuln", "subnet": "victim_net"}
+
+    reb = asyncio.run(env.rebuild_host(exp, None, EnvActionRequest(kind=EnvActionKind.REBUILD_HOST, target="192.168.0.11"), None))
+    assert reb.ok and reb.name == "192.168.0.11" and calls["rebuild-host"] == {"target": "192.168.0.11"}
+    rem = asyncio.run(env.remove_host(exp, None, EnvActionRequest(kind=EnvActionKind.REMOVE_HOST, target="192.168.0.12"), None))
+    assert rem.ok and calls["remove-host"] == {"target": "192.168.0.12"}
+
+
+def test_defender_box_only_execution_enforced():
+    """ENFORCEMENT (box execution is the ONLY path): the box-executing defenders have NO arena-execution
+    code — a runner must not call openstack.connect(), construct OpenstackOrchestrator/GCPOrchestrator, or
+    build an AnsibleRunner to reach victims from the arena. And each declares executes_from_box so the
+    arena always deploys the box agent + arms the env channel. This turns "runs from the box" from a
+    convention into an invariant: re-introducing an arena-execution path fails this test."""
+    import pathlib
+    from arena.defender.plugins.base import DefenderPlugin
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "arena" / "defender" / "plugins"
+    forbidden = ("openstack.connect(", "OpenstackOrchestrator(", "GCPOrchestrator(", "AnsibleRunner(",
+                 "import OpenstackOrchestrator", "import GCPOrchestrator", "import openstack")
+    for plug in ("llm_soc", "deception", "prompt_injection"):
+        src = (root / plug / "runner.py").read_text()
+        for bad in forbidden:
+            assert bad not in src, f"{plug}/runner.py has a re-introduced arena-execution path: {bad!r}"
+
+    for ct in ("llm_soc", "deception", "prompt_injection"):
+        cls = DefenderPlugin._registry[ct]
+        assert getattr(cls, "executes_from_box", False) is True, f"{ct} must set executes_from_box=True"
+    # base default off — checks-only / self-contained defenders don't box-execute via this path
+    assert DefenderPlugin.executes_from_box is False
+
+
+def test_defender_vm_budget_optional_default():
+    """defender_vm_budget() is opt-in: the base default is [] (no extra VMs), so a defender that never
+    changes topology needs no change and reserves topology+0 at admission."""
+    from arena.defender.plugins.base import DefenderPlugin
+    # DefenderPlugin is abstract; the method ignores self, so call it unbound with a dummy self.
+    assert DefenderPlugin.defender_vm_budget(object()) == []
 
 
 def test_experiment_environment_property_returns_plugin():
@@ -579,8 +740,10 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
         pytest.skip(f"{ENV_SPEC} not found")
 
     env = build_environment(ENV)
-    deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM)
-    cfg = SimpleNamespace(mhbench_dir=md, mhbench_config=None)
+    deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM,
+                                   project_name="ci_proj")
+    from arena.config import EnvBackendConfig
+    cfg = SimpleNamespace(mhbench_dir=md, env_backend=EnvBackendConfig(mhbench_config=None))
 
     # method presence on the base contract
     for m in ("attacker_spec", "attacker_setup_access", "defender_spec", "defender_setup_access"):
@@ -603,11 +766,58 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert names and "attacker" not in names  # kali excluded
     assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
     assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
+    # Env-resolved subnet structure (the decoy defenders build Perry's Network from this, NOT the backend
+    # topology — topology.py is gone). The env resolves the backend network/sg NAMES + per-host users.
+    assert dspec.subnets, "defender_spec must carry the subnet structure"
+    assert dspec.management_sg == "ci_proj-management_sg"
+    ws = next((s for s in dspec.subnets if any(h.role == "webserver" for h in s.hosts)), None)
+    assert ws is not None and ws.network == f"ci_proj-{ws.name}" and ws.sec_group == f"ci_proj-{ws.name}_sg"
+    assert any("tomcat" in h.users for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
+    # The attacker's own segment is NOT in the defended estate (a real blue team doesn't know where the
+    # red team sits) — so there's no attacker subnet and no "attacker" field to leak its position.
+    assert all(s.name != "attacker_subnet" for s in dspec.subnets)
+    assert all(not any(h.role == "kali" for h in s.hosts) for s in dspec.subnets)
+    assert not any(hasattr(s, "attacker") for s in dspec.subnets)
     # defender: setup access = one SetupAccess per victim (+ the defender box), with creds
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     acc_names = {a.name for a in dacc}
     assert names <= acc_names and "defender_box" in acc_names
     assert all(a.ssh_key for a in dacc)
+
+
+def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
+    """_defender_subnets resolves the DEFENDED estate only, backend-agnostically: it excludes the
+    attacker's segment AND the defender's own box subnet, resolves backend network/sg names, carries
+    per-host users, and maps the topology's `perimeter` marker (NOT attacker adjacency) through. Fully
+    self-contained (synthetic topology) so it doesn't depend on which MHBench checkout is configured."""
+    from arena.environment.plugins.mhbench.deployer import _defender_subnets
+    topo = {
+        "name": "net0",
+        "networks": [{"name": "net0", "subnets": [
+            {"name": "webserver_subnet", "perimeter": True, "hosts": [
+                {"name": "webserver0", "vm_type": "webserver_instrumented", "ip_address": "10.0.0.10"}]},
+            {"name": "corporate_subnet", "hosts": [
+                {"name": "database0", "vm_type": "database_instrumented", "ip_address": "10.0.1.10"}]},
+            {"name": "attacker_subnet", "hosts": [
+                {"name": "attacker", "vm_type": "kali_running", "ip_address": "10.0.9.10"}]},
+            {"name": "defender_subnet", "hosts": [
+                {"name": "defender", "vm_type": "ubuntu_base", "ip_address": "10.0.250.10"}]},
+        ]}],
+    }
+    p = tmp_path / "topo.json"
+    p.write_text(json.dumps(topo))
+    subnets, net_name, mgmt_sg = _defender_subnets(p, "proj")
+
+    names = {s.name for s in subnets}
+    assert names == {"webserver_subnet", "corporate_subnet"}  # attacker + defender box excluded
+    assert net_name == "net0" and mgmt_sg == "proj-management_sg"
+    ws = next(s for s in subnets if s.name == "webserver_subnet")
+    assert ws.perimeter is True and ws.network == "proj-webserver_subnet" and ws.sec_group == "proj-webserver_subnet_sg"
+    assert ws.hosts[0].users == ["ubuntu", "tomcat"] and ws.hosts[0].telemetry is True
+    corp = next(s for s in subnets if s.name == "corporate_subnet")
+    assert corp.perimeter is False  # only the marked tier is the bait target
+    # the attacker's position never leaks: no subnet carries an attacker flag
+    assert all(not hasattr(s, "attacker") for s in subnets)
 
 
 def _deployed_for(plugin_name):
@@ -633,7 +843,8 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
         pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
                     f"infra guarantees are covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
-    cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"))
+    from arena.config import EnvBackendConfig
+    cfg = SimpleNamespace(mhbench_dir=(_mhbench_dir() or "/tmp"), env_backend=EnvBackendConfig(gcp_relay_ip="10.0.1.10"))
 
     # the generic infra methods are on the base contract. There is no telemetry_ingest/program_telemetry/
     # telemetry_relay_ip: the defender declares the box port it needs via box_ingress(), and
@@ -670,8 +881,9 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
         pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
                     f"scoped-credential invariant is covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
-    cfg = SimpleNamespace(gcp_relay_ip="10.0.1.10", mhbench_dir=(_mhbench_dir() or "/tmp"),
-                          mhbench_config=None)
+    from arena.config import EnvBackendConfig
+    cfg = SimpleNamespace(mhbench_dir=(_mhbench_dir() or "/tmp"),
+                          env_backend=EnvBackendConfig(gcp_relay_ip="10.0.1.10", mhbench_config=None))
     deployed = _deployed_for(plugin_name)
 
     acred = env.attacker_credential(deployed, cfg)

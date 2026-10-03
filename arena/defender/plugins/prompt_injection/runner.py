@@ -30,7 +30,8 @@ strategy triggers the Falco install below (see _NEEDS_FALCO); the static
 variants get NoTelemetry and never touch Elasticsearch.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
-  experiment_name, topology_spec, deception_dir, management_ip, log_dir
+  experiment_name, deception_dir, management_ip, log_dir,
+  and the arena-injected defender_env_spec (the env run spec Perry's Network is built from)
 """
 import json
 import os
@@ -49,22 +50,16 @@ if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
 # The three defender runners are standalone scripts, not package modules, so the
-# plugins/ directory (which holds the shared topology builder) has to go on
+# plugins/ directory (which holds the shared perry_network builder) has to go on
 # sys.path explicitly - the same way deception_dir does above.
 _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
 
-from topology import (
-    build_network,
-    host_users,
-)
+from perry_network import build_network_from_spec
 
-import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
-from ansible.AnsibleRunner import AnsibleRunner
-from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
@@ -75,8 +70,6 @@ from defender.arsenal.CountArsenal import CountArsenal
 from defender.telemetry import FalcoBasicAnalysis
 from defender.telemetry.NoTelemetry import NoTelemetry
 from defender.telemetry.telemetry_service import TelemetryService
-from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
-# GCPOrchestrator is imported lazily inside the `cloud_backend == "gcp"` branch below.
 # It only exists on the Defense repo's `gcp-backend` branch; the OpenStack batch runs
 # `fix/parallel-decoy-deploy`, which lacks it, so a top-level import here crashed every
 # OpenStack defender on startup (ModuleNotFoundError) — see runbook §7. The usage is
@@ -136,8 +129,8 @@ perry_cfg.experiment_name = experiment_name
 # PERRY SEAM (cross-repo, not harness-side): same as llm_soc/runner.py — the only backend read left
 # is choosing the concrete orchestrator + its cloud handle, both of which live in
 # Defense-MHBench-compatible. Everything else here is backend-agnostic.
-cloud_backend = getattr(perry_cfg, "cloud_backend", "openstack")
-openstack_conn = openstack.connect() if cloud_backend != "gcp" else None
+# No cloud handle: the defender holds NO cloud credential (the environment touches the cloud on its
+# behalf). Backend choice is entirely the environment's concern now.
 management_ip = config["management_ip"]
 # The defender reads its OWN per-experiment Elasticsearch on the defender box, over the ssh -L tunnel the
 # plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
@@ -152,33 +145,15 @@ es_conn = Elasticsearch(es_url, request_timeout=30)
 falco_index = config.get("falco_index", "falco")
 sysflow_index = config.get("sysflow_index", "sysflow")
 
-# bastion_ip is THIS experiment's own bastion floating IP (from MHBench
-# provisioning) - not the same as management_ip above (the harness's own fixed
-# address). AnsibleRunner needs the bastion specifically: its inventory's
-# ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
-# experiment's internal 192.168.x.x hosts at all.
-# SCOPED defender key from the harness-injected SetupAccess (defender_setup_access): fail closed,
-# never fall back to perry_cfg's management (god) key on disk. AnsibleRunner uses this key for both
-# its bastion `-W` jump and the victim hop; the forward-only jump creds make that safe.
-def _scoped_ssh_key(cfg_dict):
-    for a in cfg_dict.get("defender_setup_access", []):
-        if a.get("ssh_key"):
-            return os.path.expanduser(a["ssh_key"])
-    raise RuntimeError("no scoped ssh_key in defender_setup_access; refusing to use the management key")
-
-ansible_runner = AnsibleRunner(
-    ssh_key_path=_scoped_ssh_key(config),
-    management_ip=config["bastion_ip"],
-    ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
-    log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
-)
+# No harness-side AnsibleRunner / scoped victim key here any more: the defender does NOT reach victims
+# from the arena. The box agent (deployed in prepare_box_agent) holds the scoped key and runs ansible
+# from inside the environment; the controller only talks to the box agent + the env UDS channel.
 
 
-topology_spec = config.get("topology_spec")
-network = None
-if topology_spec:
-    topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
+# Build Perry's Network from the ENVIRONMENT-produced run spec (defender_env_spec), not a backend
+# topology: the env resolved the Neutron network/sg names + per-host users. Backend-agnostic defender
+# (see plugins/perry_network.py). telemetry_hosts is unused here (this runner never repoints sensors).
+network, _telemetry_hosts = build_network_from_spec(config.get("defender_env_spec"))
 
 if network is not None and strategy_name in _NEEDS_FALCO:
     # Box mode: the environment owns sensor shipping (falcosidekick -> relay -> box:9200), so the
@@ -208,26 +183,12 @@ print(
     flush=True,
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-if cloud_backend == "gcp":
-    from defender.orchestrator.GCPOrchestrator import GCPOrchestrator
-    orchestrator = GCPOrchestrator(
-        ansible_runner=ansible_runner,
-        external_elasticsearch_server=es_url,
-        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-        config=perry_cfg,
-        network=network,
-        action_logger=action_logger,
-    )
-else:
-    orchestrator = OpenstackOrchestrator(
-        openstack_conn=openstack_conn,
-        ansible_runner=ansible_runner,
-        external_elasticsearch_server=es_url,
-        elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-        config=perry_cfg,
-        network=network,
-        action_logger=action_logger,
-    )
+# BOX-ONLY EXECUTION — the single, enforced path. No cloud credential, no arena victim access: the
+# payload-named decoy VM-create goes to the environment (UDS), host actions to the box agent, which runs
+# them from INSIDE the environment. No legacy arena-execution orchestrator.
+from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+orchestrator = RemoteEnvOrchestrator.from_config(
+    config, experiment_name=experiment_name, network=network, action_logger=action_logger)
 
 strategy = strategy_cls(
     arsenal=arsenal,

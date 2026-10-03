@@ -17,11 +17,20 @@ from ..base import DefenderPlugin, PreparedDefender
 
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     type: Literal["deception"]
-    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "topology_spec"})
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy"})
     code_dir_field = "deception_dir"          # Defense/Perry repo for this defender (per-plugin)
+    executes_from_box = True                   # box-only execution: deploy the box agent + arm the env channel
     code_python_field = "deception_python"
     strategy: str  # e.g. "DoNothing", "StaticLayered", "ReactiveLayered"
     arsenal: dict[str, int] = {}
+    max_decoys: int = 5  # upper bound on decoys this run may deploy; pre-reserved at admission so a
+    #                      mid-run/arming add_host draws from already-held capacity (never blocks).
+
+    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
+        """Pre-reserve one m1.small (1 vCPU / 2048 MB / 20 GB) per potential decoy. The env's add_host
+        draws from this budget; add_host beyond it is rejected. A DeployDecoy strategy needs this (>0);
+        a non-decoy strategy can set max_decoys=0."""
+        return [(1, 2048, 20)] * max(0, self.max_decoys)
 
     @field_validator("strategy", mode="before")
     @classmethod
@@ -93,11 +102,12 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
     ) -> dict:
+        # No topology_spec: this defender builds its Perry Network from the arena-injected
+        # defender_env_spec (the env resolves backend names), not a backend topology.
         return {
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "arsenal": self.arsenal,
-            "topology_spec": environment.topology_spec if environment else None,
         }
 
     async def prepare(
@@ -111,6 +121,12 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         #    Blocking SSH work, so off the event loop.
         await asyncio.get_event_loop().run_in_executor(
             None, self.prepare_box_es, config_path, experiment_name, cfg)
+        # 1b) Deploy + start the box agent on the defender box (box-only execution) BEFORE external arming,
+        #     so the decoy deploy below (which routes host actions to the box agent) can reach it.
+        import json as _json
+        if _json.loads(Path(config_path).read_text()).get("env_action_socket"):
+            await asyncio.get_event_loop().run_in_executor(
+                None, self.prepare_box_agent, config_path, experiment_name, cfg)
         # 2) EXTERNAL arming: run the strategy's prepare phase in the deception venv to completion. For a
         #    static/naive strategy (Perry Strategy.ARMS_IN_SETUP) this DEPLOYS the decoys + plants
         #    honey-creds/fake data now; for a reactive strategy it is a no-op (it arms inside its loop).
@@ -156,6 +172,98 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     @staticmethod
     def _es_tunnel_pidfile(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "es_tunnel.pid"
+
+    # -- box agent deploy (the defender's in-environment effector) ---------------------------------
+    # Copied per dynamic-defender plugin (box_agent_install.sh co-located), like prepare_box_es. Ships the
+    # Perry runtime to the bare box, starts the agent on box:8900, opens a harness->box ssh -L tunnel (the
+    # box is in-env, only reachable via the bastion), and injects box_agent_host/port/token into the config
+    # the runner reads so RemoteEnvOrchestrator.from_config can reach it. NOT YET LIVE-VALIDATED.
+    def _box_agent_tunnel_pidfile(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        return output_root(experiment_name, cfg) / experiment_name / "defender" / "box_agent_tunnel.pid"
+
+    def prepare_box_agent(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
+        import json as _json
+        import secrets
+        import shlex
+        import socket
+        import time
+
+        cfgd = _json.loads(Path(config_path).read_text())
+        box = (cfgd.get("defender_env_spec") or {}).get("box") or {}
+        box_ip = box.get("ip")
+        if not box_ip:
+            raise RuntimeError("no defender box in defender_env_spec; box agent requires one")
+        access = next((a for a in cfgd.get("defender_setup_access", []) if a.get("host") == box_ip), None)
+        if not access or not access.get("ssh_key"):
+            raise RuntimeError(f"defender box {box_ip} present but no SetupAccess with an ssh_key")
+        key = os.path.expanduser(access["ssh_key"])
+        common = shlex.split(access.get("ssh_common_args") or "")
+        user = access.get("user", "root")
+        port = str(access.get("port", 22))
+        ssh_opts = ["-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null", "-p", port, *common]
+        ssh_base = ["ssh", *ssh_opts]
+        target = f"{user}@{box_ip}"
+        repo_dir = str(self._code_dir(cfg))
+
+        # 1. ship ONLY the ansible/ YAML tree + the standalone agent (the self-contained agent imports no
+        #    Perry Python — which needs py3.10+ — so the box's py3.8 is fine). Via the bastion jump.
+        rsync_e = "ssh " + " ".join(shlex.quote(o) for o in ssh_opts)
+        subprocess.run(
+            ["rsync", "-a", "--delete", "-e", rsync_e, "--exclude", ".git", "--exclude", "__pycache__",
+             repo_dir.rstrip("/") + "/ansible/", f"{target}:/root/ansible/"],
+            check=True, timeout=600)
+        agent_src = Path(repo_dir) / "defender" / "box_agent" / "agent.py"
+        subprocess.run([*ssh_base, target, "cat > /root/box_agent_agent.py"],
+                       input=agent_src.read_text(), text=True, check=True, timeout=60)
+        # 2. ship the scoped key the box agent's AnsibleRunner uses to reach victims (box -> victim direct).
+        subprocess.run([*ssh_base, target, "cat > /root/scoped_key && chmod 600 /root/scoped_key"],
+                       input=Path(key).read_text(), text=True, check=True, timeout=60)
+        # 3. write + ship the box-agent config.
+        token = secrets.token_urlsafe(24)
+        box_cfg = {
+            "token": token, "host": "127.0.0.1", "port": 8900,
+            "ssh_key_path": "/root/scoped_key", "ansible_dir": "/root/ansible", "log_dir": "/root",
+            # A decoy's SysFlow exports to the box's OWN ES, reached from the decoy at the box's in-env
+            # address (the box runs ES on :9200 from prepare_box_es). Plain HTTP, no auth (box ES has
+            # security disabled). NOTE live-unknown: decoy->box:9200 routing + box ES binding 0.0.0.0.
+            "es_address": f"http://{box_ip}:9200",
+            "es_index": cfgd.get("sysflow_index", "sysflow"),
+        }
+        subprocess.run([*ssh_base, target, "cat > /root/box_agent_config.json"],
+                       input=_json.dumps(box_cfg), text=True, check=True, timeout=60)
+        # 4. ship + run the install/start script (idempotent).
+        script = (Path(__file__).parent / "box_agent_install.sh").read_text()
+        subprocess.run([*ssh_base, target, "cat > /root/box_agent_install.sh && chmod +x /root/box_agent_install.sh"],
+                       input=script, text=True, check=True, timeout=60)
+        subprocess.run([*ssh_base, target, "/root/box_agent_install.sh"], check=True, timeout=600)
+        # 5. open a harness->box:8900 ssh -L tunnel (box is in-env, reachable only through the bastion).
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            lport = s.getsockname()[1]
+        tunnel = subprocess.Popen([*ssh_base, "-N", "-L", f"{lport}:localhost:8900", target],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        pidfile = self._box_agent_tunnel_pidfile(experiment_name, cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(tunnel.pid))
+        # 6. wait for the agent's /health through the tunnel.
+        import urllib.request
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{lport}/health", timeout=5) as r:
+                    if r.status == 200:
+                        break
+            except Exception:  # noqa: BLE001
+                time.sleep(3)
+        else:
+            raise RuntimeError(f"box agent did not answer /health on {box_ip}:8900 within 120s")
+        # 7. inject the reachable host/port/token into the config the runner reads.
+        cfgd["box_agent_host"] = "127.0.0.1"
+        cfgd["box_agent_port"] = lport
+        cfgd["box_agent_token"] = token
+        Path(config_path).write_text(_json.dumps(cfgd, indent=2))
+        return {"box_agent_host": "127.0.0.1", "box_agent_port": lport}
 
     def prepare_box_es(self, config_path: Path, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
         """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.

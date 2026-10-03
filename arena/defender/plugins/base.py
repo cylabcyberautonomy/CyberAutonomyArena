@@ -46,6 +46,12 @@ class DefenderPlugin(BaseModel):
     code_dir_field: ClassVar[Optional[str]] = None
     code_python_field: ClassVar[Optional[str]] = None
 
+    # Whether this defender executes its actions FROM THE DEFENDER BOX (in-env) via the box agent +
+    # the env action channel, rather than from the arena host. When True the arena always deploys the box
+    # agent and arms the env channel (box execution is the ONLY path — there is no arena-execution
+    # orchestrator any more). Checks-only/self-contained defenders (canary, velociraptor) leave it False.
+    executes_from_box: ClassVar[bool] = False
+
     def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
         return cfg.plugin_dir(self.code_dir_field)
 
@@ -89,6 +95,21 @@ class DefenderPlugin(BaseModel):
         nothing returns {} (default) and opens ZERO box ports. Config-aware: e.g. a diagnostic-only
         canary that runs no telemetry checks opens nothing."""
         return {}
+
+    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
+        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
+        specs — the same shape EnvironmentPlugin.capacity() returns, so the arena simply appends them to
+        the topology's footprint at admission. The cluster then holds room for `topology + this budget`
+        BEFORE the experiment is admitted, so every mid-run add_host draws from an already-reserved pool
+        and can never block or oversubscribe; the arena rejects an add that would exceed the ceiling.
+
+        OPT-IN, like box_ingress(): a defender that never changes topology (canary, velociraptor, a
+        passive SOC) returns [] (default) and needs no other change — the whole dynamic-host path is
+        inert for it (topology + 0 reserved, no env↔defender dynamic contract). Only a defender that
+        actually requests hosts (a deception/decoy strategy) overrides this. Pairing a non-empty budget
+        with an environment whose supports_dynamic_topology() is False is a contract violation the arena
+        catches at deploy time."""
+        return []
 
     async def setup(
         self,
@@ -152,7 +173,7 @@ class DefenderPlugin(BaseModel):
         NOTE: stray VMs a defender stood up outside the topology (decoys) are NOT the
         defender's problem to reap - deleting a VM is backend-specific, and defenders are
         backend-agnostic. The ENVIRONMENT sweeps those on its own networks as the first
-        step of its teardown (see MHBenchEnvironment._teardown_decoys)."""
+        step of its teardown (see MHBenchEnvironment._teardown_dynamic_hosts)."""
 
     # ------------------------------------------------------------------
     # Readiness handshake

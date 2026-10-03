@@ -54,7 +54,7 @@ def resolve_topology_path(environment_spec: str, cfg) -> Path:
 
 def _mhb_config_args(cfg) -> list:
     # Route MHBench at a non-default backend config (e.g. GCP). Group option, before the subcommand.
-    return ["--config", cfg.mhbench_config] if getattr(cfg, "mhbench_config", None) else []
+    return ["--config", cfg.mhbench_config] if cfg.env_backend.mhbench_config else []
 
 
 def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
@@ -62,7 +62,7 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
     import yaml  # local import: only the attacker-spec adapter needs it
     default = str(Path("~/.ssh/id_ed25519").expanduser())
     try:
-        rel = getattr(cfg, "mhbench_config", None) or "config/config.yaml"
+        rel = cfg.env_backend.mhbench_config or "config/config.yaml"
         data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
         backend = data.get("backend", "openstack")
         block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
@@ -153,6 +153,79 @@ def defender_box_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
 def _role_from_name(name: str) -> Optional[str]:
     """Derive a role from a host name by stripping the trailing index (webserver0 -> webserver)."""
     return re.sub(r"\d+$", "", name) or None
+
+
+def _host_users(vm_type: str) -> list[str]:
+    """Login accounts a host of this MHBench vm_type actually has — the ENVIRONMENT knows them (the
+    defender must not guess backend vm_types). A decoy defender plants its honey-credential trail by
+    iterating a host's users (an ssh key in ~/.ssh + a matching ~/.ssh/config entry pointing at the
+    decoy); over an empty list that does nothing, so the decoys got honey accounts but nothing pointed
+    at them. Names come from what MHBench bakes: `ubuntu` on every cloud image, plus `tomcat` on
+    webservers (created by setup_struts.yml — the account a Struts RCE lands in). The attacker box
+    deliberately gets none: planting credentials there hands them to the attacker rather than baiting a
+    lateral move. (Ported from the old defender-side topology.py shim — this knowledge belongs to the
+    env.)"""
+    if vm_type.startswith("kali"):
+        return []
+    if vm_type.startswith("webserver"):
+        return ["ubuntu", "tomcat"]
+    return ["ubuntu"]
+
+
+def _defender_subnets(topology_path: Path, project_name: Optional[str]):
+    """Resolve the DEFENDED-estate subnet structure the defender's run spec exposes — backend names
+    included, attacker's segment excluded.
+
+    This is the knowledge the old defender-side topology.py reached into MHBench for; it now lives in
+    the ENVIRONMENT, which owns the backend. Each DefenderSubnet carries the REAL Neutron network name
+    ("<project>-<subnet>") + security-group name ("<project>-<subnet>_sg") MHBench provisions (see
+    NetworkDeployer._n / Subnet.sg_name), so a decoy defender attaches a decoy by name without knowing
+    the convention.
+
+    Only the defended estate is included: the attacker's own segment and the defender's own isolated box
+    subnet are skipped (same exclusion as _iter_victims, so `subnets` and the flat `hosts` describe the
+    same estate). A real defender doesn't know where the red team sits, so there is no attacker flag and
+    no attacker-adjacency hint. The one placement hint is `perimeter`, taken straight from the topology's
+    `perimeter` marker (the internet-facing/DMZ tier — a legitimate estate property), NOT inferred from
+    the attacker's position."""
+    from ....defender.env_spec import DefenderSubnet, DefenderHost  # lazy: avoid import cycle
+
+    topo = json.loads(Path(topology_path).read_text())
+    nets = topo.get("networks", [])
+    if not nets:
+        return [], None, None
+    network_data = nets[0]
+
+    def _n(name: str) -> str:
+        return f"{project_name}-{name}" if project_name else name
+
+    subnets = []
+    for sd in network_data["subnets"]:
+        if sd["name"] in (_ATTACKER_SUBNET, _DEFENDER_SUBNET):
+            continue
+        if any(h.get("vm_type", "").startswith("kali") for h in sd["hosts"]):
+            continue  # belt-and-suspenders: the attacker's segment by vm_type, however it's named
+        hosts = []
+        for h in sd["hosts"]:
+            ip = h.get("ip_address")
+            hosts.append(DefenderHost(
+                name=h["name"],
+                ip=str(ip) if ip else None,
+                role=_role_from_name(h["name"]),
+                users=_host_users(h.get("vm_type", "")),
+                # Runs sysflow/falco: MHBench attaches start_sysflow/start_defender_services to exactly
+                # the "*_instrumented" vm_types (src/registry/online_registry.yaml); the env ships their
+                # telemetry to the box. kali_running has no stack, so it's excluded.
+                telemetry=h.get("vm_type", "").endswith("_instrumented"),
+            ))
+        subnets.append(DefenderSubnet(
+            name=sd["name"],
+            network=_n(sd["name"]),            # the real Neutron network DeployDecoy attaches to
+            sec_group=_n(f"{sd['name']}_sg"),  # the subnet's security group
+            hosts=hosts,
+            perimeter=bool(sd.get("perimeter", False)),  # the DMZ tier (legit estate property; bait here)
+        ))
+    return subnets, network_data.get("name"), _n("management_sg")
 
 
 def _bastion_proxy_args(bastion_ip: Optional[str], key: str) -> str:
@@ -294,21 +367,31 @@ async def inject_scoped_keys_env(experiment: Experiment, bastion_ip: Optional[st
 
 
 def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
-    """Build the agent-facing DefenderEnvSpec (objective + host inventory at the defender's knowledge
-    level — no creds/routing). Carries topology_spec, which the defender runners read."""
+    """Build the agent-facing DefenderEnvSpec — the self-describing run spec: objective, flat victim
+    inventory, AND the full subnet structure with backend-resolved network/sg NAMES (so a decoy defender
+    builds Perry's Network straight from here without parsing a backend topology — the old defender-side
+    topology.py shim is gone). No creds/routing."""
     from ....defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
-    hosts = []
     topo = deployed.topology_spec if deployed else None
+    project_name = deployed.project_name if deployed else None
+    hosts = []
+    subnets, network_name, management_sg = [], None, None
     if topo and Path(topo).exists():
         for h in _iter_victims(topo):
             ip = h.get("ip_address")
-            hosts.append(DefenderHost(name=h["name"], ip=str(ip) if ip else None,
-                                      role=_role_from_name(h["name"])))
+            hosts.append(DefenderHost(
+                name=h["name"], ip=str(ip) if ip else None, role=_role_from_name(h["name"]),
+                users=_host_users(h.get("vm_type", "")),
+                telemetry=h.get("vm_type", "").endswith("_instrumented"),
+            ))
+        subnets, network_name, management_sg = _defender_subnets(Path(topo), project_name)
     return DefenderEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
         hosts=hosts,
+        subnets=subnets,
+        network_name=network_name,
+        management_sg=management_sg,
         box=defender_box_spec(deployed, cfg),
-        topology_spec=topo,
     )
 
 
@@ -379,6 +462,10 @@ def _provision_sync(
         topology_spec=str(topology_path),
         ip=kali_ip,
         spec=Path(environment_spec).stem,
+        # The project/prefix MHBench provisions Neutron names under (--project-name below). The defender
+        # spec resolves "<project_name>-<subnet>" network/sg names from this, so the defender never has to
+        # know the backend naming convention.
+        project_name=experiment_name,
     ), bastion_ip
 
 
@@ -483,3 +570,48 @@ async def request_ingress_env(experiment: Experiment, bastion_ip: Optional[str],
 # NOTE: run_attacker_setup_play / the MHBench --attacker-play path was removed — the attacker owns its
 # own foothold prep (attacker plugin's prepare_foothold, via SetupAccess), so the environment never
 # runs an attacker play. (User-adjudicated: the attacker owns its own foothold prep.)
+
+
+# --- dynamic topology mutation (defender-driven, during the run) --------------------------------------
+# One MHBench CLI shell-out per primitive, mirroring _provision_sync. The arena calls these (via the
+# plugin's add_host/rebuild_host/remove_host) when a running defender sends an EnvActionRequest. MHBench
+# owns the actual cloud op (single-host create/rebuild/delete on its selected backend), so the god-key
+# never leaves the environment and GCP vs OpenStack is MHBench's concern.
+def _host_op_sync(op: str, experiment_name: str, environment_spec: str, cfg: ExperimentManagerConfig,
+                  *, name: Optional[str] = None, role: Optional[str] = None,
+                  subnet: Optional[str] = None, target: Optional[str] = None) -> dict:
+    """Run one MHBench per-host CLI subcommand (add-host / rebuild-host / remove-host) and return its
+    JSON result ({name, ip} for add-host; {ok: true} otherwise)."""
+    mhbench_dir = cfg.mhbench_dir
+    topology_path = resolve_topology_path(environment_spec, cfg)
+    python = mhbench_dir / ".venv" / "bin" / "python"
+    cli = mhbench_dir / "cli.py"
+    out_path = (output_root(experiment_name, cfg) / experiment_name / "experiment" / f"{op}_result.json").resolve()
+    cmd = [str(python), str(cli), *_mhb_config_args(cfg), "--ansible-verbosity", str(cfg.ansible_verbosity),
+           op, str(topology_path), "--project-name", experiment_name, "--output-file", str(out_path)]
+    if name:
+        cmd += ["--name", name]
+    if role:
+        cmd += ["--role", role]
+    if subnet:
+        cmd += ["--subnet", subnet]
+    if target:
+        cmd += ["--target", target]
+    mhbench_log = output_root(experiment_name, cfg) / experiment_name / "experiment" / "mhbench.log"
+    mhbench_log.parent.mkdir(parents=True, exist_ok=True)
+    log(experiment_name, f"MHBench {op} via CLI (log: {mhbench_log})...")
+    with open(mhbench_log, "a") as lf:
+        result = subprocess.run(cmd, cwd=str(mhbench_dir), stdout=lf, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        raise _mhbench_error(op, result.returncode, mhbench_log)
+    return json.loads(out_path.read_text()) if out_path.exists() else {}
+
+
+def new_host_setup_access(name: str, ip: str, cfg: ExperimentManagerConfig):
+    """SetupAccess for a freshly added host, as consumed BY THE DEFENDER BOX (in-env): scoped key +
+    EMPTY routing — the box reaches victims directly on its own subnet, with no bastion hop (unlike the
+    harness-side victim access, which proxies through the bastion). The key path is aligned on the box by
+    the defender deploy step."""
+    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    return SetupAccess(name=name, host=str(ip), user="root",
+                       ssh_key=_mhbench_ssh_key(cfg), ssh_common_args="")

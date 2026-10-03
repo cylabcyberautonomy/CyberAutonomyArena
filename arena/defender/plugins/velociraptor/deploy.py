@@ -41,21 +41,22 @@ def _bin(velociraptor_dir: Path) -> Path:
     return b
 
 
-def victim_hosts(topology_path: Path) -> list[tuple[str, str]]:
-    """[(name, internal_ip)] for every monitored victim: excludes the attacker (kali) AND the
-    defender's own box (the host in defender_subnet) — the defender doesn't run a client on itself."""
-    topo = json.loads(Path(topology_path).read_text())
+def victims_from_spec(defender_env_spec) -> list[tuple[str, str]]:
+    """[(name, internal_ip)] for every monitored victim, from the ENVIRONMENT-produced run spec — no
+    backend topology parse (the defender is backend-agnostic). DefenderEnvSpec.hosts is already the
+    defended victim inventory: the environment excluded the attacker (kali) AND the defender's own box,
+    so this just reads name/ip. Accepts the pydantic DefenderEnvSpec or its model_dump() dict."""
+    if defender_env_spec is None:
+        return []
+    hosts = getattr(defender_env_spec, "hosts", None)
+    if hosts is None:  # a plain dict (e.g. from config JSON)
+        hosts = defender_env_spec.get("hosts", [])
     out: list[tuple[str, str]] = []
-    for net in topo.get("networks", []):
-        for subnet in net.get("subnets", []):
-            if "defender" in (subnet.get("name") or "").lower():
-                continue  # the defender box's own subnet — not a monitored victim
-            for host in subnet.get("hosts", []):
-                if host.get("vm_type") == "kali_running":
-                    continue
-                ip = host.get("ip_address")
-                if ip:
-                    out.append((host["name"], str(ip)))
+    for h in hosts:
+        name = getattr(h, "name", None) if not isinstance(h, dict) else h.get("name")
+        ip = getattr(h, "ip", None) if not isinstance(h, dict) else h.get("ip")
+        if name and ip:
+            out.append((str(name), str(ip)))
     return out
 
 
@@ -176,12 +177,11 @@ def _write_inventory(server_ip: str, victims: list[tuple[str, str]], ssh_key: Pa
     return p
 
 
-def run_play(*, action: str, topology_path: Path, server_ip: str, ssh_key: Path, proxy_common: str,
-             ansible_playbook_bin: Path, velociraptor_dir: Path, extravars: dict,
+def run_play(*, action: str, victims: list[tuple[str, str]], server_ip: str, ssh_key: Path,
+             proxy_common: str, ansible_playbook_bin: Path, velociraptor_dir: Path, extravars: dict,
              log_path: Optional[Path] = None) -> None:
-    victims = victim_hosts(topology_path)
     if not victims:
-        raise RuntimeError(f"No victim hosts found in {topology_path}")
+        raise RuntimeError("No victim hosts to deploy velociraptor clients on (empty defender_env_spec)")
     ssh_key = Path(os.path.expanduser(str(ssh_key)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

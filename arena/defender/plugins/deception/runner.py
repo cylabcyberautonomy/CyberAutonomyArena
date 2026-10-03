@@ -2,8 +2,8 @@
 """Subprocess entry point for the Deception defense plugin.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
-  experiment_name, strategy, arsenal, topology_spec,
-  deception_dir, management_ip, log_dir
+  experiment_name, strategy, arsenal, deception_dir, management_ip, log_dir,
+  and the arena-injected defender_env_spec (the env run spec Perry's Network is built from)
 """
 import json
 import os
@@ -22,36 +22,35 @@ if _deception_dir and _deception_dir not in sys.path:
     sys.path.insert(0, _deception_dir)
 
 # The three defender runners are standalone scripts, not package modules, so the
-# plugins/ directory (which holds the shared topology builder) has to go on
+# plugins/ directory (which holds the shared perry_network builder) has to go on
 # sys.path explicitly - the same way deception_dir does above.
 _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
 
-from topology import build_network, host_users, telemetry_host_ips
+from perry_network import build_network_from_spec
 
-import openstack
 from elasticsearch import Elasticsearch
 from config.config import Config
-from ansible.AnsibleRunner import AnsibleRunner
-from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
 from defender.telemetry.SimpleTelemetryAnalysis import SimpleTelemetryAnalysis
 from defender.telemetry.ReactiveCredentials import ReactiveCredentials
 from defender.telemetry.telemetry_service import TelemetryService
-from defender.orchestrator.OpenstackOrchestrator import OpenstackOrchestrator
 from defender.strategy import (
     DoNothing,
     StaticStandalone,
     StaticLayered,
     ReactiveLayered,
     ReactiveStandalone,
-    HoneyShell,
     NaiveDecoyCredential,
     NaiveDecoyHost,
 )
+try:  # HoneyShell exists only on newer Defense branches; optional so this runner loads without it.
+    from defender.strategy import HoneyShell
+except ImportError:
+    HoneyShell = None
 
 STRATEGY_MAP = {
     "DoNothing": DoNothing,
@@ -59,10 +58,11 @@ STRATEGY_MAP = {
     "StaticLayered": StaticLayered,
     "ReactiveLayered": ReactiveLayered,
     "ReactiveStandalone": ReactiveStandalone,
-    "HoneyShell": HoneyShell,
     "NaiveDecoyCredential": NaiveDecoyCredential,
     "NaiveDecoyHost": NaiveDecoyHost,
 }
+if HoneyShell is not None:
+    STRATEGY_MAP["HoneyShell"] = HoneyShell
 
 experiment_name = config["experiment_name"]
 log_dir = Path(config["log_dir"])
@@ -86,7 +86,8 @@ perry_cfg.experiment_name = experiment_name
 # plugin opened in prepare_box_es (es_url = http://127.0.0.1:<port>, plain "falco"/"sysflow" indices).
 # No shared harness ES. The env relay already ships sensors to the box (victim -> relay -> box:9200), so
 # this runner does NO sysflow-repoint. Plain HTTP, security disabled (https raised WRONG_VERSION_NUMBER).
-openstack_conn = openstack.connect()
+# No cloud handle: the defender holds NO cloud credential (the environment touches the cloud on its
+# behalf). Backend choice is entirely the environment's concern now.
 management_ip = config["management_ip"]
 es_url = config["es_url"]
 # request_timeout=30 (not the 10s default): this run's box ES is installed + started FRESH in
@@ -97,41 +98,16 @@ es_conn = Elasticsearch(es_url, request_timeout=30)
 falco_index = config.get("falco_index", "falco")
 sysflow_index = config.get("sysflow_index", "sysflow")
 
-# bastion_ip is THIS experiment's own bastion floating IP (from MHBench
-# provisioning) - not the same as management_ip above (the harness's own fixed
-# address). AnsibleRunner needs the bastion specifically: its inventory's
-# ProxyCommand SSHes through it (-W %h:%p ... root@<bastion>) to reach the
-# experiment's internal 192.168.x.x hosts at all.
-# SCOPED defender key from the harness-injected SetupAccess (defender_setup_access): fail closed,
-# never fall back to perry_cfg's management (god) key on disk. AnsibleRunner uses this key for both
-# its bastion `-W` jump and the victim hop; the forward-only jump creds make that safe.
-def _scoped_ssh_key(cfg_dict):
-    for a in cfg_dict.get("defender_setup_access", []):
-        if a.get("ssh_key"):
-            return os.path.expanduser(a["ssh_key"])
-    raise RuntimeError("no scoped ssh_key in defender_setup_access; refusing to use the management key")
-
-ansible_runner = AnsibleRunner(
-    ssh_key_path=_scoped_ssh_key(config),
-    management_ip=config["bastion_ip"],
-    ansible_dir=str(Path(config["deception_dir"]) / "ansible"),
-    log_path=str(log_dir),  # AnsibleRunner treats this as a directory and writes ansible_log.log inside it
-)
+# No harness-side AnsibleRunner / scoped victim key here any more: the defender does NOT reach victims
+# from the arena. The box agent (deployed in prepare_box_agent) holds the scoped key and runs ansible
+# from inside the environment; the controller only talks to the box agent + the env UDS channel.
 
 
 
-topology_spec = config.get("topology_spec")
-network = None
-telemetry_hosts: list[str] = []
-if topology_spec:
-    topology_data = json.loads(Path(topology_spec).read_text())
-    network = build_network(topology_data["networks"][0], experiment_name, topology_data.get("subnet_connections"))
-    # Hosts that actually run sysflow: MHBench's online registry attaches the
-    # start_sysflow/start_defender_services playbooks to exactly the
-    # "*_instrumented" vm_types (see MHBench/src/registry/online_registry.yaml).
-    # The Kali attacker (kali_running) has no telemetry stack at all, so it is
-    # excluded - reconfiguring it would just fail the playbook.
-    telemetry_hosts = telemetry_host_ips(topology_data["networks"][0])
+# Build Perry's Network from the ENVIRONMENT-produced run spec (defender_env_spec), not a backend
+# topology: the env has already resolved the Neutron network/sg names + per-host users + which hosts run
+# sysflow. No topology parse here — the defender is backend-agnostic (see plugins/perry_network.py).
+network, telemetry_hosts = build_network_from_spec(config.get("defender_env_spec"))
 
 strategy_cls = STRATEGY_MAP.get(config["strategy"])
 if strategy_cls is None:
@@ -166,15 +142,12 @@ telemetry_analysis = analysis_cls(
     es_conn, network, falco_index, sysflow_index
 )
 telemetry_service = TelemetryService(telemetry_analysis)
-orchestrator = OpenstackOrchestrator(
-    openstack_conn=openstack_conn,
-    ansible_runner=ansible_runner,
-    external_elasticsearch_server=es_url,
-    elasticsearch_api_key=perry_cfg.elastic_config.api_key,
-    config=perry_cfg,
-    network=network,
-    action_logger=action_logger,
-)
+# BOX-ONLY EXECUTION — the single, enforced path. No cloud credential, no arena victim access: decoy
+# VM-create goes to the environment (UDS), the decoy's sensor setup + honey-cred/fake-data host actions go
+# to the box agent, which runs them from INSIDE the environment. No legacy arena-execution orchestrator.
+from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
+orchestrator = RemoteEnvOrchestrator.from_config(
+    config, experiment_name=experiment_name, network=network, action_logger=action_logger)
 
 strategy = strategy_cls(
     arsenal=arsenal,

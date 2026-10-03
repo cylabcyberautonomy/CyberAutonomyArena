@@ -84,7 +84,18 @@ class EnvironmentPlugin(BaseModel):
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,
     ) -> None:
-        """Emits TEARING_DOWN -> TORN_DOWN (or FAILED) on `lc`."""
+        """Reclaim EVERYTHING this environment created for the experiment, then emit
+        TEARING_DOWN -> TORN_DOWN (or FAILED) on `lc`.
+
+        CONTRACT: "everything" includes hosts added dynamically via add_host DURING the run (decoys,
+        restored VMs), not just the initial topology. The arena does NOT hand teardown a list of what was
+        added — decoy teardown is the ENVIRONMENT's job, never the arena's or the defender's (the defender
+        is backend-agnostic and never touches the cloud). So an environment that implements add_host MUST
+        track what it created and reap it here. HOW it tracks that is this backend's PRIVATE business and
+        is NOT part of this interface — a cloud tag, an own-side registry, or a naming scheme are all fine
+        (MHBench stamps an `arena_dynamic_host` metadata tag on each add_host VM and sweeps tagged servers
+        on this experiment's networks before the topology teardown). A backend that supports_dynamic_topology()
+        but leaks add_host'd hosts here is in violation of this contract."""
         raise NotImplementedError(f"{type(self).__name__} must implement teardown()")
 
     # -- spec production (the env is the producer of the agent-facing specs + setup access) ------
@@ -149,3 +160,57 @@ class EnvironmentPlugin(BaseModel):
         The environment assumes NO defender port; a defender that declares {} opens nothing (box stays
         fully isolated). Default no-op so a backend without a relay/forwarder is still valid."""
         return None
+
+    # -- dynamic topology mutation (defender-driven, DURING the run) ------------------------------
+    # The dynamic counterpart to program_ingress above (which is declarative + one-shot at arm time). A
+    # RUNNING defender sends EnvActionRequest events to the arena, which calls handle_env_request here.
+    # The environment — the only party holding the management/cloud credential — actuates on its backend
+    # and returns an EnvActionResult (an ADD_HOST comes back with a DEFENDER-SCOPED SetupAccess so the
+    # defender configures the host itself). This is what lets the Perry actuators that today call
+    # `openstack.connect()` directly (DeployDecoy/RestoreServer/ShutdownServer) instead forward the
+    # cloud step as a backend-neutral event — fixing the god-key + GCP-lock + admission-bypass problems
+    # in one move. Default: UNSUPPORTED (a static environment raises EnvRequestUnsupported); a backend
+    # that supports dynamic topology (MHBench) overrides the three primitives below.
+
+    async def handle_env_request(self, experiment, deployed, request, cfg):
+        """Dispatch ONE EnvActionRequest to the matching primitive. Plugin-agnostic router so the arena
+        calls a single method; a plugin overrides the primitives, not this. Capacity accounting (the
+        AddHost budget check) and the request trace are the ARENA's job around this call, not here."""
+        from ..env_requests import EnvActionKind, EnvRequestUnsupported
+        fn = {
+            EnvActionKind.ADD_HOST: self.add_host,
+            EnvActionKind.REMOVE_HOST: self.remove_host,
+            EnvActionKind.REBUILD_HOST: self.rebuild_host,
+        }.get(request.kind)
+        if fn is None:
+            raise EnvRequestUnsupported(f"{type(self).__name__} has no handler for {request.kind}")
+        return await fn(experiment, deployed, request, cfg)
+
+    async def add_host(self, experiment, deployed, request, cfg):
+        """Provision ONE bare VM (role/image hint + subnet) and return EnvActionResult with its
+        name/ip + a DEFENDER-SCOPED SetupAccess. The env does ONLY the cloud step; the defender runs its
+        own sensor-install/vuln/registration over the returned access (the provision/configure split).
+
+        CONTRACT: the env MUST record every host it creates here durably enough that teardown() can
+        reclaim it without being told which hosts were added — see teardown()'s contract. The bookkeeping
+        mechanism (tag/registry/naming) is this backend's private choice, NOT part of this interface."""
+        from ..env_requests import EnvRequestUnsupported
+        raise EnvRequestUnsupported(f"{type(self).__name__} does not support add_host")
+
+    async def remove_host(self, experiment, deployed, request, cfg):
+        """Delete one existing host (ShutdownServer). Returns its budget VM to the defender's pool."""
+        from ..env_requests import EnvRequestUnsupported
+        raise EnvRequestUnsupported(f"{type(self).__name__} does not support remove_host")
+
+    async def rebuild_host(self, experiment, deployed, request, cfg):
+        """Rebuild one existing host from its base image (RestoreServer) — restore a compromised VM.
+        No budget change (the VM already exists)."""
+        from ..env_requests import EnvRequestUnsupported
+        raise EnvRequestUnsupported(f"{type(self).__name__} does not support rebuild_host")
+
+    def supports_dynamic_topology(self) -> bool:
+        """Whether this environment honours EnvActionRequests at all. The arena uses it to validate the
+        env↔defender contract up front: a defender that declares a non-empty defender_vm_budget() paired
+        with an env that returns False here is a contract violation (fail at deploy, like the defender-box
+        contract), not a mid-run surprise. Default: False (static env); MHBench overrides to True."""
+        return False
