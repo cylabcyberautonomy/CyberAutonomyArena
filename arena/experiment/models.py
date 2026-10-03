@@ -211,9 +211,17 @@ class Experiment:
     defender_stopping_at = _Field("defender", "stopping_at")
     defender_stopped_at = _Field("defender", "stopped_at")
     # --- traffic (third plugin class: background traffic on victim hosts) ---
+    # Full lifecycle parity with the defender: the arena records each traffic signal here as it drives
+    # setup->ready->running->stopping->stopped (see traffic/lifecycle.py), so an observer sees which phase
+    # the traffic generator is in. traffic_started_at also serves as the RUNNING timestamp.
     traffic = _Field("traffic", "config")
     traffic_started_at = _Field("traffic", "started_at")
     traffic_finished_at = _Field("traffic", "finished_at")
+    traffic_status = _Field("traffic", "lifecycle_status")
+    traffic_setup_started_at = _Field("traffic", "setup_started_at")
+    traffic_ready_at = _Field("traffic", "ready_at")
+    traffic_stopping_at = _Field("traffic", "stopping_at")
+    traffic_stopped_at = _Field("traffic", "stopped_at")
 
     def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
                  traffic=None, trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
@@ -248,6 +256,8 @@ class Experiment:
             },
             "traffic": {
                 "config": traffic, "started_at": None, "finished_at": None,
+                "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
+                "stopping_at": None, "stopped_at": None,
             },
         }
 

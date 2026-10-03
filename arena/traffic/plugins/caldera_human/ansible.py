@@ -1,16 +1,15 @@
 """Self-contained bastion-hop ansible runner for the background-traffic play.
 
-Deliberately does NOT reimplement MHBench's inventory/mux machinery from scratch —
-it reuses MHBench's *installed* ``ansible-playbook`` (from the MHBench venv) and the
-same SSH argument shape MHBench uses (ProxyCommand through the bastion, with
-``UserKnownHostsFile=/dev/null`` on BOTH hops — the recycled-FIP host-key trap that
-was the real dominant cause of "SSH to kali never came up"). It stays entirely
-inside the harness so the traffic plugin is independent of MHBench's playbook
-registry.
+Backend-agnostic: it is handed the per-victim ``SetupAccess`` the ENVIRONMENT produced (scoped key +
+bastion routing) and builds its ansible inventory straight from that — it no longer parses a topology,
+reads a management key, or hand-builds a bastion ProxyCommand. Each access entry carries everything the
+hop needs: ``host``/``user``/``port``, the scoped ``ssh_key``, and ``ssh_common_args`` (the env-owned
+ProxyCommand through the bastion, with IdentitiesOnly so only the scoped key is offered).
 
-Victim hosts are every topology host whose ``vm_type`` is not ``kali_running`` (the
-attacker) — i.e. the hosts a defender is scored on, which is exactly where benign
-background noise belongs.
+It still reuses an *installed* ``ansible-playbook`` binary (resolved by the caller from the plugin's own
+venv) and the keepalive/known-hosts SSH shape MHBench uses (UserKnownHostsFile=/dev/null on both hops —
+the recycled-FIP host-key trap). It stays entirely inside the harness so the plugin is independent of
+MHBench's playbook registry.
 """
 from __future__ import annotations
 
@@ -24,56 +23,36 @@ from typing import Optional
 _AUX = Path(__file__).resolve().parent / "aux"
 _PLAY = _AUX / "install_bgtraffic.yml"
 
-
-def victim_hosts(topology_path: Path) -> list[tuple[str, str]]:
-    """Return [(name, internal_ip)] for every non-attacker host in the topology."""
-    topo = json.loads(Path(topology_path).read_text())
-    out: list[tuple[str, str]] = []
-    for net in topo.get("networks", []):
-        for subnet in net.get("subnets", []):
-            for host in subnet.get("hosts", []):
-                if host.get("vm_type") == "kali_running":
-                    continue  # the attacker host is not a victim
-                ip = host.get("ip_address")
-                if ip:
-                    out.append((host["name"], str(ip)))
-    return out
+# Keepalive + known-hosts opts applied to every hop, merged with each entry's env-owned routing
+# (ssh_common_args: the bastion ProxyCommand / IdentitiesOnly). /dev/null known-hosts avoids the
+# recycled-bastion-FIP stale-host-key rejection.
+_BASE_SSH_OPTS = (
+    "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+    "-o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+)
 
 
-def _proxy_command(bastion_ip: str, ssh_key: Path) -> str:
-    # Mirrors MHBench's bastion hop: key-auth only (fail fast, no password hang) and
-    # /dev/null known-hosts so a recycled bastion floating IP with a stale key doesn't
-    # get rejected (the ProxyJump/known_hosts trap).
-    return (
-        f"ssh -W %h:%p -i {ssh_key} "
-        f"-o BatchMode=yes -o PasswordAuthentication=no "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"root@{bastion_ip}"
-    )
+def _common_args(entry: dict) -> str:
+    """Merge the base SSH opts with this entry's env-owned routing (the bastion ProxyCommand etc.)."""
+    extra = (entry.get("ssh_common_args") or "").strip()
+    return (f"{_BASE_SSH_OPTS} {extra}").strip()
 
 
-def _write_inventory(hosts: list[tuple[str, str]], bastion_ip: str, ssh_key: Path, tmp: Path) -> Path:
-    proxy = _proxy_command(bastion_ip, ssh_key)
-    common = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=/dev/null "
-        "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 "
-        f'-o ProxyCommand="{proxy}"'
-    )
-    inv = {
-        "victims": {
-            "hosts": {
-                name: {
-                    "ansible_host": ip,
-                    "ansible_port": 22,
-                    "ansible_user": "root",  # MHBench injects the key for root on victims too
-                    "ansible_ssh_private_key_file": str(ssh_key),
-                    "ansible_ssh_common_args": common,
-                }
-                for name, ip in hosts
-            }
+def _write_inventory(access: list[dict], tmp: Path) -> Path:
+    """Build the ansible inventory straight from the env-produced SetupAccess entries."""
+    hosts = {}
+    for a in access:
+        key = a.get("ssh_key")
+        entry = {
+            "ansible_host": a["host"],
+            "ansible_port": a.get("port", 22),
+            "ansible_user": a.get("user", "root"),
+            "ansible_ssh_common_args": _common_args(a),
         }
-    }
+        if key:
+            entry["ansible_ssh_private_key_file"] = os.path.expanduser(key)
+        hosts[a["name"]] = entry
+    inv = {"victims": {"hosts": hosts}}
     path = tmp / "inventory.json"
     path.write_text(json.dumps(inv))
     return path
@@ -82,23 +61,19 @@ def _write_inventory(hosts: list[tuple[str, str]], bastion_ip: str, ssh_key: Pat
 def run_play(
     *,
     action: str,
-    topology_path: Path,
-    bastion_ip: str,
-    ssh_key: Path,
-    ansible_playbook_bin: Path,
+    access: list[dict],
+    ansible_playbook_bin: str,
     extravars: dict,
     log_path: Optional[Path] = None,
 ) -> None:
-    """Run install_bgtraffic.yml against the victim hosts. Raises on failure
-    (except phases whose tasks are individually ``failed_when: false``)."""
-    hosts = victim_hosts(topology_path)
-    if not hosts:
-        raise RuntimeError(f"No victim hosts found in {topology_path}")
+    """Run install_bgtraffic.yml (action = install|start|stop|collect) against the victim hosts named by
+    ``access`` (a list of SetupAccess dicts). Raises on failure (except tasks marked failed_when: false)."""
+    if not access:
+        raise RuntimeError("background traffic: no victim access entries (empty traffic_setup_access)")
 
-    ssh_key = Path(os.path.expanduser(str(ssh_key)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        inventory = _write_inventory(hosts, bastion_ip, ssh_key, tmp)
+        inventory = _write_inventory(access, tmp)
         varfile = tmp / "extravars.json"
         varfile.write_text(json.dumps({"bgtraffic_action": action, **extravars}))
 
@@ -115,9 +90,7 @@ def run_play(
                 "-o ControlMaster=auto "
                 f"-o ControlPath={tmp}/%C "
                 "-o ControlPersist=60s "
-                "-o StrictHostKeyChecking=no "
-                "-o UserKnownHostsFile=/dev/null "
-                "-o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+                + _BASE_SSH_OPTS
             ),
             "ANSIBLE_PIPELINING": "True",
             "ANSIBLE_SSH_RETRIES": "3",
@@ -125,7 +98,7 @@ def run_play(
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "a") as lf:
-                lf.write(f"\n=== bgtraffic play action={action} on {len(hosts)} victim(s) ===\n")
+                lf.write(f"\n=== bgtraffic play action={action} on {len(access)} victim(s) ===\n")
                 lf.flush()
                 result = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         else:

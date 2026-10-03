@@ -253,21 +253,25 @@ def _bastion_proxy_args(bastion_ip: Optional[str], key: str) -> str:
 # The scoped PRIVATE keys are what SetupAccess hands the agents; the management private key never leaves
 # the harness, so leaking a spec grants only that system's own scope (kills the east-west god-key cheat).
 
-def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path]:
-    """Generate (idempotently) the attacker_key + defender_key keypairs the env issues, at the paths
-    attacker_credential()/defender_credential() point to. Reused across experiments; pubkeys are
-    injected per-deploy by inject_scoped_keys()."""
+def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path, Path]:
+    """Generate (idempotently) the attacker_key + defender_key + traffic_key keypairs the env issues, at
+    the paths attacker_credential()/defender_credential()/traffic_credential() point to. Reused across
+    experiments; pubkeys are injected per-deploy by inject_scoped_keys().
+
+    traffic_key is a THIRD scoped key (not a reuse of the defender's): background traffic and defence are
+    distinct systems, each gets its own key scoped to only what it legitimately reaches (traffic → the
+    victims it generates activity on)."""
     keydir = Path(cfg.mhbench_dir) / "keys"
     keydir.mkdir(parents=True, exist_ok=True)
     out = []
-    for name in ("attacker_key", "defender_key"):
+    for name in ("attacker_key", "defender_key", "traffic_key"):
         p = keydir / name
         if not p.exists():
             subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(p), "-N", "", "-q",
                             "-C", f"arena-{name}"], check=True)
             p.chmod(0o600)
         out.append(p)
-    return out[0], out[1]
+    return out[0], out[1], out[2]
 
 
 def _inject_bastion_jump(pubkey: str, targets: list[str], bastion_ip: str, mgmt_key: str) -> bool:
@@ -332,9 +336,10 @@ def inject_scoped_keys(experiment: Experiment, bastion_ip: Optional[str], cfg: E
         log(name, "inject_scoped_keys: no bastion_ip; skipping per-system key injection.")
         return
     topo = resolve_topology_path(experiment.environment_spec, cfg)
-    ak, dk = issue_scoped_keys(cfg)
+    ak, dk, tk = issue_scoped_keys(cfg)
     ak_pub = Path(str(ak) + ".pub").read_text().strip()
     dk_pub = Path(str(dk) + ".pub").read_text().strip()
+    tk_pub = Path(str(tk) + ".pub").read_text().strip()
     mgmt_key = _mhbench_ssh_key(cfg)
 
     # attacker: full shell on the foothold, forward-only tunnel to it on the bastion
@@ -359,6 +364,19 @@ def inject_scoped_keys(experiment: Experiment, bastion_ip: Optional[str], cfg: E
     if targets:
         jok = _inject_bastion_jump(dk_pub, [f"{ip}:22" for _, ip in targets], bastion_ip, mgmt_key)
         log(name, f"jump: defender_key forward-only on bastion -> {len(targets)} hosts: {'ok' if jok else 'FAILED'}")
+
+    # traffic: full shell on the VICTIMS only (where benign activity runs — NOT the defender box, NOT the
+    # foothold), forward-only tunnel to exactly those on the bastion. Its own scoped key, distinct from the
+    # defender's, so a leaked traffic spec opens only the victims it legitimately generates activity on.
+    victim_targets: list[tuple[str, str]] = [
+        (h["name"], str(h["ip_address"])) for h in _iter_victims(topo) if h.get("ip_address")
+    ]
+    for hname, hip in victim_targets:
+        ok = _inject_pubkey(tk_pub, hip, bastion_ip, mgmt_key)
+        log(name, f"per-system key: traffic_key -> {hname} {hip}: {'ok' if ok else 'FAILED'}")
+    if victim_targets:
+        jok = _inject_bastion_jump(tk_pub, [f"{ip}:22" for _, ip in victim_targets], bastion_ip, mgmt_key)
+        log(name, f"jump: traffic_key forward-only on bastion -> {len(victim_targets)} hosts: {'ok' if jok else 'FAILED'}")
 
 
 async def inject_scoped_keys_env(experiment: Experiment, bastion_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
@@ -416,6 +434,45 @@ def defender_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: O
     if box and box.get("ip_address"):
         out.append(SetupAccess(name=box["name"], host=str(box["ip_address"]), user="root",
                                ssh_key=key, ssh_common_args=proxy))
+    return out
+
+
+def traffic_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
+    """Build the agent-facing TrafficEnvSpec — the benign-activity objective + the VICTIM inventory the
+    generator runs its personas on (the same hosts the defender is scored over; NOT the attacker foothold,
+    NOT the defender box). No creds/routing."""
+    from ....traffic.env_spec import TrafficEnvSpec, TrafficHost  # lazy: avoid import cycle
+    topo = deployed.topology_spec if deployed else None
+    hosts = []
+    if topo and Path(topo).exists():
+        for h in _iter_victims(topo):
+            ip = h.get("ip_address")
+            hosts.append(TrafficHost(
+                name=h["name"], ip=str(ip) if ip else None, user="root",
+                role=_role_from_name(h["name"]),
+            ))
+    return TrafficEnvSpec(
+        objective=(deployed.spec if deployed else None) or "none",
+        hosts=hosts,
+    )
+
+
+def traffic_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Build the harness-only SetupAccess for each VICTIM the traffic generator runs on — key + bastion
+    routing. Victims only (no defender box). Placeholder mgmt key here; the plugin wrapper stamps in the
+    scoped traffic key (mirrors defender_setup_access)."""
+    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    topo = deployed.topology_spec if deployed else None
+    if not (topo and Path(topo).exists()):
+        return []
+    key = _mhbench_ssh_key(cfg)
+    proxy = _bastion_proxy_args(bastion_ip, key)
+    out = []
+    for h in _iter_victims(topo):
+        ip = h.get("ip_address")
+        if ip:
+            out.append(SetupAccess(name=h["name"], host=str(ip), user="root",
+                                   ssh_key=key, ssh_common_args=proxy))
     return out
 
 

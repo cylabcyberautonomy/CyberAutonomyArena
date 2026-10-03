@@ -475,8 +475,13 @@ def test_defender_lifecycle_methods_present():
 
 def test_traffic_lifecycle_methods_present():
     trf = TrafficPlugin._registry["caldera_human"].model_validate(TRAFFIC)
-    for m in ("setup", "start", "stop", "collect_logs", "teardown"):
+    # Full parity with the defender: build_config + setup (install) + run (spawn runner) + teardown.
+    for m in ("build_config", "setup", "run", "teardown"):
         assert callable(getattr(trf, m)), f"traffic missing {m}()"
+    # readiness handshake, symmetric with the defender (the attacker is gated on the traffic marker).
+    assert callable(getattr(TrafficPlugin, "wait_until_ready"))
+    assert callable(getattr(TrafficPlugin, "clear_ready_marker"))
+    assert callable(getattr(TrafficPlugin, "ready_marker_path"))
 
 
 def test_capacity_counts_only_topology_vms():
@@ -745,9 +750,19 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     from arena.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=md, env_backend=EnvBackendConfig(mhbench_config=None))
 
-    # method presence on the base contract
-    for m in ("attacker_spec", "attacker_setup_access", "defender_spec", "defender_setup_access"):
+    # method presence on the base contract (traffic is a first-class system too)
+    for m in ("attacker_spec", "attacker_setup_access", "defender_spec", "defender_setup_access",
+              "traffic_spec", "traffic_setup_access"):
         assert callable(getattr(env, m)), f"env plugin missing {m}()"
+
+    # traffic: agent-facing spec = objective + victim inventory, NO creds; setup access = scoped key + routing
+    from arena.traffic.env_spec import TrafficEnvSpec
+    tspec = env.traffic_spec(deployed, cfg)
+    assert isinstance(tspec, TrafficEnvSpec)
+    assert "ssh_key" not in TrafficEnvSpec.model_fields
+    tacc = env.traffic_setup_access(deployed, "1.2.3.4", cfg)
+    assert tacc and isinstance(tacc[0], SetupAccess) and tacc[0].ssh_key
+    assert "ProxyCommand" in tacc[0].ssh_common_args
 
     # attacker: agent-facing spec = objective + foothold identity, NO creds
     aspec = env.attacker_spec(deployed, cfg)
@@ -900,6 +915,18 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     assert dacc and all(a.ssh_key == dcred for a in dacc)
     assert foothold_hosts.isdisjoint({a.host for a in dacc})
+
+    # traffic: a THIRD distinct per-system key, scoped to the VICTIMS only — not the attacker foothold,
+    # and not the defender box (traffic doesn't touch it).
+    tcred = env.traffic_credential(deployed, cfg)
+    assert tcred and tcred not in (acred, dcred)  # distinct from both other keys (no shared god-key)
+    tacc = env.traffic_setup_access(deployed, "1.2.3.4", cfg)
+    assert tacc and all(a.ssh_key == tcred for a in tacc)
+    assert foothold_hosts.isdisjoint({a.host for a in tacc})
+    box = env.defender_box(deployed, cfg)
+    box_ip = getattr(box, "ip", None) if box else None
+    if box_ip:
+        assert box_ip not in {a.host for a in tacc}
 
 
 def test_environment_module_exposes_lifecycle():

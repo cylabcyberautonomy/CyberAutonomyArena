@@ -1,13 +1,15 @@
 """CalderaHuman background-traffic plugin.
 
-Deploys the ``caldera-human-traffic`` daemon (which vendors MITRE Caldera's
-standalone ``pyhuman``) onto the victim hosts and runs a persona there, generating
-benign user activity during the attack window — no Caldera server, no second C2.
+Deploys the ``caldera-human-traffic`` daemon (which vendors MITRE Caldera's standalone ``pyhuman``) onto
+the victim hosts and runs a persona there, generating benign user activity during the attack window — no
+Caldera server, no second C2.
 
-Phase 1 (this plugin): an *offline* persona — either one bundled in the repo
-(``persona="office_worker"``) or one authored inline (``persona_inline={...}``, e.g.
-by an LLM) — is shipped to every victim and run statically. Phase 2 (control plane
-in the repo) will let an author adjust it mid-run.
+Full parity with the defender: the ENVIRONMENT hands this plugin a ``TrafficEnvSpec`` (victim inventory)
+and a scoped ``SetupAccess`` per victim (traffic key + bastion routing). ``setup()`` INSTALLS the generator
+pre-rotation (fatal); ``run()`` spawns a runner subprocess that STARTS the generators, touches the
+readiness marker (the arena gates the attacker on it), holds until SIGTERM, then stops the generators and
+pulls their labeled activity log. The plugin never reads a management key or parses a topology — it reaches
+victims via the injected access.
 
 Config (``type: "caldera_human"``):
     persona:         name of a persona JSON bundled in the repo (default office_worker)
@@ -16,15 +18,13 @@ Config (``type: "caldera_human"``):
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import os
+import shutil
+import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Optional
-
-import yaml
-from pydantic import BaseModel
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import log, output_root
@@ -54,31 +54,6 @@ def _import_repo(cfg: ExperimentManagerConfig):
     return persona_mod, workflows_mod
 
 
-def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> Path:
-    """Read ssh_key_path from MHBench's config (the key it injected into the hosts),
-    falling back to the default all three MHBench configs use."""
-    default = Path("~/.ssh/id_ed25519").expanduser()
-    try:
-        rel = cfg.env_backend.mhbench_config or "config/config.yaml"
-        data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
-        backend = data.get("backend", "openstack")
-        block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
-        key = block.get("ssh_key_path") or data.get("ssh_key_path")
-        return Path(os.path.expanduser(key)) if key else default
-    except Exception:  # noqa: BLE001 — config shape drift must not break traffic; use the default key
-        return default
-
-
-def _topology_path(cfg: ExperimentManagerConfig, environment_spec: str) -> Path:
-    # environment_spec is a PATH to a topology JSON (absolute, or relative to mhbench_dir).
-    p = Path(environment_spec)
-    return p if p.is_absolute() else cfg.mhbench_dir / p
-
-
-def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:
-    return cfg.mhbench_dir / ".venv" / "bin" / "ansible-playbook"
-
-
 def _traffic_out(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
     return output_root(experiment_name, cfg) / experiment_name / "traffic"
 
@@ -90,10 +65,35 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
     allow_browser: bool = False
     allow_gui: bool = False
 
+    # External repo path (the caldera-human-traffic checkout), resolved via cfg.plugin_dir.
+    code_dir_field = "caldera_human_dir"
+    # The runner just needs to identify the experiment; access / ansible bin / log_dir are injected.
+    REQUIRED_CONFIG_KEYS = frozenset({"experiment_name"})
+
+    # -- ansible binary resolution (backend fallback kept inside the plugin, not in generic run_traffic) --
+    def _ansible_bin(self, cfg: ExperimentManagerConfig) -> Path:
+        """Resolve ansible-playbook: prefer the plugin repo's own venv, then PATH, then (last resort)
+        MHBench's installed venv. The repo ships pyhuman to victims and has no venv of its own today, so
+        PATH / the MHBench fallback is the usual source — but no backend *credential* or *topology* is read."""
+        candidates = []
+        d = getattr(cfg, "caldera_human_dir", None)
+        if d:
+            candidates.append(Path(d) / ".venv" / "bin" / "ansible-playbook")
+        which = shutil.which("ansible-playbook")
+        if which:
+            candidates.append(Path(which))
+        candidates.append(Path(cfg.mhbench_dir) / ".venv" / "bin" / "ansible-playbook")
+        for c in candidates:
+            if c and Path(c).exists():
+                return c
+        raise RuntimeError(
+            "ansible-playbook not found for background traffic (checked the plugin venv, PATH, and the "
+            "MHBench venv). Install ansible or set caldera_human_dir to a checkout with a .venv.")
+
     # -- persona resolution + validation (harness side) --------------------
     def _render_persona_file(self, cfg: ExperimentManagerConfig, dest_dir: Path) -> Path:
-        """Resolve the persona (inline or bundled), validate it against the repo's
-        schema + host runnability, and write it to a control-node file the play copies."""
+        """Resolve the persona (inline or bundled), validate it against the repo's schema + host
+        runnability, and write it to a control-node file the install play copies to the victims."""
         persona_mod, workflows_mod = _import_repo(cfg)
         bg = _resolve_bgtraffic_dir(cfg)
 
@@ -119,88 +119,75 @@ class CalderaHumanTraffic(TrafficPlugin, config_type="caldera_human"):
         return out
 
     @staticmethod
-    def _recover_bastion_ip(experiment, cfg: ExperimentManagerConfig) -> Optional[str]:
-        """Re-read the bastion floating IP from where provisioning wrote it — the
-        teardown path (stop/collect) runs without the live bastion_ip, exactly like
-        collect_environment/rotate_environment do."""
-        pr = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "provision_result.json"
-        if pr.exists():
-            try:
-                return json.loads(pr.read_text()).get("mgmt_ip")
-            except Exception:  # noqa: BLE001
-                return None
-        return None
-
-    def _common(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> dict:
-        if bastion_ip is None:
-            bastion_ip = self._recover_bastion_ip(experiment, cfg)
-        if bastion_ip is None:
-            raise RuntimeError("CalderaHumanTraffic needs the experiment bastion IP (bastion_ip).")
-        return dict(
-            topology_path=_topology_path(cfg, experiment.environment_spec),
-            bastion_ip=bastion_ip,
-            ssh_key=_mhbench_ssh_key(cfg),
-            ansible_playbook_bin=_ansible_playbook_bin(cfg),
-            log_path=_traffic_out(experiment.experiment_name, cfg) / "bgtraffic_ansible.log",
-        )
+    def _access_dicts(traffic_access) -> list[dict]:
+        """Normalize the injected SetupAccess list (models or dicts) to plain dicts for the ansible helper."""
+        out = []
+        for a in (traffic_access or []):
+            out.append(a if isinstance(a, dict) else a.model_dump())
+        return out
 
     # -- lifecycle ---------------------------------------------------------
-    async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
-        import asyncio
-
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    traffic_env_spec=None, traffic_access=None, bastion_ip: Optional[str] = None) -> None:
+        """INSTALL the generator + persona onto the victims (pre-rotation, fatal). Reaches each victim via
+        the env-produced SetupAccess (scoped traffic key + bastion routing) — no management key, no topology."""
         bg = _resolve_bgtraffic_dir(cfg)
         out_dir = _traffic_out(experiment.experiment_name, cfg)
         persona_file = self._render_persona_file(cfg, out_dir)  # validates too
-        common = self._common(experiment, cfg, bastion_ip)
+        access = self._access_dicts(traffic_access)
+        if not access:
+            raise RuntimeError("background traffic install: the environment produced no victim access "
+                               "(empty traffic_setup_access)")
+        ansible_bin = str(self._ansible_bin(cfg))
         log(experiment.experiment_name,
-            f"[traffic] installing caldera_human (persona={self.persona_inline and '<inline>' or self.persona}) on victims")
+            f"[traffic] installing caldera_human (persona={self.persona_inline and '<inline>' or self.persona}) "
+            f"on {len(access)} victim(s)")
         await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: bg_ansible.run_play(
                 action="install",
+                access=access,
+                ansible_playbook_bin=ansible_bin,
                 extravars={
                     "bgtraffic_src": str(bg),
                     "bgtraffic_persona_src": str(persona_file),
                     "bgtraffic_allow_browser": self.allow_browser,
                     "bgtraffic_allow_gui": self.allow_gui,
                 },
-                **common,
+                log_path=out_dir / "bgtraffic_ansible.log",
             ),
         )
 
-    async def start(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
-        import asyncio
+    def build_config(self, experiment_name: str, environment) -> dict:
+        # traffic_setup_access (per-victim key + routing), log_dir, bastion_ip, management_ip are injected
+        # by traffic.run_traffic(); ansible_playbook_bin is added by run() (it needs cfg). The runner reads
+        # all of them plus these identity/profile fields.
+        return {
+            "type": self.type,
+            "experiment_name": experiment_name,
+            "persona": self.persona_inline and "<inline>" or self.persona,
+            "allow_browser": self.allow_browser,
+            "allow_gui": self.allow_gui,
+        }
 
-        common = self._common(experiment, cfg, bastion_ip)
-        log(experiment.experiment_name, "[traffic] starting caldera_human daemon on victims")
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: bg_ansible.run_play(action="start", extravars={}, **common)
-        )
+    async def run(self, config_path: Path, experiment_name: str,
+                  cfg: ExperimentManagerConfig) -> asyncio.subprocess.Process:
+        """Spawn the traffic runner (stdlib; manager interpreter). It STARTS the generators, touches the
+        readiness marker, idles until SIGTERM, then stops the generators + pulls the activity log."""
+        # Add the resolved ansible binary to the config (run_traffic wrote it; run() has cfg to resolve bin).
+        data = json.loads(config_path.read_text())
+        data["ansible_playbook_bin"] = str(self._ansible_bin(cfg))
+        config_path.write_text(json.dumps(data, indent=2))
 
-    async def stop(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str]) -> None:
-        import asyncio
-
-        try:
-            common = self._common(experiment, cfg, bastion_ip)
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: bg_ansible.run_play(action="stop", extravars={}, **common)
-            )
-        except Exception:  # noqa: BLE001 — stop is best-effort (host may already be gone)
-            log(experiment.experiment_name, "[traffic] stop failed (best-effort) — continuing")
-
-    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, bastion_ip: Optional[str]) -> None:
-        import asyncio
-
-        common = self._common(experiment, cfg, bastion_ip)
-        collect_dir = dest / "traffic" / "activity_logs"
-        collect_dir.mkdir(parents=True, exist_ok=True)
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: bg_ansible.run_play(
-                action="collect",
-                extravars={"bgtraffic_collect_dest": str(collect_dir)},
-                **common,
-            ),
+        out_dir = _traffic_out(experiment_name, cfg)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_file = open(out_dir / "traffic.log", "a")
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).parent / "runner.py"),
+            str(config_path),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
 
     # -- dashboard schema --------------------------------------------------

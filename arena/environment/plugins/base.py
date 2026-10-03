@@ -118,6 +118,16 @@ class EnvironmentPlugin(BaseModel):
         (key + routing)."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
 
+    def traffic_spec(self, deployed, cfg: ExperimentManagerConfig):
+        """AGENT-FACING TrafficEnvSpec: benign-activity objective + victim host inventory (no
+        creds/routing). Only produced when an experiment has a traffic config (traffic is optional)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_spec()")
+
+    def traffic_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
+        """SETUP ACCESS: list[SetupAccess] for the VICTIM hosts the traffic generator runs on
+        (key + routing). The victims only — not the attacker foothold, not the defender box."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_setup_access()")
+
     # -- per-system credential issuance (the environment's job) ----------------------------------
     # MHBench today injects ONE keypair as root on EVERY host — a god-key. Leaked to the attacker it is
     # `ssh root@victim` east-west, winning without exploitation (bastion isolation doesn't cover
@@ -133,6 +143,12 @@ class EnvironmentPlugin(BaseModel):
         """The credential issued for the defender — scoped to the defender box + the victims it may act
         on (legit); NOT the attacker box. Stamped into defender SetupAccess."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_credential()")
+
+    def traffic_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        """The credential issued for background traffic — scoped to the VICTIM hosts it generates benign
+        activity on (NOT the attacker foothold, NOT the defender box). Stamped into traffic SetupAccess.
+        A separate key from the defender's: traffic and defence are distinct systems (no shared god-key)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_credential()")
 
     # The management/provisioning credential (broad) is harness-side, used to deploy/configure, and is
     # NEVER placed in any spec — so it has no accessor here (it stays internal to the plugin's deploy path).

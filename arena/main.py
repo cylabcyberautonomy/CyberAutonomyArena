@@ -19,6 +19,9 @@ from .attacker.lifecycle import (
 from .defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, signal_persister as _defender_signal_persister,
 )
+from .traffic.lifecycle import (
+    TrafficLifecycle, TrafficSignal, TrafficCommand, signal_persister as _traffic_signal_persister,
+)
 
 
 async def _stop_defender_process(experiment, process) -> None:
@@ -35,7 +38,26 @@ async def _stop_defender_process(experiment, process) -> None:
         pass
     if lc is not None and lc.status != DefenderSignal.FAILED:
         await lc.emit(DefenderSignal.STOPPED)
+
+
+async def _stop_traffic_process(experiment, process) -> None:
+    """Terminate the traffic runner subprocess and record STOPPING/STOPPED (unless already FAILED),
+    symmetric with _stop_defender_process. The runner, on SIGTERM, stops the victim generators and pulls
+    their activity log before exiting, so terminating it IS the clean stop. No-op if traffic never ran."""
+    if process is None:
+        return
+    lc = getattr(experiment, "_traffic_lifecycle", None)
+    if lc is not None and lc.status not in (TrafficSignal.STOPPED, TrafficSignal.FAILED):
+        await lc.emit(TrafficSignal.STOPPING)
+    try:
+        process.terminate()
+        await process.wait()
+    except Exception:
+        pass
+    if lc is not None and lc.status != TrafficSignal.FAILED:
+        await lc.emit(TrafficSignal.STOPPED)
 from .defender import run_defender
+from .traffic import run_traffic
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_persister as _env_signal_persister
 from .env_action_server import resolve_socket_path, serve_env_actions
@@ -595,17 +617,9 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Attacker-log collection failed for '%s'", experiment.experiment_name)
 
-    # Background traffic's labeled activity log — pull it before the VMs die so benign events stay
-    # separable from the attacker's at scoring time. Best-effort, like every other collection here.
-    if experiment.traffic:
-        try:
-            await experiment.traffic.collect_logs(
-                experiment, cfg,
-                output_root(experiment.experiment_name, cfg) / experiment.experiment_name,
-                None,  # bastion_ip re-read from provision_result.json by the plugin
-            )
-        except Exception:
-            get_logger(experiment.experiment_name).exception("Background-traffic log collection failed for '%s'", experiment.experiment_name)
+    # Background traffic's labeled activity log is pulled by its runner on SIGTERM (see
+    # caldera_human/runner.py), while the VMs are still up — so there is no separate traffic-collect step
+    # here. _stop_traffic_process (in the attacker-wait finally) terminates the runner, which triggers it.
 
     # Defender teardown (harness-side cleanup, e.g. the box ES tunnel) runs before the environment
     # teardown. Best-effort, like the log collection above: a defender teardown failure must not block
@@ -1018,6 +1032,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         return
 
     defender_process = None
+    traffic_process = None
     if experiment.defender:
         # Serialize defender arming under the SAME gate as the harness's configure step
         # (_configure_lock / max_concurrent_configures). Arming runs heavy ansible over
@@ -1118,16 +1133,37 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await _handle_failure(experiment, f"Defender failed to arm — {e}")
                 return
 
-    # Background traffic (third plugin class): INSTALL on the victim hosts before rotation, so the
-    # install's own file-copy noise is rotated away and only the running daemon's activity lands in the
-    # attack-phase telemetry. A requested-but-failing traffic layer fails the run (like the defender):
-    # silently producing an un-noised run would misreport the experiment.
+    # Background traffic (third plugin class): full lifecycle parity with the defender, and OPTIONAL — this
+    # whole block is inert without a traffic config. INSTALL the generator on the victims BEFORE rotation,
+    # so the install's own file-copy noise is rotated away and only the running generator's activity lands
+    # in the attack-phase telemetry. A requested-but-failing traffic layer fails the run (like the
+    # defender): silently producing an un-noised run would misreport the experiment.
+    _traffic_env_spec = None
+    _traffic_access = None
     if experiment.traffic:
         try:
+            # Drop any marker left by a previous run of this name (overwrite=true reuses the output dir).
+            experiment.traffic.clear_ready_marker(experiment.experiment_name, cfg)
+            # Lifecycle handshake (traffic/lifecycle.py), symmetric with the defender: the arena records
+            # each phase so an observer sees where the traffic generator is.
+            traffic_lc = TrafficLifecycle(on_emit=_traffic_signal_persister(experiment))
+            experiment._traffic_lifecycle = traffic_lc
+            await traffic_lc.send(TrafficCommand.START_SETUP)
+            await traffic_lc.emit(TrafficSignal.SETUP_STARTED)
+            # The ENVIRONMENT produces the traffic run spec (victim inventory) + harness-only setup access
+            # (scoped traffic key + bastion routing per victim), symmetric with the attacker/defender.
+            _traffic_env_spec = experiment.environment.traffic_spec(experiment.deployed_environment, cfg)
+            _traffic_access = experiment.environment.traffic_setup_access(experiment.deployed_environment, bastion_ip, cfg)
             async with _configure_lock.acquire(_PRIORITY_DEPLOY):  # heavy bastion ansible — same gate as configure/arming
-                await experiment.traffic.setup(experiment, cfg, bastion_ip)
+                await experiment.traffic.setup(experiment, cfg,
+                                               traffic_env_spec=_traffic_env_spec,
+                                               traffic_access=_traffic_access, bastion_ip=bastion_ip)
+            await registry.update(experiment)
         except Exception as e:
             exp_log.exception("Background-traffic install failed for '%s'", experiment.experiment_name)
+            _lc = getattr(experiment, "_traffic_lifecycle", None)
+            if _lc is not None:
+                await _lc.emit(TrafficSignal.FAILED, str(e))
             if defender_process:
                 await _stop_defender_process(experiment, defender_process)
             await _handle_failure(experiment, f"Background-traffic install failed — {e}")
@@ -1136,16 +1172,47 @@ async def _run_experiment(experiment: Experiment) -> None:
     # Host-log rotation is now an MHBench wrapper detail run inside mhbench.configure() (right after
     # configuring), NOT an arena step — so there is no rotate call here.
 
-    # START background traffic AFTER rotation so its benign activity is captured in the same
-    # attack-phase telemetry the defender is scored on. Best-effort: noise failing to start must not
-    # waste a full deploy — the run just proceeds with less (or no) background traffic.
+    # START background traffic AFTER rotation so its benign activity is captured in the same attack-phase
+    # telemetry the defender is scored on. Full readiness gate (like the defender): spawn the runner, wait
+    # until the generators are actually up, THEN let the attacker in — a flaky generator fails the run
+    # rather than silently handing the attacker an un-noised environment.
     if experiment.traffic:
         try:
-            await experiment.traffic.start(experiment, cfg, bastion_ip)
-            experiment.traffic_started_at = datetime.now(timezone.utc)
+            traffic_process = await run_traffic(
+                experiment.traffic,
+                experiment.deployed_environment,
+                experiment.experiment_name,
+                cfg,
+                bastion_ip,
+                traffic_env_spec=_traffic_env_spec,
+                traffic_access=_traffic_access,
+            )
+        except Exception as e:
+            exp_log.exception("Failed to start background traffic for '%s'", experiment.experiment_name)
+            await traffic_lc.emit(TrafficSignal.FAILED, str(e))
+            if defender_process:
+                await _stop_defender_process(experiment, defender_process)
+            await _handle_failure(experiment, f"Failed to start background traffic — {e}")
+            return
+
+        # Wait for the runner to report the generators are up before letting the attacker in (symmetric
+        # with the defender's wait_until_ready). A traffic layer that never started must fail the run.
+        try:
+            await experiment.traffic.wait_until_ready(
+                experiment.experiment_name, cfg, traffic_process, log
+            )
+            await traffic_lc.emit(TrafficSignal.READY)
+            await traffic_lc.send(TrafficCommand.START)
+            await traffic_lc.emit(TrafficSignal.RUNNING)
             await registry.update(experiment)
-        except Exception:
-            exp_log.exception("Background-traffic start failed for '%s' — proceeding without it", experiment.experiment_name)
+        except Exception as e:
+            exp_log.exception("Background traffic failed to start for '%s'", experiment.experiment_name)
+            await traffic_lc.emit(TrafficSignal.FAILED, str(e))
+            await _stop_traffic_process(experiment, traffic_process)
+            if defender_process:
+                await _stop_defender_process(experiment, defender_process)
+            await _handle_failure(experiment, f"Background traffic failed to start — {e}")
+            return
 
     # The env-mutation serving window was already opened before the defender's prepare() (so static decoy
     # deploy during arming is honoured); it stays open through the attack and closes at DEACTIVATE (finally).
@@ -1157,6 +1224,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
             await _stop_defender_process(experiment, defender_process)
+        await _stop_traffic_process(experiment, traffic_process)
         await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
@@ -1215,10 +1283,12 @@ async def _run_experiment(experiment: Experiment) -> None:
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)
-        # Stop background traffic once the attacker has finished (best-effort; VMs get torn down anyway).
-        if experiment.traffic:
+        # Stop background traffic once the attacker has finished. Terminating the runner triggers its
+        # SIGTERM path (stop the generators + pull the activity log before the VMs die);
+        # _stop_traffic_process records STOPPING/STOPPED.
+        if traffic_process:
             try:
-                await experiment.traffic.stop(experiment, cfg, bastion_ip)
+                await _stop_traffic_process(experiment, traffic_process)
                 experiment.traffic_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping background traffic for '%s'", experiment.experiment_name)

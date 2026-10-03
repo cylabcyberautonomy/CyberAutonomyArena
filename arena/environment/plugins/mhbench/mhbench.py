@@ -152,15 +152,32 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
                                       ssh_key=cred, ssh_common_args=""))
         return access
 
+    def traffic_spec(self, deployed, cfg: ExperimentManagerConfig):
+        from .deployer import traffic_env_spec
+        return traffic_env_spec(deployed, cfg)
+
+    def traffic_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
+        from .deployer import traffic_setup_access, _bastion_proxy_args
+        # The env ISSUES the traffic scoped credential (victims only). Both hops use it: final hop opens a
+        # shell on each victim, bastion hop tunnels with the same key (forward-only on the bastion). No
+        # management key in SetupAccess. Victims only — no defender box entry (traffic doesn't touch it).
+        cred = self.traffic_credential(deployed, cfg)
+        proxy = _bastion_proxy_args(bastion_ip, cred)
+        return [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
+                for a in traffic_setup_access(deployed, bastion_ip, cfg)]
+
     # -- per-system credential issuance -----------------------------------------------------------
     # The environment issues a SEPARATE scoped keypair per system (attacker key on the foothold only,
-    # defender key on the box + victims only); the broad management key stays harness-side and is never
-    # placed in a spec. MHBench generates and injects these keys during configure.
+    # defender key on the box + victims only, traffic key on the victims only); the broad management key
+    # stays harness-side and is never placed in a spec. MHBench generates and injects these during configure.
     def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "attacker_key")
 
     def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "defender_key")
+
+    def traffic_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return str(Path(cfg.mhbench_dir) / "keys" / "traffic_key")
 
     # -- generic infra guarantees (defender box) --------------------------------------------------
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:

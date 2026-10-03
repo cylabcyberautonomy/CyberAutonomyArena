@@ -1,3 +1,3 @@
-from .traffic import TrafficConfig
+from .traffic import TrafficConfig, run_traffic
 
-__all__ = ["TrafficConfig"]
+__all__ = ["TrafficConfig", "run_traffic"]

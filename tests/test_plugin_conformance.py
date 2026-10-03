@@ -338,12 +338,15 @@ def test_defender_plugin_conforms(name):
 
 # --------------------------------------------------------------------------- traffic conformance
 
-_TRAFFIC_METHODS = {"setup": True, "start": True, "stop": True, "collect_logs": True, "teardown": True}
+# Full parity with the defender: build_config() (sync) + run()/setup()/teardown() (async). The arena
+# gates the attacker on the traffic runner's readiness marker, so run() is the spawn-the-runner method.
+_TRAFFIC_METHODS = {"build_config": False, "run": True, "setup": True, "teardown": True}
 
 
 @pytest.mark.parametrize("name", _real_plugins(TrafficPlugin._registry), ids=lambda n: n)
 def test_traffic_plugin_conforms(name):
-    """Every registered traffic plugin meets the shared TrafficPlugin contract (lifecycle + ui_schema)."""
+    """Every registered traffic plugin meets the shared TrafficPlugin contract (lifecycle + ui_schema +
+    a well-formed build_config that echoes the experiment name and leaks no SSH credential/routing)."""
     cls = TrafficPlugin._registry[name]
     problems: list[str] = []
     try:
@@ -354,6 +357,16 @@ def test_traffic_plugin_conforms(name):
         problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
     problems += _ui_schema_problems(cls, name, required_extra)
     problems += _lifecycle_problems(instance, _TRAFFIC_METHODS)
+    # build_config: well-formed, echoes the experiment name, leaks no SSH credential/routing (the arena
+    # injects traffic_env_spec / traffic_setup_access on top — see traffic.run_traffic).
+    try:
+        built = instance.build_config("ci_conformance", _FAKE_ENV)
+        problems += _config_leak_problems(built, "build_config()")
+        problems += _declared_keys_problems(cls, built)
+        if isinstance(built, dict) and built.get("experiment_name") != "ci_conformance":
+            problems.append(f"build_config()['experiment_name']={built.get('experiment_name')!r} != 'ci_conformance'")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"build_config() raised {type(e).__name__}: {e}")
     assert not problems, f"[{name}] traffic conformance:\n  " + "\n  ".join(problems)
 
 

@@ -349,5 +349,44 @@ A defender that needs nothing returns `{}` and opens nothing.
 
 Generates benign background activity on the victim hosts so the attacker's actions aren't the only thing
 in the telemetry. Subclass `TrafficPlugin` (`traffic/plugins/base.py`) with a `config_type`;
-`plugins/caldera_human/` is the working reference to copy. The full extension guide is pending while the
-interface settles — follow the same registration + selection pattern as the other systems.
+`plugins/caldera_human/` is the working reference to copy. Traffic has **full parity with the defender**:
+its own lifecycle signals, a run spec + scoped key produced by the environment, and a runner subprocess
+gated by a readiness marker — and it is OPTIONAL (a run without a traffic config never touches any of it).
+
+**The interface:**
+```python
+class MyTraffic(TrafficPlugin, config_type="my_traffic"):
+    type: Literal["my_traffic"]
+
+    @classmethod
+    def ui_schema(cls) -> PluginUISchema: ...
+
+    def build_config(self, experiment_name, environment) -> dict:
+        """The runner contract. The arena injects `traffic_env_spec` (victim inventory) +
+        `traffic_setup_access` (scoped key + routing per victim) + `bastion_ip` + `log_dir` on top
+        (see traffic.run_traffic), so declare only the keys build_config() itself always emits via
+        REQUIRED_CONFIG_KEYS."""
+
+    async def setup(self, experiment, cfg, traffic_env_spec=None, traffic_access=None, bastion_ip=None):
+        """INSTALL the generator on the victims. Runs BEFORE the pre-attack log rotation (so install
+        noise is rotated away) and under the configure gate; FATAL (raising fails the run). Reach each
+        victim via the injected SetupAccess (`access.ssh_base()`) — never read a management key or parse
+        a topology."""
+
+    async def run(self, config_path, experiment_name, cfg) -> asyncio.subprocess.Process:
+        """Spawn the runner (post-rotation) and return it. The runner STARTS the generators, touches the
+        readiness marker (TrafficPlugin.ready_marker_path — the arena gates the attacker on it via
+        wait_until_ready), holds until SIGTERM, then stops the generators and pulls the labeled activity
+        log into log_dir before the VMs are destroyed."""
+
+    async def teardown(self, experiment, cfg) -> None: ...   # optional, best-effort
+```
+
+**Environment contract.** The environment produces, symmetric with the defender: a **run spec**
+`traffic_spec()` → `TrafficEnvSpec` (the victim inventory the generator runs on — NOT the attacker
+foothold, NOT the defender box) and a **setup access** `traffic_setup_access()` → `list[SetupAccess]`
+(scoped key + bastion routing per victim), backed by a **scoped `traffic_credential()`** — a third
+per-system key (`keys/traffic_key` on MHBench), issued + injected victims-only so a leaked traffic spec
+opens only the victims it legitimately generates activity on. The arena drives the lifecycle
+(SETUP_STARTED → READY → RUNNING → STOPPING → STOPPED) in `main.py`, recording each signal on the
+experiment via `traffic/lifecycle.py`.

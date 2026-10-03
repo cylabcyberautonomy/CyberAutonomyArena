@@ -43,9 +43,10 @@ _BASELINE = {
     # baseline (the guard is strict for them now).
     # Velociraptor — FIXED (out of baseline): its server runs on the defender box reached via the injected
     # scoped defender key (box_access.ssh_key -> self._ssh_key in setup()); the old id_ed25519 fallback is gone.
-    # Traffic — TABLED: needs its own victims-only scoped key (no adversary/agent, lower risk). Remove
-    # when the traffic scoped key lands.
-    "traffic/plugins/caldera_human/caldera_human.py": "tabled: needs a victims-only traffic scoped key",
+    # Traffic — FIXED (out of baseline): caldera_human now has its own victims-only scoped traffic key
+    # (env issues keys/traffic_key, injected per-victim via traffic_setup_access), reaching victims through
+    # the injected SetupAccess instead of reading the management key. The guard is strict for it now.
+    # BASELINE EMPTY: the guard is now fully strict — no plugin may read the management key off disk.
 }
 
 
