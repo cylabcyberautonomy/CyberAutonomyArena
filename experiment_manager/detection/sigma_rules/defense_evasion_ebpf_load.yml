@@ -1,0 +1,24 @@
+title: eBPF Program Load
+id: 966a7b6e-8920-4332-bc73-006620c29a51
+status: experimental
+description: >
+    Detects the bpf() syscall loading eBPF programs. eBPF can hook syscalls, hide processes/files,
+    and sniff traffic from kernel context, making it a building block for modern Linux rootkits and
+    for tampering with security telemetry.
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+author: MHBench detection harness
+date: 2026/09/01
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        key: bpf
+    condition: selection
+falsepositives:
+    - Observability/EDR agents, systemd, and networking (tc/XDP) legitimately load eBPF. Baseline first.
+level: medium
+tags:
+    - attack.defense-evasion
+    - attack.t1562.001
