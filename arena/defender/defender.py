@@ -74,11 +74,10 @@ async def run_defender(
         if _box_ip:
             _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
     built["defender_setup_access"] = [a.model_dump() for a in _access]
-    # The Defense/Perry defenders (llm_soc/deception/prompt_injection) each name their own code path now;
-    # inject the running plugin's dir under the stable runner key "deception_dir". A self-contained defender
-    # (canary) or one with its own path (velociraptor) declares no code_dir_field, so it gets nothing here.
-    if type(defender).code_dir_field:
-        built["deception_dir"] = str(cfg.plugin_dir(type(defender).code_dir_field))
+    # NOTE: the plugin's external repo is NOT injected into the config as a path key. Every defender runner
+    # is spawned with cwd + PYTHONPATH set to that repo (see _run_deception_script / each plugin's run()),
+    # exactly like the attacker, so the runner imports the repo's packages and reads its repo-relative files
+    # (config/config.json) via cwd — no plugin-named key (the old "deception_dir") in the config.
     # "management_ip" is the harness's own fixed host (cfg.arena_host_ip), NOT an Elasticsearch address — every
     # defender reads its OWN per-experiment ES on the defender box (see DefenderPlugin.prepare_box_es).
     # It is kept only so a defender's self-protection knows not to block the harness/manager host. It is
