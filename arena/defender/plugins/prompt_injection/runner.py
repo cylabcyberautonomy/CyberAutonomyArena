@@ -46,12 +46,12 @@ config = json.loads(Path(sys.argv[1]).read_text())
 # The plugin's repo is already importable: the arena spawns this runner with cwd + PYTHONPATH set to it
 # (see the plugin's run() / _run_deception_script), so there is no repo-path key in the config.
 
-# The three defender runners are standalone scripts, not package modules, so the
-# plugins/ directory (which holds the shared perry_network builder) has to go on
-# sys.path explicitly (the repo itself is already importable via the arena-set PYTHONPATH).
-_plugins_dir = str(Path(__file__).resolve().parent.parent)
-if _plugins_dir not in sys.path:
-    sys.path.insert(0, _plugins_dir)
+# This runner is a standalone script, not a package module, so its OWN directory (which holds this
+# plugin's copy of the perry_network builder) goes on sys.path explicitly (the plugin repo itself is
+# already importable via the arena-set PYTHONPATH).
+_here = str(Path(__file__).resolve().parent)
+if _here not in sys.path:
+    sys.path.insert(0, _here)
 
 from perry_network import build_network_from_spec
 
@@ -149,7 +149,7 @@ sysflow_index = config.get("sysflow_index", "sysflow")
 
 # Build Perry's Network from the ENVIRONMENT-produced run spec (defender_env_spec), not a backend
 # topology: the env resolved the Neutron network/sg names + per-host users. Backend-agnostic defender
-# (see plugins/perry_network.py). telemetry_hosts is unused here (this runner never repoints sensors).
+# (see this plugin's perry_network.py). telemetry_hosts is unused here (this runner never repoints sensors).
 network, _telemetry_hosts = build_network_from_spec(config.get("defender_env_spec"))
 
 if network is not None and strategy_name in _NEEDS_FALCO:

@@ -1,16 +1,14 @@
-"""DefenderEnvSpec -> Perry-network translation for the decoy defender runners (deception,
-prompt_injection).
+"""DefenderEnvSpec -> Perry-network translation for the prompt_injection decoy defender runner.
 
-Environment-agnostic by construction: it consumes the ENVIRONMENT-produced DefenderEnvSpec (the run
-spec the arena injects into the runner config as `defender_env_spec`), never a backend topology. The
-environment has already resolved the backend network / security-group NAMES into the spec's subnets, so
-nothing here knows MHBench's (or any backend's) naming convention. This replaces the old topology.py
-shim, which reached into MHBench's topology JSON directly and was the last env-coupling in the defender.
+Environment-agnostic by construction: it consumes the ENVIRONMENT-produced DefenderEnvSpec (the run spec
+the arena injects into the runner config as `defender_env_spec`), never a backend topology. The environment
+has already resolved the backend network / security-group NAMES into the spec's subnets, so nothing here
+knows MHBench's (or any backend's) naming convention.
 
-Shared by the two standalone runner SCRIPTS (deception, prompt_injection), which can't inherit a base —
-so this is a module, per the plugin self-containment rule (CLAUDE.md: runner-script-shared code is a
-module, everything else is per-plugin or on the base). llm_soc builds its own Network inline from the
-same spec (its needs are simpler — host IPs + the defendable set), so it doesn't import this.
+PER-PLUGIN COPY (CLAUDE.md self-containment rule): each decoy defender that needs this carries its OWN copy
+— the same way the telemetry defenders each copy box_es_install.sh — so the shared defender/plugins/ root
+holds no cross-plugin helper. An identical copy lives in the sibling decoy plugin (deception); keep the two
+in sync. llm_soc builds its own Network inline from the same spec and does not use this.
 
 Perry's Network/Subnet/Host are plain classes (not pydantic models), so they're built by hand.
 """
