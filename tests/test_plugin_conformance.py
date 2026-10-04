@@ -7,7 +7,7 @@ WHY THIS EXISTS (and how it differs from test_arena_contract.py)
     plugins named in them: a NEW plugin that silently violates the shared interface passes CI, because
     nothing iterates the registry.
 
-    This file iterates EVERY registered plugin of each system type (attacker / defender / traffic /
+    This file iterates EVERY registered plugin of each system type (attacker / defender /
     environment) and holds it to the SHARED contract its base class promises. A new plugin is subjected
     to it the moment it registers — no edit here needed. When a plugin is non-conformant the failure
     (a) names the plugin (parametrize id, e.g. test_attacker_plugin_conforms[sliver_llm]) and (b) lists
@@ -49,11 +49,9 @@ import pytest
 # Importing the plugin packages triggers auto-registration of every plugin subclass.
 import arena.attacker.plugins   # noqa: F401
 import arena.defender.plugins   # noqa: F401
-import arena.traffic.plugins    # noqa: F401
 import arena.environment.plugins  # noqa: F401
 from arena.attacker.plugins.base import AttackerPlugin
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
-from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.environment import build_environment
 from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
@@ -241,11 +239,10 @@ def _discovery_problems(plugins_subdir: str, registry: dict) -> list[str]:
 # --------------------------------------------------------------------------- discovery
 
 def test_every_declared_plugin_is_registered():
-    """Across all four systems, every config_type written in a plugin file is actually registered."""
+    """Across all systems, every config_type written in a plugin file is actually registered."""
     problems = (
         _discovery_problems("attacker/plugins", AttackerPlugin._registry)
         + _discovery_problems("defender/plugins", DefenderPlugin._registry)
-        + _discovery_problems("traffic/plugins", TrafficPlugin._registry)
         + _discovery_problems("environment/plugins", EnvironmentPlugin._registry)
     )
     assert not problems, "Declared plugins missing from a registry:\n  " + "\n  ".join(problems)
@@ -255,7 +252,6 @@ def test_registries_are_non_empty():
     """A totally empty registry means auto-discovery is broken (not that there are no plugins)."""
     assert AttackerPlugin._registry, "no attacker plugins registered"
     assert DefenderPlugin._registry, "no defender plugins registered"
-    assert TrafficPlugin._registry, "no traffic plugins registered"
     assert EnvironmentPlugin._registry, "no environment plugins registered"
 
 
@@ -333,27 +329,6 @@ def test_defender_plugin_conforms(name):
     except Exception as e:  # noqa: BLE001
         problems.append(f"build_config() raised {type(e).__name__}: {e}")
     assert not problems, f"[{name}] defender conformance:\n  " + "\n  ".join(problems)
-
-
-# --------------------------------------------------------------------------- traffic conformance
-
-_TRAFFIC_METHODS = {"setup": True, "start": True, "stop": True, "collect_logs": True, "teardown": True}
-
-
-@pytest.mark.parametrize("name", _real_plugins(TrafficPlugin._registry), ids=lambda n: n)
-def test_traffic_plugin_conforms(name):
-    """Every registered traffic plugin meets the shared TrafficPlugin contract (lifecycle + ui_schema)."""
-    cls = TrafficPlugin._registry[name]
-    problems: list[str] = []
-    try:
-        instance, required_extra = _minimal_instance(cls, name)
-    except Exception as e:  # noqa: BLE001
-        pytest.fail(f"[{name}] not instantiable from minimal config: {type(e).__name__}: {e}")
-    if instance.type != name:
-        problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
-    problems += _ui_schema_problems(cls, name, required_extra)
-    problems += _lifecycle_problems(instance, _TRAFFIC_METHODS)
-    assert not problems, f"[{name}] traffic conformance:\n  " + "\n  ".join(problems)
 
 
 # --------------------------------------------------------------------------- environment conformance

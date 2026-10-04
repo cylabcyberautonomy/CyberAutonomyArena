@@ -45,9 +45,6 @@ arena_host_ip: 10.0.0.1
 # prompt_injection_python: /path/to/Defense-MHBench-compatible/.venv/bin/python
 # velociraptor_dir:        /path/to/velociraptor   # velociraptor defender; expects bin/velociraptor (Go binary, no venv)
 #
-# Traffic:
-# caldera_human_dir:       /path/to/caldera-human-traffic   # caldera_human traffic (no venv/python)
-#
 # NOTE: a defender run also requires MHBench on the arena-live-provisioning branch (it supplies the
 # isolated defender_subnet box + the request-ingress CLI the arena calls). Pointing mhbench_dir at a
 # branch without those fails every defender run with "environment provides no defender box."

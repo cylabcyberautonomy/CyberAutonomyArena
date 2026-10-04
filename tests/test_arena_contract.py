@@ -2,8 +2,8 @@
 Arena cross-component contract test — the CI/CD regression guard for the refactor.
 
 WHY THIS EXISTS
-    The arena (see docs/architecture.md) turns environment / attacker / defender /
-    background-traffic into four independent systems. This file pins the contract each
+    The arena (see docs/architecture.md) turns environment / attacker / defender into
+    independent systems. This file pins the contract each
     system exposes to the others, so refactoring one can't silently break what another
     reads from it — WITHOUT deploying anything to the cloud or spending LLM credits.
 
@@ -25,7 +25,6 @@ THE NAMED BASELINE COMBO (what must keep working across the refactor):
     environment = equifax_small
     attacker    = incalmo_strategy / GraphSearch
     defender    = llm_soc / FalcoLLM        (reads telemetry; deploys NO decoys)
-    traffic     = caldera_human / office_worker   (optional; validated for composability)
 """
 from __future__ import annotations
 
@@ -39,13 +38,11 @@ import pytest
 # Importing the plugin packages triggers auto-registration of every plugin subclass.
 import arena.attacker.plugins  # noqa: F401
 import arena.defender.plugins  # noqa: F401
-import arena.traffic.plugins   # noqa: F401
 import arena.environment.plugins  # noqa: F401 — populate the env registry for registry-driven params
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
 from arena.attacker.plugins.incalmo_strategy.incalmo_strategy import IncalmoPreparedC2
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
-from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment import DeployedEnvironment
 from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox, AttackerSetupAccess
 from arena.experiment.models import ExperimentSpecs
@@ -57,7 +54,6 @@ ATTACKER = {"type": "incalmo_strategy", "strategy": "GraphSearch"}  # for direct
 ATTACKER_PLUGIN = "incalmo_strategy"          # the (plugin, spec) pair — the only way to select an attacker
 ATTACKER_SPEC = {"strategy": "GraphSearch"}   # inline spec dict (may also be a path to a JSON/YAML file)
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
-TRAFFIC = {"type": "caldera_human", "persona": "office_worker"}
 
 # A representative environment_spec per backend, so the env security invariants below run over EVERY
 # registered environment plugin — not just mhbench. A newly-registered backend with no sample here is
@@ -103,20 +99,18 @@ def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
     assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "sliver_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
-    assert {"caldera_human"} <= set(TrafficPlugin._registry)
 
 
 # ------------------------------------------------------------------ spec validation layer
 
 def test_named_combo_experimentspecs_validates():
     """The user-facing submission for the named combo must validate and round-trip.
-    This is the arena's single entry contract: one spec naming all four systems."""
+    This is the arena's single entry contract: one spec naming every system."""
     specs = ExperimentSpecs(
         experiment_name="ci_contract_smoke",
         environment=ENV,
         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
         defender=DEFENDER,
-        traffic=TRAFFIC,
     )
     # environment is a validated EnvironmentConfig (explicit plugin+spec).
     assert specs.environment.environment_plugin == "mhbench"
@@ -126,7 +120,6 @@ def test_named_combo_experimentspecs_validates():
     assert dumped["environment"] == {"environment_plugin": "mhbench", "environment_spec": ENV_SPEC}
     assert dumped["attacker"]["strategy"] == "GraphSearch"
     assert dumped["defender"]["strategy"] == "FalcoLLM"
-    assert dumped["traffic"]["persona"] == "office_worker"
 
 
 def test_environmentconfig_requires_explicit_shape():
@@ -190,27 +183,15 @@ def test_attacker_plugin_unknown_name_rejected():
         ExperimentSpecs(experiment_name="x", environment=ENV, attacker_plugin="no_such_plugin")
 
 
-def test_experimentspecs_without_traffic_still_valid():
-    """Traffic is optional: a plain attacker-vs-defender run must not require it."""
-    specs = ExperimentSpecs(
-        experiment_name="ci_no_traffic",
-        environment=ENV,
-        attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
-        defender=DEFENDER,
-    )
-    assert specs.traffic is None
-
-
 def test_experiment_base_is_environment_plus_attacker():
-    """The experiment base is environment + attacker; defender and traffic are optional. A spec with
-    only environment + attacker (no defender, no traffic) must validate, with both left None."""
+    """The experiment base is environment + attacker; the defender is optional. A spec with
+    only environment + attacker (no defender) must validate, with the defender left None."""
     specs = ExperimentSpecs(
         experiment_name="ci_base_only",
         environment=ENV,
         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC,
     )
     assert specs.defender is None
-    assert specs.traffic is None
 
 
 def test_experimentspecs_requires_an_attacker():
@@ -466,12 +447,6 @@ def test_defender_lifecycle_methods_present():
     # external arming (decoy/cred deploy) runs in prepare() and returns a PreparedDefender baton,
     # mirroring the attacker's setup()->PreparedAttacker; run() then only launches the loop.
     assert callable(getattr(DefenderPlugin, "prepare"))
-
-
-def test_traffic_lifecycle_methods_present():
-    trf = TrafficPlugin._registry["caldera_human"].model_validate(TRAFFIC)
-    for m in ("setup", "start", "stop", "collect_logs", "teardown"):
-        assert callable(getattr(trf, m)), f"traffic missing {m}()"
 
 
 def test_capacity_counts_only_topology_vms():

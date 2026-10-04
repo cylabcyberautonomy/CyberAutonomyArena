@@ -173,7 +173,6 @@ def main() -> int:
     ap.add_argument("--defender", default="FalcoLLM",
                     help="llm_soc strategy, 'canary' for the connectivity diagnostic defender, "
                          "or 'none' for an attacker-only run")
-    ap.add_argument("--traffic", default="none", help="caldera_human persona, or 'none'")
     ap.add_argument("--keep", action="store_true", help="leave the range standing (teardown=false)")
     ap.add_argument("--overwrite", action="store_true", help="replace a same-named prior run")
     ap.add_argument("--priority", type=int, default=1000, help="queue priority (higher = sooner)")
@@ -211,8 +210,6 @@ def main() -> int:
         specs["defender"] = {"type": "canary"}
     elif expect_defender:
         specs["defender"] = {"type": "llm_soc", "strategy": args.defender}
-    if args.traffic.lower() != "none":
-        specs["traffic"] = {"type": "caldera_human", "persona": args.traffic}
 
     print("Live experiment smoke test")
     print(f"  manager : {args.url}")

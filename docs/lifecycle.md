@@ -26,17 +26,14 @@ one piece of cross-system timing that matters: the defender-readiness handshake.
    box, placing decoys / honey-credentials, initializing the detection loop) then takes minutes. **The
    arena blocks here** — see the handshake below.
 
-5. **Traffic start** (only if a traffic plugin is present). Benign background activity begins on the
-   victims.
-
-6. **Attacker run.** The arena hands the attacker its agent-facing spec + `SetupAccess`, the attacker
+5. **Attacker run.** The arena hands the attacker its agent-facing spec + `SetupAccess`, the attacker
    preps its own foothold, and the engagement runs under a wall-clock cap. On expiry the attacker is
    `SIGTERM`'d (then `SIGKILL`ed if it ignores that) and marked `TimedOut`.
 
-7. **Collect.** `environment.collect()` pulls host-side logs (the scorer's ground truth) into the
+6. **Collect.** `environment.collect()` pulls host-side logs (the scorer's ground truth) into the
    experiment's output tree *before* teardown. Best-effort and bounded.
 
-8. **Teardown.** `defender.teardown()` (harness-side cleanup) runs first, then `environment.teardown()`
+7. **Teardown.** `defender.teardown()` (harness-side cleanup) runs first, then `environment.teardown()`
    reclaims all VMs/networks. Emits `TEARING_DOWN → TORN_DOWN`. Teardown is uncapped so a finished
    experiment releases its VMs immediately instead of queueing behind new provisions. Backend-specific
    stray-VM cleanup (e.g. sweeping decoy VMs before the network teardown) is the environment's job, done

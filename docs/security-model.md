@@ -40,19 +40,17 @@ the adversary only what it already had.
 
 ### Enforcement: `tests/test_no_god_key.py`
 
-A regression guard greps every plugin file under `attacker/plugins`, `defender/plugins`, and
-`traffic/plugins` for the signatures of a management-key read (`openstack_config.ssh_key_path`,
+A regression guard greps every plugin file under `attacker/plugins` and `defender/plugins`
+for the signatures of a management-key read (`openstack_config.ssh_key_path`,
 `_mhbench_ssh_key`, the default `id_ed25519` path, etc.). It deliberately does **not** flag the *correct*
 pattern — consuming the injected `access["ssh_key"]` — because that is exactly what plugins should do.
 
-The test fails on any **new** god-key read. Two reads remain in a documented baseline, each a known
+The test fails on any **new** god-key read. One read remains in a documented baseline, a known
 residual with a stated exit:
 
 - `defender/plugins/velociraptor/velociraptor.py` — **deferred**: its server runs on the bastion, which a
   scoped key can't reach; the fix is moving the server onto the defender box, after which it consumes
   `SetupAccess` like the others.
-- `traffic/plugins/caldera_human/caldera_human.py` — **tabled**: needs its own victims-only traffic
-  scoped key (it drives no agent and has no adversary, so it is lower-risk).
 
 Shrink the baseline as those land; it must never grow.
 
