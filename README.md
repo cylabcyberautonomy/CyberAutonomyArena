@@ -54,6 +54,34 @@ Open `http://localhost:8080` in a browser.
 
 ---
 
+## Submitting an experiment (API)
+
+An experiment is submitted as a JSON body `POST`ed to the manager's `/experiments` endpoint (this is what
+the dashboard's Submit tab builds for you). [`example_experiment.json`](example_experiment.json) is a
+ready-to-edit template:
+
+```bash
+curl -X POST http://localhost:8000/experiments \
+     -H 'Content-Type: application/json' \
+     --data @example_experiment.json
+```
+
+The body pairs the four pluggable systems (see [`CLAUDE.md`](CLAUDE.md) for the plugin model):
+
+| Field | Required | What it is |
+|-------|----------|------------|
+| `experiment_name` | yes | Unique name; also the output-dir name. Re-submitting an existing name needs `overwrite: true`. |
+| `environment` | yes | `{environment_plugin, environment_spec}` — `environment_plugin` names a registered env plugin (`mhbench`); `environment_spec` is a topology path **relative to `mhbench_dir`** (e.g. `environments/instrumented/equifax_small_instrumented.json`). |
+| `attacker_plugin` + `attacker_spec` | yes | The attacker as a `(plugin, spec)` pair. `attacker_spec` is that plugin's fields — an inline object (as here) **or** a path to a JSON/YAML file. |
+| `defender` | no | Embedded `{type, ...}`; `type` names a registered defender (`llm_soc`, `deception`, `prompt_injection`, `velociraptor`, `canary`) and the rest are its fields. Omit for an undefended run. A defender needs an `*_instrumented` topology (it requires a defender box). |
+| `traffic` | no | Embedded `{type, ...}` benign background traffic (`caldera_human`). Omit for none. |
+| `trial`, `priority`, `teardown`, `overwrite`, `output_dir` | no | Scheduling / run options (`priority` higher = admitted sooner; `teardown: false` leaves the env standing; `overwrite: true` cancels+replaces a same-named run). |
+
+Each selected plugin must have its code path set in `config.yaml` (see the Config reference below) — e.g.
+the example above needs `incalmo_strategy_dir` (attacker) and `llm_soc_dir` (defender).
+
+---
+
 ## Config reference
 
 `config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).

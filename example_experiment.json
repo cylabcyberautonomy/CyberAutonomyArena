@@ -1,0 +1,29 @@
+{
+  "experiment_name": "equifax_small_demo",
+
+  "environment": {
+    "environment_plugin": "mhbench",
+    "environment_spec": "environments/instrumented/equifax_small_instrumented.json"
+  },
+
+  "attacker_plugin": "incalmo_strategy",
+  "attacker_spec": {
+    "strategy": "GraphSearch"
+  },
+
+  "defender": {
+    "type": "llm_soc",
+    "strategy": "FalcoLLM",
+    "llm_model": "openrouter/anthropic/claude-sonnet-5"
+  },
+
+  "traffic": {
+    "type": "caldera_human",
+    "persona": "office_worker"
+  },
+
+  "trial": 0,
+  "priority": 0,
+  "teardown": true,
+  "overwrite": false
+}
