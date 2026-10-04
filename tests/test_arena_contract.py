@@ -640,10 +640,22 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
     monkeypatch.setattr(dep, "_host_op_sync", fake_host_op)
     monkeypatch.setattr(dep, "_mhbench_ssh_key", lambda cfg: "/scoped/defender_key")
 
-    exp = type("E", (), {"experiment_name": "ci_dyn"})()
+    # The box reaches an add-host'd decoy DIRECTLY (its SG admits the box), so the access is box-relative
+    # with no bastion hop. But the decoy only has MHBench's mgmt keypair, so add_host must inject the
+    # scoped DEFENDER pubkey into the decoy's authorized_keys (via the bastion, with the mgmt key) — else
+    # the box's ConfigureDecoy SSH gets 'Permission denied (publickey)'. Stub the injection + key issuance.
+    injected = {}
+    monkeypatch.setattr(dep, "issue_scoped_keys", lambda cfg: (Path("/keys/attacker_key"), Path("/keys/defender_key")))
+    monkeypatch.setattr(Path, "read_text", lambda self: "ssh-ed25519 AAAAdefenderpub arena-defender_key\n")
+    monkeypatch.setattr(dep, "_inject_pubkey", lambda pub, host, bastion, mgmt: injected.update({"pub": pub, "host": host, "bastion": bastion}) or True)
+
+    exp = type("E", (), {"experiment_name": "ci_dyn", "_bastion_ip": "203.0.113.9"})()
     add = asyncio.run(env.add_host(exp, None, EnvActionRequest(kind=EnvActionKind.ADD_HOST, name="decoy0", role="apache_vuln", subnet="victim_net"), None))
     assert add.ok and add.ip == "192.168.0.42" and add.name == "decoy0"
     assert add.access is not None and add.access.host == "192.168.0.42" and add.access.ssh_common_args == ""  # box-relative
+    # the defender scoped pubkey was injected onto the decoy IP via the bastion
+    assert injected.get("host") == "192.168.0.42" and injected.get("bastion") == "203.0.113.9"
+    assert "defenderpub" in injected.get("pub", "")
     assert calls["add-host"] == {"name": "decoy0", "role": "apache_vuln", "subnet": "victim_net"}
 
     reb = asyncio.run(env.rebuild_host(exp, None, EnvActionRequest(kind=EnvActionKind.REBUILD_HOST, target="192.168.0.11"), None))

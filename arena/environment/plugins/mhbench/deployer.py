@@ -612,10 +612,12 @@ def _host_op_sync(op: str, experiment_name: str, environment_spec: str, cfg: Exp
 
 
 def new_host_setup_access(name: str, ip: str, cfg: ExperimentManagerConfig):
-    """SetupAccess for a freshly added host, as consumed BY THE DEFENDER BOX (in-env): scoped key +
-    EMPTY routing — the box reaches victims directly on its own subnet, with no bastion hop (unlike the
-    harness-side victim access, which proxies through the bastion). The key path is aligned on the box by
-    the defender deploy step."""
+    """SetupAccess for a freshly added host (decoy), as consumed BY THE DEFENDER BOX (in-env): scoped key
+    + EMPTY routing — the box reaches an add-host'd decoy DIRECTLY (its security group admits the box's
+    subnet; verified live that decoy:22 is open from the box), with no bastion hop. The scoped defender key
+    the box offers is injected into the decoy's authorized_keys by add_host (mirroring inject_scoped_keys
+    for the original victims) — without that the box's ConfigureDecoy SSH gets 'Permission denied (publickey)'.
+    The key path is aligned on the box by the defender deploy step."""
     from ....defender.env_spec import DefenderSetupAccess  # lazy: avoid import cycle
     return DefenderSetupAccess(name=name, host=str(ip), user="root",
                        ssh_key=_mhbench_ssh_key(cfg), ssh_common_args="")

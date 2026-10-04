@@ -263,12 +263,39 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return its name/ip + a DEFENDER-SCOPED, box-relative SetupAccess so the box agent can configure
         it in-env. role maps to the backend image inside MHBench (e.g. apache_vuln -> webserver image)."""
         import asyncio
+        from pathlib import Path
+        from ....experiment_log import log
         from ...env_requests import EnvActionResult, EnvActionKind
-        from .deployer import _host_op_sync, new_host_setup_access
+        from .deployer import (_host_op_sync, new_host_setup_access, issue_scoped_keys,
+                               _inject_pubkey, _mhbench_ssh_key)
         res = await asyncio.to_thread(
             _host_op_sync, "add-host", experiment.experiment_name, self.environment_spec, cfg,
             name=request.name, role=(request.role or "decoy"), subnet=request.subnet)
         ip, name = res.get("ip"), (res.get("name") or request.name)
+        # MHBench injects ONLY the broad mgmt keypair on the new decoy. The defender box reaches it with
+        # the SCOPED defender key (the same key inject_scoped_keys puts on the original victims), so that
+        # scoped pubkey must be in the decoy's authorized_keys too — otherwise the box's ConfigureDecoy SSH
+        # gets 'Permission denied (publickey)' (verified live) and the decoy never registers. Inject it here,
+        # reaching the decoy via the bastion with the mgmt key (the decoy has that key), same as
+        # inject_scoped_keys does per victim. bastion_ip is stamped on the experiment in the defender setup
+        # phase (main.py); without it (older single-subnet topologies) we can't reach the decoy to inject.
+        bastion_ip = getattr(experiment, "_bastion_ip", None)
+        if ip and bastion_ip:
+            _, dk = issue_scoped_keys(cfg)
+            dk_pub = Path(str(dk) + ".pub").read_text().strip()
+            mgmt_key = _mhbench_ssh_key(cfg)
+            # A just-created decoy needs ~60-90s before sshd accepts connections, so retry until the mgmt
+            # key reaches it (the decoy carries that key). This finishes BEFORE the box's ConfigureDecoy
+            # runs, so the box's scoped defender key is already trusted by the time it configures the decoy.
+            ok, attempts = False, 0
+            for attempts in range(1, 13):
+                ok = await asyncio.to_thread(_inject_pubkey, dk_pub, str(ip), bastion_ip, mgmt_key)
+                if ok:
+                    break
+                await asyncio.sleep(10)
+            log(experiment.experiment_name,
+                f"add_host: inject defender_key -> decoy {name} ({ip}): "
+                f"{'ok' if ok else 'FAILED'} after {attempts} attempt(s)")
         return EnvActionResult(
             kind=EnvActionKind.ADD_HOST, ok=bool(ip), name=name, ip=ip,
             access=new_host_setup_access(name, ip, cfg) if ip else None,
