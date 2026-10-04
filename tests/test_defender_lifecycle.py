@@ -400,5 +400,23 @@ def test_tty_ssh_inserts_tt():
     assert DefenderPlugin._tty_ssh(["ssh", "-i", "/k", "u@h"]) == ["ssh", "-tt", "-i", "/k", "u@h"]
 
 
+def test_rewrite_access_keys_to_box_paths():
+    """Credential threading (PURE part): a box-resident runner reaches victims with box-local keys, so both
+    ssh_key AND the `-i <key>` inside the bastion ProxyCommand (ssh_common_args) are rewritten harness->box."""
+    harness_key = "/home/u/MHBench/keys/defender_key"
+    box_key = "/opt/arena-defender/keys/defender_key"
+    entries = [
+        {"name": "v0", "host": "10.0.0.5", "ssh_key": harness_key,
+         "ssh_common_args": f'-o IdentitiesOnly=yes -o ProxyCommand="ssh -W %h:%p -i {harness_key} root@bastion"'},
+        {"name": "box", "host": "10.0.0.9", "ssh_key": harness_key, "ssh_common_args": ""},
+    ]
+    out = DefenderPlugin._rewrite_access_keys(entries, {harness_key: box_key})
+    assert all(e["ssh_key"] == box_key for e in out)
+    assert harness_key not in out[0]["ssh_common_args"] and box_key in out[0]["ssh_common_args"]
+    assert out[1]["ssh_common_args"] == ""  # empty routing untouched
+    # original entries not mutated
+    assert entries[0]["ssh_key"] == harness_key
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

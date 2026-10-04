@@ -501,14 +501,50 @@ class DefenderPlugin(BaseModel):
         pid proxies the remote runner, so stop()'s SIGTERM to the local pid tears the box process down too."""
         return [base[0], "-tt", *base[1:]]
 
-    async def _box_push(self, base: list[str], remote_path: str, content: str) -> None:
-        """Write `content` to `remote_path` on the box over the box's ssh access (no scp dependency)."""
+    async def _box_push(self, base: list[str], remote_path: str, content: str, mode: Optional[str] = None) -> None:
+        """Write `content` to `remote_path` on the box over the box's ssh access (no scp dependency). `mode`
+        (e.g. "600") chmods it after — used for shipped key files."""
+        chmod = f" && chmod {mode} {shlex.quote(remote_path)}" if mode else ""
         proc = await asyncio.create_subprocess_exec(
-            *base, f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && cat > {shlex.quote(remote_path)}",
+            *base,
+            f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && cat > {shlex.quote(remote_path)}{chmod}",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, err = await asyncio.wait_for(proc.communicate(content.encode()), timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(f"shipping {remote_path} to the box failed: {err.decode()[-400:]}")
+
+    @staticmethod
+    def _rewrite_access_keys(access_entries: list, key_map: dict) -> list:
+        """PURE (unit-testable): return access entries with ssh_key AND the `-i <key>` path inside
+        ssh_common_args (the bastion ProxyCommand) rewritten per key_map (harness path -> box path), so a
+        box-resident runner reaches victims with keys that exist on the box."""
+        out = []
+        for entry in access_entries:
+            e = dict(entry)
+            k = e.get("ssh_key")
+            if k in key_map:
+                e["ssh_key"] = key_map[k]
+                if e.get("ssh_common_args"):
+                    e["ssh_common_args"] = e["ssh_common_args"].replace(k, key_map[k])
+            out.append(e)
+        return out
+
+    async def _thread_box_credentials(self, base: list[str], paths: dict, access_entries: list) -> list:
+        """Thread the scoped creds to the box: ship each UNIQUE key the access entries reference to a
+        box-local path (chmod 600), then return the entries rewritten to reference the box-local keys. The
+        box runner then reaches victims/box with keys that exist ON THE BOX, not harness paths — the
+        runs_on_box 'creds threaded at launch, not baked into the config' contract."""
+        import os as _os
+        key_dir = f"{paths['dir']}/keys"
+        key_map: dict = {}
+        for entry in access_entries:
+            k = entry.get("ssh_key")
+            if k and k not in key_map:
+                src = Path(_os.path.expanduser(k))
+                box_key = f"{key_dir}/{src.name}"
+                await self._box_push(base, box_key, src.read_text(), mode="600")
+                key_map[k] = box_key
+        return self._rewrite_access_keys(access_entries, key_map)
 
     async def _launch_on_box(self, prepared: "PreparedDefender", config_path: Path, experiment_name: str,
                              cfg: ExperimentManagerConfig, access) -> "asyncio.subprocess.Process":
@@ -524,6 +560,11 @@ class DefenderPlugin(BaseModel):
         # defender_ready marker there). Everything else in the config is run-spec data, safe to ship.
         built = json.loads(Path(config_path).read_text())
         built["log_dir"] = p["log_dir"]
+        # thread the scoped creds to the box (ship keys + rewrite the access paths to box-local copies) so
+        # the box runner reaches victims with keys that exist on the box, not harness paths.
+        if built.get("defender_setup_access"):
+            built["defender_setup_access"] = await self._thread_box_credentials(
+                base, p, built["defender_setup_access"])
         await self._box_push(base, p["runner"], self._box_runner_src().read_text())
         await self._box_push(base, p["config"], json.dumps(built))
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
