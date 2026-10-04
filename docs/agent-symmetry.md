@@ -157,3 +157,35 @@ installed) that can't be derived offline. What's landed vs what's left:
 runner) to prove `_launch_on_box` + box routing end-to-end; then an active-response defender (`llm_soc`)
 to exercise the TCP token channel; then the Defense-repo defenders. The TCP boundary move gets a security
 review before it is trusted.
+
+## Corrections from the live decoy-deploy work (teammate, arena-integration)
+
+Three facts from a peer live-debugging prompt_injection/deception that reshape the box plan:
+
+1. **Cloud ops cannot move to the box → the model is HYBRID, which VALIDATES slice 4.** Even with the
+   engine fully on the box, `AddHost`/`RebuildHost` have no cloud creds / god-key there, so they MUST keep
+   routing to the arena env-action channel (that path is validated — FalcoLLM's RebuildHost works). So a
+   box-resident defender does *host/victim actions natively on the box* but *cloud ops via the env channel*
+   — which is exactly what slice 4's token'd TCP channel is for. The keystone is the right shape; it is not
+   optional for active-response defenders, it is the only way their cloud ops work from the box.
+
+2. **The box is Python 3.8; Perry needs 3.10+ → the full engine ships as a CONTAINER, not a venv.** This is
+   why the current box agent is *thin*. So `_launch_on_box` has two modes: a stdlib-only runner (canary)
+   runs directly under the box's `python3`; a Perry-based engine (llm_soc/deception/prompt_injection) must
+   ship as a **Docker image** and run in a container on the box — the same trick the attacker uses (Incalmo
+   builds the C2 image on the harness, ships it to the foothold, runs it there, and the strategy brain
+   drives it over an `ssh -L` tunnel; see `incalmo_strategy/c2.py`). Mirror that: build the engine image on
+   the harness, ship + run on the box, drive/collect over the scoped SSH. The earlier "scp the runner"
+   sketch only holds for the stdlib canary.
+
+3. **Build on the env-side decoy-key fix (`e2046c2` on arena-integration), don't re-implement.** A mid-run
+   `add_host` decoy carries only the broad mgmt key; the box uses the SCOPED defender key, so the env now
+   injects the scoped pubkey into each decoy's `authorized_keys` (with a ~2min retry for fresh sshd). Also:
+   add-host'd decoys are **directly reachable from the box** (`decoy:22` open; `new_host_setup_access` is a
+   direct hop, not a bastion ProxyCommand) — so the box→decoy path is direct. (The original victims' access
+   still carries the harness→bastion ProxyCommand; confirm whether in-env hosts are likewise directly
+   reachable from the box when converting — the decoy evidence suggests they may be.)
+
+   The thin box agent only wires BlockIP + ConfigureDecoy; AddFakeData/AddHoneyCredentials/StartHoneyService
+   are unwired stubs — the full-engine-on-box path (this work) replaces that, so those don't need wiring
+   into the thin agent.
