@@ -117,6 +117,38 @@ These live behind clearly-labelled "DEFENDER CAPABILITY" banners so the twin str
 Slices 1–2 are behavior-preserving and land first. 3–4 touch the security boundary and the cloud, and
 need live validation (OpenStack; GCP has the known Falco/driver limits).
 
+## Parity map — the ACCURATE state (attacker base ~300 lines, defender ~545)
+
+They are NOT "pretty much identical" and shouldn't be — the defender legitimately does more. Honest accounting:
+
+**Byte-identical (shared machinery):** `__init_subclass__`, `_code_dir`, `_code_python`, `validate_built_config`,
+the classvars (`_registry`/`REQUIRED_CONFIG_KEYS`/`code_dir_field`/`code_python_field`/`_ACCESS_FILE`);
+`_lifecycle` differs by one string literal only; `build_config`/`ui_schema` same shape.
+
+**Parallel (same name + role, structurally twin, only small/essential deltas):** `start`, `stop` (both
+SIGTERM a pid — `experiment.pid` vs `experiment.defender_pid`), `teardown`, `collect_logs`/`run_collect_logs`,
+`example_prepared`, `run_stop` (both now FAILED-guarded; differ only by signal enum + the defender's
+runs_on_box access-load), `primary_access`/`_persist_access`/`_load_access` (attacker persists ONE foothold,
+defender the LIST — box+victims), `run_start` (attacker emits RUNNING; defender doesn't — it's READY only
+once armed).
+
+**Essential divergence (NOT to be forced identical):** defender-only capabilities (`provision_box`,
+`prepare`, `box_ingress`, `defender_vm_budget`, `executes_from_box`, `runs_on_box`); the readiness-marker
+trio (`ready_marker_path`/`clear_ready_marker`/`wait_until_ready`); the box-launch pair
+(`_launch_on_box`/`_wait_box_ready`); the baton (empty `PreparedAttacker` dataclass vs `PreparedDefender`
+with es_url/index/box-agent fields); and the `run_setup` bodies (attacker ~26 lines vs defender ~90 with the
+cred/routing/box-baton injection — the credential-locus asymmetry). Attacker-only `sweep_stale_state` is
+wired to clean-slate; a defender equivalent is a future parity item (when box defenders can orphan state).
+
+**Box-deferred (converge WITH the box work, not before):** the `setup()` signatures (attacker
+`(experiment, cfg, bastion_ip, access)` vs defender `(experiment_name, cfg, bastion_ip, defender_env_spec,
+defender_access)` — aligning touches every defender plugin's override, incl. the Defense repo); and the
+`run_setup`/readiness-marker collapse (the box model makes `setup()` launch-and-wait like the attacker's C2).
+
+So: slice 1 unified the shared machinery, slice 2 + this pass made the lifecycle surface parallel (and added
+the `run_stop` guard + `example_prepared` mirror), but the defender stays ~1.8x larger because it has ~11
+capability/box methods and a heavier `run_setup` the attacker has no need for. That residual is correct.
+
 ## Full conversion (convert every defender to run on the box) — per-component live work
 
 Investigating the real conversion surfaced that it spans **three** components, and several seams are

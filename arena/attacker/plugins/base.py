@@ -281,14 +281,17 @@ class AttackerPlugin(BaseModel):
         return process
 
     async def run_stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+        """Emit STOPPING/STOPPED around stop() (twin of DefenderPlugin.run_stop). Guarded against a prior
+        terminal FAILED and double-stop, since the arena may reach it from more than one path (graceful
+        stop, timeout, teardown)."""
         lc = self._lifecycle(experiment)
-        if lc is not None:
+        if lc is not None and lc.status not in (AttackerSignal.STOPPED, AttackerSignal.FAILED):
             await lc.emit(AttackerSignal.STOPPING)
         access = self._load_access(experiment.experiment_name, cfg)
         try:
             await self.stop(experiment, cfg, access=access)
         finally:
-            if lc is not None:
+            if lc is not None and lc.status != AttackerSignal.FAILED:
                 await lc.emit(AttackerSignal.STOPPED)
 
     async def run_collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path) -> None:

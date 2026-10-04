@@ -151,6 +151,15 @@ class DefenderPlugin(BaseModel):
         already local. A box-resident defender (runs_on_box) overrides this to pull its box logs via
         `access`, mirroring AttackerPlugin.collect_logs."""
 
+    @classmethod
+    def example_prepared(cls) -> "PreparedDefender":
+        """OPTIONAL. A representative PreparedDefender for exercising build_config() OFFLINE — without
+        provision_box() or a cloud/box ES. Twin of AttackerPlugin.example_prepared: the default empty baton
+        suits defenders whose build_config() ignores `prepared`; a telemetry defender that reads es_url /
+        indices off its baton overrides this so the coupling is discoverable and conformance tests
+        (tests/test_plugin_conformance.py) can build its config without provision_box()."""
+        return PreparedDefender()
+
     async def setup(
         self,
         experiment_name: str,
