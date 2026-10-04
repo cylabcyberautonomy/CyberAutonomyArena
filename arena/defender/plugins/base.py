@@ -53,9 +53,10 @@ class DefenderPlugin(BaseModel):
         wait_until_ready / ready_marker_path / clear_ready_marker — the readiness-marker gate: the arena
             blocks on it before the attacker runs; your RUNNER touches the marker once its loop is armed.
         validate_built_config, __init_subclass__ (registration), _lifecycle.
-      Helpers you MAY call (not override): _env_spec_key(env_spec) / _baton_keys(prepared) (build_config
-      key helpers), _code_dir(cfg) / _code_python(cfg). (The subprocess launch + prepare-mode wait are
-      Perry-only and inlined in the Defense/Perry defenders that use them, not here.)
+      Helpers you MAY call (not override): _code_dir(cfg) / _code_python(cfg). (defender_env_spec + the box
+      baton are forwarded into the runner config by run_setup, so build_config never emits them itself — it
+      just RECEIVES env_spec/prepared as args and may read them. The subprocess launch + prepare-mode wait
+      are Perry-only and inlined in the Defense/Perry defenders that use them, not here.)
     """
 
     _registry: ClassVar[dict[str, type["DefenderPlugin"]]] = {}
@@ -268,6 +269,16 @@ class DefenderPlugin(BaseModel):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         built = self.build_config(experiment_name, env_spec, prepared)
         type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
+        # Forward the agent-facing DefenderEnvSpec (host inventory; NO creds) + the Phase-A box baton (es_url /
+        # indices / box agent) into the runner config, uniformly — so no plugin's build_config has to. (It
+        # still RECEIVES env_spec/prepared as args and MAY read them to make decisions; it just isn't forced
+        # to forward them.) Both are credential-free, so they go in the config alongside the other keys below.
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        for _k in ("es_url", "falco_index", "sysflow_index", "box_agent_host", "box_agent_port", "box_agent_token"):
+            _v = getattr(prepared, _k, None)
+            if _v is not None:
+                built[_k] = _v
         # INJECT the credential-bearing SetupAccess + routing (kept OUT of build_config's output by the leak
         # guard). Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts
         # on victims directly, it asks the box agent (which alone holds victim access) and the env.
@@ -380,22 +391,3 @@ class DefenderPlugin(BaseModel):
         that drive run_setup without one."""
         return getattr(experiment, "_defender_lifecycle", None)
 
-    # ---- build_config key helpers (CALL these from build_config; do not override) ----
-    @staticmethod
-    def _env_spec_key(env_spec) -> dict:
-        """The agent-facing DefenderEnvSpec (host inventory / subnets / box — NO credentials) as a config
-        key. A defender's build_config() does `built.update(self._env_spec_key(env_spec))`: it receives the
-        spec as a TYPED arg (symmetric with the attacker's build_config(env_spec, ...)) and emits it itself,
-        instead of the arena injecting it after. Credential-bearing SetupAccess is deliberately NOT here —
-        it stays arena-injected after build_config so build_config's output remains credential-free (the
-        tests/test_plugin_conformance leak guard bans ssh_key / ProxyCommand in build_config output)."""
-        return {"defender_env_spec": env_spec.model_dump()} if env_spec is not None else {}
-
-    @staticmethod
-    def _baton_keys(prepared: "PreparedDefender") -> dict:
-        """The subset of the Phase-A baton that goes into the runner config, skipping None. A telemetry
-        defender's build_config() does `built.update(self._baton_keys(prepared))` so es_url / falco_index /
-        sysflow_index / box_agent_* are baked in — replacing the old 'prepare patches the written config'."""
-        fields = ("es_url", "falco_index", "sysflow_index",
-                  "box_agent_host", "box_agent_port", "box_agent_token")
-        return {f: getattr(prepared, f) for f in fields if getattr(prepared, f, None) is not None}

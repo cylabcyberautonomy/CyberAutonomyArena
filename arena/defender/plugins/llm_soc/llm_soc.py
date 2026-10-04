@@ -125,13 +125,10 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "llm_model": self.llm_model,
-            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec
-            # (injected as defender_env_spec by run_defender), not from the MHBench topology JSON.
+            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec, and
+            # reads the box ES tunnel url + indices + box-agent endpoint — all forwarded into the config by
+            # the framework (run_setup: defender_env_spec + the provision_box baton), not emitted here.
         }
-        # Bake the Phase-A baton (box ES tunnel url + indices, box agent endpoint) the runner reads —
-        # produced by provision_box() before this call, replacing the old prepare_box_es config patch.
-        built.update(self._env_spec_key(env_spec))   # agent-facing host inventory (typed arg)
-        built.update(self._baton_keys(prepared))
         return built
 
     async def provision_box(

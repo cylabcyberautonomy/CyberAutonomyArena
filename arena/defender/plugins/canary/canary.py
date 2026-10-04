@@ -84,9 +84,8 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
         env_spec=None,
         prepared=None,  # Phase-A baton; canary has no box telemetry, so it is unused
     ) -> dict:
-        # management_ip (harness ES), bastion_ip, log_dir, defender_setup_access (per-host key + routing)
-        # are injected by defender.run_defender(); defender_env_spec (host inventory) is emitted here from
-        # the typed env_spec arg.
+        # Only the plugin-specific knobs here; the standard runner keys (defender_env_spec, defender_setup_access,
+        # management_ip, bastion_ip, log_dir, ...) are forwarded by the framework (run_setup) after this.
         built = {
             "experiment_name": experiment_name,
             "checks": self.checks,
@@ -95,7 +94,6 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
             "telemetry_timeout_s": self.telemetry_timeout_s,
             "fail_closed": self.fail_closed,
         }
-        built.update(self._env_spec_key(env_spec))   # agent-facing host inventory (typed arg)
         return built
 
     async def run(
