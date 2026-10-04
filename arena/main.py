@@ -533,7 +533,7 @@ async def _clean_slate() -> None:
             except Exception:
                 logger.exception("Failed to stop attacker process for '%s'", experiment.experiment_name)
             try:
-                await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
+                await experiment.attacker.teardown(experiment.experiment_name, cfg)  # no-op if this attacker has no C2
             except Exception:
                 logger.exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
@@ -570,7 +570,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # teardown, keyed by experiment_name — the arena no longer tracks a container id.
     if experiment.attacker and delete_c2:
         try:
-            await experiment.attacker.stop_c2c(experiment.experiment_name)
+            await experiment.attacker.teardown(experiment.experiment_name, cfg)
         except Exception:
             get_logger(experiment.experiment_name).exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
@@ -614,7 +614,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # are backend-agnostic.)
     if experiment.defender:
         try:
-            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+            await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             get_logger(experiment.experiment_name).exception("Defender teardown failed for '%s'", experiment.experiment_name)
 
@@ -722,12 +722,12 @@ async def _cancel_and_remove(name: str) -> None:
         except Exception:
             logger.exception("Failed to stop attacker process for '%s'", name)
         try:
-            await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
+            await experiment.attacker.teardown(experiment.experiment_name, cfg)  # no-op if this attacker has no C2
         except Exception:
             logger.exception("Failed to stop C2 for '%s'", name)
     if experiment.defender:
         try:  # see the matching call in the normal-finish path above for why this must run first
-            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+            await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             logger.exception("Defender teardown failed for '%s'", name)
     try:
@@ -1039,11 +1039,15 @@ async def _run_experiment(experiment: Experiment) -> None:
                 defender_lc = DefenderLifecycle(on_emit=_defender_signal_recorder(experiment))
                 experiment._defender_lifecycle = defender_lc
                 await defender_lc.send(DefenderCommand.START_SETUP)
-                await defender_lc.emit(DefenderSignal.SETUP_STARTED)
+                # SETUP_STARTED is emitted by DefenderPlugin.run_setup (symmetric with the attacker's
+                # run_setup), not here.
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
-                # setup access (key + bastion routing), symmetric with the attacker.
-                _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
-                _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+                # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
+                # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
+                # reads experiment._attacker_env_spec — no loose args.
+                experiment._defender_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
+                experiment._defender_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+                experiment._bastion_ip = bastion_ip
                 # Defender-requested box ingress: open EXACTLY the ports the defender declares
                 # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
                 # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
@@ -1068,16 +1072,11 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                defender_process = await run_defender(
-                    experiment.defender,
-                    experiment.deployed_environment,
-                    experiment.experiment_name,
-                    cfg,
-                    bastion_ip,
-                    defender_env_spec=_dfn_env_spec,
-                    defender_access=_dfn_access,
-                    env_action_socket=(resolve_socket_path(cfg) if _env_dynamic else None),
-                )
+                # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
+                # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
+                # run_defender then only launches the reactive loop (the defender analog of run_attacker).
+                await experiment.defender.run_setup(experiment, cfg)
+                defender_process = await run_defender(experiment.defender, experiment, cfg)
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:

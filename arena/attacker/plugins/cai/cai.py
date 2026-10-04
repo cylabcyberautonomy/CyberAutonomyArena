@@ -52,7 +52,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
             "api_base": self.api_base,
             "objective": _OBJECTIVE,
             "output_dir": f"{_REMOTE_DIR}/logs/{experiment_name}",
-            "foothold_ip": (env_spec.primary.host if env_spec.primary else None),
+            "foothold_ip": (env_spec.box.ip if env_spec.box else None),
         }
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:

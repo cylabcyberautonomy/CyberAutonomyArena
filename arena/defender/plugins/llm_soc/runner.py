@@ -30,7 +30,7 @@ from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
 
 # The plugin's repo is already importable: the arena spawns this runner with cwd + PYTHONPATH set to it
-# (see the plugin's run() / _run_deception_script), so there is no repo-path key in the config.
+# (see the plugin's run()), so there is no repo-path key in the config.
 
 from elasticsearch import Elasticsearch
 from config.config import Config

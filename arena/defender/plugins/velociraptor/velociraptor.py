@@ -24,7 +24,6 @@ from typing import Literal, Optional
 from pydantic import PrivateAttr
 
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
@@ -68,7 +67,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     async def setup(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
         bastion_ip: Optional[str] = None,
         defender_env_spec=None,
@@ -139,11 +137,12 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
+        env_spec=None,
+        prepared=None,  # Phase-A baton; velociraptor has no box ES, so it is unused
     ) -> dict:
-        # No topology_spec: the monitored estate came from the arena-injected defender_env_spec in setup()
-        # (backend-agnostic); the runner drives the already-deployed server and never parses a topology.
-        return {
+        # No topology_spec: the monitored estate comes from defender_env_spec (forwarded into the config by
+        # the framework, run_setup), backend-agnostic; the runner drives the already-deployed server.
+        built = {
             "experiment_name": experiment_name,
             "install_dir": deploy.INSTALL_DIR,
             "server_ip": self._server_ip,          # the defender box (server runs here)
@@ -155,6 +154,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             "ready_timeout": 600,
             "planted_data_paths": self.planted_data_paths,
         }
+        return built
 
     async def run(
         self,
@@ -179,7 +179,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     async def teardown(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
         # Server+clients live on VMs that MHBench destroys, so this is best-effort:

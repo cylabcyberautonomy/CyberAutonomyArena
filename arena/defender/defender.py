@@ -1,12 +1,10 @@
 import asyncio
-import json
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel
 from pydantic_core import core_schema
 
 from ..config import ExperimentManagerConfig
-from ..environment import DeployedEnvironment
 from .plugins.base import DefenderPlugin
 from ..experiment_log import log, output_root
 from . import plugins  # noqa: F401 — triggers auto-discovery
@@ -42,68 +40,16 @@ class DefenderConfig:
 
 async def run_defender(
     defender: DefenderConfig,
-    environment: Optional[DeployedEnvironment],
-    experiment_name: str,
+    experiment,
     cfg: ExperimentManagerConfig,
-    bastion_ip: Optional[str] = None,
-    defender_env_spec=None,
-    defender_access=None,
-    env_action_socket: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
+    # RUN phase — just launch, the defender analog of run_attacker. DefenderPlugin.run_setup() already did
+    # setup + provision_box + build_config + write + prepare(arm), so the defender is fully armed and its
+    # config is on disk; this only spawns the reactive loop. READY/RUNNING are emitted by the arena after
+    # wait_until_ready (the readiness marker the runner writes once the loop is armed).
+    experiment_name = experiment.experiment_name
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    await defender.setup(experiment_name, environment, cfg, bastion_ip,
-                         defender_env_spec=defender_env_spec, defender_access=defender_access)
-    built = defender.build_config(experiment_name, environment)
-    type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
-    # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
-    # routing per victim), both produced by the environment plugin. A migrated defender reads these
-    # instead of computing its own SSH key / parsing the topology.
-    if defender_env_spec is not None:
-        built["defender_env_spec"] = defender_env_spec.model_dump()
-    # Box-only execution: scope the controller's setup access to the DEFENDER BOX only. The controller is
-    # NOT handed victim-reaching entries — it never acts on victims directly; it asks the box agent (which
-    # alone holds victim access, shipped there by prepare_box_agent) and the env. This makes "executes from
-    # the box" structural: the controller has no victim target+key to act from the arena with. (Residual:
-    # the box key is today the same scoped key that also opens victims — a box-key != victim-key split is a
-    # further hardening.) prepare_box_es/prepare_box_agent still find the box entry they need.
-    _access = list(defender_access or [])
-    if getattr(type(defender), "executes_from_box", False) and defender_env_spec is not None:
-        _box = getattr(defender_env_spec, "box", None)
-        _box_ip = getattr(_box, "ip", None) if _box else None
-        if _box_ip:
-            _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
-    built["defender_setup_access"] = [a.model_dump() for a in _access]
-    # NOTE: the plugin's external repo is NOT injected into the config as a path key. Every defender runner
-    # is spawned with cwd + PYTHONPATH set to that repo (see _run_deception_script / each plugin's run()),
-    # exactly like the attacker, so the runner imports the repo's packages and reads its repo-relative files
-    # (config/config.json) via cwd — no plugin-named key (the old "deception_dir") in the config.
-    # "management_ip" is the harness's own fixed host (cfg.arena_host_ip), NOT an Elasticsearch address — every
-    # defender reads its OWN per-experiment ES on the defender box (see DefenderPlugin.prepare_box_es).
-    # It is kept only so a defender's self-protection knows not to block the harness/manager host. It is
-    # NOT `bastion_ip`/`bastion_ip` below, which is this experiment's own ephemeral bastion floating IP —
-    # Perry's AnsibleRunner needs THAT one to SSH-ProxyCommand into the experiment's internal 192.168.x.x
-    # hosts (ssh -W %h:%p ... root@<bastion>).
-    built["management_ip"] = cfg.arena_host_ip
-    built["bastion_ip"] = bastion_ip
-    built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
-    # Dynamic topology-mutation channel: the defender's RemoteEnvOrchestrator POSTs EnvActionRequest
-    # events to this UDS (see env_action_server.py). No token — the UDS is unreachable from in-env, so the
-    # transport is the boundary. Absent when the defender declared no VM budget (the window is never armed),
-    # so a non-mutating defender gets nothing.
-    if env_action_socket is not None:
-        built["env_action_socket"] = env_action_socket
-        built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
-    config_path.write_text(json.dumps(built, indent=2))
-    log(experiment_name, f"Preparing defender ({defender.type}), config: {config_path}")
-    # EXTERNAL arming phase, symmetric with the attacker's setup(): stand up the box ES and run any
-    # arming that completes before the scenario (decoy / honey-cred deploy for a strategy that arms in
-    # setup). This BLOCKS and raises on failure, so the slow, failure-prone arming finishes — and fails
-    # the experiment — before the attacker starts, instead of racing inside the run loop. run() below
-    # then only launches the reactive loop.
-    prepared = await defender.prepare(config_path, experiment_name, cfg)
-    log(experiment_name,
-        f"Defender prepared (armed_in_setup={prepared.armed_in_setup}); starting run loop")
+    log(experiment_name, f"Starting defender ({defender.type}) run loop, config: {config_path}")
     process = await defender.run(config_path, experiment_name, cfg)
     log(experiment_name, f"Defender process started (pid={process.pid})")
     return process

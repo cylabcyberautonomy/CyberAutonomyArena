@@ -28,10 +28,10 @@ from ..base import AttackerPlugin, PreparedAttacker
 
 
 def _require_access(access):
-    """The HARNESS-ONLY SetupAccess list the arena passes to run_setup (how to reach the footholds to
+    """The HARNESS-ONLY AttackerSetupAccess list the arena passes to run_setup (how to reach the footholds to
     prep them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
     if not access:
-        raise RuntimeError("no SetupAccess passed to the attacker — the arena must pass it to run_setup()")
+        raise RuntimeError("no AttackerSetupAccess passed to the attacker — the arena must pass it to run_setup()")
     return access
 
 
@@ -167,7 +167,7 @@ class IncalmoStrategyAttacker(AttackerPlugin, config_type="incalmo_strategy"):
         # beacons in. Transactional: tear down a partial C2 on failure.
         foothold_access = self.primary_access(access) if access else None
         if foothold_access is None:
-            raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no SetupAccess")
+            raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no AttackerSetupAccess")
         _sentinel, remote_url, local_url = await self.launch_c2c(
             experiment.experiment_name, cfg, bastion_ip, foothold_access=foothold_access)
         try:
@@ -177,13 +177,13 @@ class IncalmoStrategyAttacker(AttackerPlugin, config_type="incalmo_strategy"):
             if local_url:
                 await self.wait_c2c_agent(local_url, experiment.experiment_name)
         except Exception:
-            await self.stop_c2c(experiment.experiment_name)  # tear down a partial C2 (keyed by name)
+            await self.teardown(experiment.experiment_name, cfg)  # tear down a partial C2 (keyed by name)
             raise
         return IncalmoPreparedC2(remote_url=remote_url, local_url=local_url)
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
-        # SetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
+        # AttackerSetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
         await foothold.land_sandcat(_require_access(access), remote_url, cfg, experiment.experiment_name)
         # Only install msf for strategies that actually dispatch Metasploit ops (opt-in per strategy
         # to avoid metasploit-framework's large download for runs that never use it).
@@ -203,7 +203,7 @@ class IncalmoStrategyAttacker(AttackerPlugin, config_type="incalmo_strategy"):
     async def wait_c2c_agent(self, local_url: str, experiment_name: str) -> None:
         await wait_for_agent(local_url, experiment_name)
 
-    async def stop_c2c(self, experiment_name: str) -> None:
+    async def teardown(self, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
         await stop_c2c_server(experiment_name)
 
     # ---- strategy-specific config + launch -----------------------------------------------------------

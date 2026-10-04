@@ -1,5 +1,4 @@
 import asyncio
-import json
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -7,7 +6,6 @@ from pydantic_core import core_schema
 
 from ..config import ExperimentManagerConfig
 from .plugins.base import AttackerPlugin, PreparedAttacker
-from .env_spec import AttackerEnvSpec
 from ..experiment_log import log, output_root
 from . import plugins  # noqa: F401 — triggers auto-discovery
 
@@ -46,19 +44,11 @@ async def run_attacker(
     cfg: ExperimentManagerConfig,
     prepared: PreparedAttacker,
 ) -> asyncio.subprocess.Process:
+    # RUN phase — just launch. setup() produced `prepared` and build_config + write already ran in
+    # run_setup (symmetric with the defender), so this only starts the attack process.
     experiment_name = experiment.experiment_name
-    env_spec = experiment._attacker_env_spec  # adversary-safe spec the arena attached (env-produced)
-
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    built = attacker.build_config(experiment_name, env_spec, prepared)
-
-    type(attacker).validate_built_config(built)  # fail fast if the config drifts from the runner contract
-    
-    config_path.write_text(json.dumps(built, indent=2))
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")
-
     process = await attacker.run_start(experiment, prepared, config_path, cfg)
     log(experiment_name, f"Attacker process started (pid={process.pid})")
-    
     return process

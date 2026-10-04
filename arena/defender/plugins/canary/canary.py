@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
@@ -82,11 +81,12 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
+        env_spec=None,
+        prepared=None,  # Phase-A baton; canary has no box telemetry, so it is unused
     ) -> dict:
-        # management_ip (harness ES), bastion_ip, log_dir, defender_env_spec (host inventory) and
-        # defender_setup_access (per-host key + routing) are injected by defender.run_defender().
-        return {
+        # Only the plugin-specific knobs here; the standard runner keys (defender_env_spec, defender_setup_access,
+        # management_ip, bastion_ip, log_dir, ...) are forwarded by the framework (run_setup) after this.
+        built = {
             "experiment_name": experiment_name,
             "checks": self.checks,
             "canary_host": self.canary_host,
@@ -94,6 +94,7 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
             "telemetry_timeout_s": self.telemetry_timeout_s,
             "fail_closed": self.fail_closed,
         }
+        return built
 
     async def run(
         self,

@@ -78,11 +78,14 @@ _KALI_FOOTHOLD = "kali"  # logical name for the attacker's foothold (MHBench's k
 def attacker_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
     """Build the adversary-safe AttackerEnvSpec (objective + foothold identity only — no keys, no
     bastion routing)."""
-    from ....attacker.env_spec import AttackerEnvSpec, AttackerFoothold  # lazy: avoid import cycle
+    from ....attacker.env_spec import AttackerEnvSpec, AttackerBox  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
+    # The attacker is handed only its own box (the foothold); the estate (hosts/subnets) is left empty —
+    # the attacker discovers it. Additional footholds surface via AttackerEnvSpec.footholds once hosts it
+    # holds creds on are populated (none today).
     return AttackerEnvSpec(
         objective=(deployed.spec if deployed else None) or "none",
-        footholds=[AttackerFoothold(name=_KALI_FOOTHOLD, host=kali_ip, user="root")] if kali_ip else [],
+        box=AttackerBox(name=_KALI_FOOTHOLD, ip=kali_ip, user="root") if kali_ip else None,
     )
 
 
@@ -90,7 +93,7 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: O
     """Build the harness-only SetupAccess for the attacker's foothold (how to reach it to prep it —
     key + routing through the bastion). Never given to the adversary. ssh_common_args routes through
     the bastion via ProxyCommand; the plugin stamps in the scoped attacker key."""
-    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    from ....attacker.env_spec import AttackerSetupAccess  # lazy: avoid import cycle
     kali_ip = str(deployed.ip) if (deployed and deployed.ip) else None
     if not kali_ip:
         return []
@@ -101,7 +104,7 @@ def attacker_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: O
             f'-o ProxyCommand="ssh -W %h:%p -i {key} -o BatchMode=yes -o PasswordAuthentication=no '
             f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{bastion_ip}"'
         )
-    return [SetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
+    return [AttackerSetupAccess(name=_KALI_FOOTHOLD, host=kali_ip, user="root", ssh_key=key, ssh_common_args=proxy)]
 
 
 _ATTACKER_SUBNET = "attacker_subnet"
@@ -188,7 +191,7 @@ def _defender_subnets(topology_path: Path, project_name: Optional[str]):
     no attacker-adjacency hint. The one placement hint is `perimeter`, taken straight from the topology's
     `perimeter` marker (the internet-facing/DMZ tier — a legitimate estate property), NOT inferred from
     the attacker's position."""
-    from ....defender.env_spec import DefenderSubnet, DefenderHost  # lazy: avoid import cycle
+    from ....defender.env_spec import DefenderSubnet, DefenderHost, DefenderUser  # lazy: avoid import cycle
 
     topo = json.loads(Path(topology_path).read_text())
     nets = topo.get("networks", [])
@@ -212,7 +215,7 @@ def _defender_subnets(topology_path: Path, project_name: Optional[str]):
                 name=h["name"],
                 ip=str(ip) if ip else None,
                 role=_role_from_name(h["name"]),
-                users=_host_users(h.get("vm_type", "")),
+                users=[DefenderUser(name=u) for u in _host_users(h.get("vm_type", ""))],
                 # Runs sysflow/falco: MHBench attaches start_sysflow/start_defender_services to exactly
                 # the "*_instrumented" vm_types (src/registry/online_registry.yaml); the env ships their
                 # telemetry to the box. kali_running has no stack, so it's excluded.
@@ -371,7 +374,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
     inventory, AND the full subnet structure with backend-resolved network/sg NAMES (so a decoy defender
     builds Perry's Network straight from here without parsing a backend topology — the old defender-side
     topology.py shim is gone). No creds/routing."""
-    from ....defender.env_spec import DefenderEnvSpec, DefenderHost  # lazy: avoid import cycle
+    from ....defender.env_spec import DefenderEnvSpec, DefenderHost, DefenderUser  # lazy: avoid import cycle
     topo = deployed.topology_spec if deployed else None
     project_name = deployed.project_name if deployed else None
     hosts = []
@@ -381,7 +384,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
             ip = h.get("ip_address")
             hosts.append(DefenderHost(
                 name=h["name"], ip=str(ip) if ip else None, role=_role_from_name(h["name"]),
-                users=_host_users(h.get("vm_type", "")),
+                users=[DefenderUser(name=u) for u in _host_users(h.get("vm_type", ""))],
                 telemetry=h.get("vm_type", "").endswith("_instrumented"),
             ))
         subnets, network_name, management_sg = _defender_subnets(Path(topo), project_name)
@@ -398,7 +401,7 @@ def defender_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentMa
 def defender_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: Optional[str], cfg: ExperimentManagerConfig):
     """Build the harness-only SetupAccess for each victim the defender may reach — key + bastion
     routing. Never given to the defender's brain; the plugin stamps in the scoped defender key."""
-    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
+    from ....defender.env_spec import DefenderSetupAccess  # lazy: avoid import cycle
     topo = deployed.topology_spec if deployed else None
     if not (topo and Path(topo).exists()):
         return []
@@ -408,13 +411,13 @@ def defender_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: O
     for h in _iter_victims(topo):
         ip = h.get("ip_address")
         if ip:
-            out.append(SetupAccess(name=h["name"], host=str(ip), user="root",
+            out.append(DefenderSetupAccess(name=h["name"], host=str(ip), user="root",
                                    ssh_key=key, ssh_common_args=proxy))
     # ...plus the defender box itself: the harness reaches it via the bastion (same jump as victims) to
     # launch the defender there. Reached at its in-env IP, NOT the mgmt host — it's a real isolated box.
     box = _defender_box_host(topo)
     if box and box.get("ip_address"):
-        out.append(SetupAccess(name=box["name"], host=str(box["ip_address"]), user="root",
+        out.append(DefenderSetupAccess(name=box["name"], host=str(box["ip_address"]), user="root",
                                ssh_key=key, ssh_common_args=proxy))
     return out
 
@@ -612,6 +615,6 @@ def new_host_setup_access(name: str, ip: str, cfg: ExperimentManagerConfig):
     EMPTY routing — the box reaches victims directly on its own subnet, with no bastion hop (unlike the
     harness-side victim access, which proxies through the bastion). The key path is aligned on the box by
     the defender deploy step."""
-    from ....attacker.env_spec import SetupAccess  # lazy: avoid import cycle
-    return SetupAccess(name=name, host=str(ip), user="root",
+    from ....defender.env_spec import DefenderSetupAccess  # lazy: avoid import cycle
+    return DefenderSetupAccess(name=name, host=str(ip), user="root",
                        ssh_key=_mhbench_ssh_key(cfg), ssh_common_args="")

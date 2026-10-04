@@ -32,7 +32,7 @@ class _FakeDefender(DefenderPlugin, config_type="_fake_defender_test"):
     def ui_schema(cls):
         return {"config_type": "_fake_defender_test", "label": "fake", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def run(self, config_path, experiment_name, cfg):
@@ -167,12 +167,20 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
     def ui_schema(cls):
         return {"config_type": "_order_defender_test", "label": "order", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    async def provision_box(self, experiment_name, cfg, bastion_ip=None,
+                            defender_env_spec=None, defender_access=None, needs_agent=False):
+        _ORDER_CALLS.append("provision_box")  # Phase A: produce the baton BEFORE build_config
+        return PreparedDefender(es_url="http://127.0.0.1:1")
+
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
+        _ORDER_CALLS.append("build_config")
+        # the Phase-A baton reaches build_config (not patched into the written config afterward)
+        assert prepared is not None and prepared.es_url == "http://127.0.0.1:1"
         return {"experiment_name": experiment_name}
 
     async def prepare(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("prepare")
-        return PreparedDefender(armed_in_setup=True)
+        return PreparedDefender()
 
     async def run(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("run")
@@ -187,7 +195,7 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
     def ui_schema(cls):
         return {"config_type": "_prepare_fails_defender_test", "label": "pfail", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment):
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def prepare(self, config_path, experiment_name, cfg):
@@ -199,32 +207,47 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
 
 
 def _run_cfg(tmp_path: Path):
-    # the attrs run_defender touches: output_dir, deception_dir, arena_host_ip.
+    # the cfg attrs run_defender touches: output_dir, arena_host_ip, defender_ready_timeout_seconds.
     return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, arena_host_ip="10.0.0.1",
                            defender_ready_timeout_seconds=30.0)
 
 
+def _run_exp(experiment_name: str):
+    """A minimal fake Experiment carrying what run_defender reads off it — the arena attaches these before
+    the call (deployed_environment + the env-produced _defender_env_spec / _defender_access / _bastion_ip),
+    exactly as the attacker's _attacker_env_spec. No _env_dynamic => no env_action_socket is derived."""
+    return SimpleNamespace(experiment_name=experiment_name, deployed_environment=None,
+                           _defender_env_spec=None, _defender_access=None, _bastion_ip=None)
+
+
 def test_base_prepare_is_noop_baton(tmp_path):
-    """A defender with no external arming (the base default) returns an empty baton, armed_in_setup=False:
-    its arming, if any, happens in the loop and still uses the readiness marker."""
+    """A defender with no external arming (the base default) returns an empty baton: its arming, if any,
+    happens in the loop and still uses the readiness marker."""
     prepared = asyncio.run(_FakeDefender().prepare(tmp_path / "c.json", "p", _cfg(tmp_path)))
     assert isinstance(prepared, PreparedDefender)
-    assert prepared.armed_in_setup is False
+    assert prepared.es_url is None  # empty baton
 
 
 def test_prepared_defender_baton_roundtrips():
-    """The baton crosses the prepare->run process boundary as JSON (the prepare-mode runner writes it,
-    the arena reads it back in _run_prepare_and_wait)."""
-    back = PreparedDefender.model_validate_json(PreparedDefender(armed_in_setup=True).model_dump_json())
-    assert back.armed_in_setup is True
+    """The box baton round-trips as JSON (a Perry defender's prepare-mode runner writes it and
+    _run_prepare_and_wait reads it back; provision_box likewise returns one build_config consumes)."""
+    back = PreparedDefender.model_validate_json(
+        PreparedDefender(es_url="http://127.0.0.1:9200", falco_index="falco").model_dump_json())
+    assert back.es_url == "http://127.0.0.1:9200" and back.falco_index == "falco"
 
 
 def test_run_defender_runs_prepare_before_run(tmp_path):
     """The external-arming contract: run_defender calls prepare() (deploy decoys / plant creds to
     completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
     _ORDER_CALLS.clear()
-    proc = asyncio.run(run_defender(_OrderDefender(), None, "ord", _run_cfg(tmp_path)))
-    assert _ORDER_CALLS == ["prepare", "run"]
+    d, exp, cfg = _OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)
+    async def _go():
+        prepared = await d.run_setup(exp, cfg)   # SETUP phase: setup + provision_box -> baton
+        return await run_defender(d, exp, cfg)   # RUN phase: build_config(baton) -> prepare -> run
+    proc = asyncio.run(_go())
+    # the unified lifecycle: setup-phase baton (provision_box) -> build_config(baton) -> arming (prepare)
+    # -> run, mirroring the attacker's _drive_attacker_setup()->run_attacker(..., prepared).
+    assert _ORDER_CALLS == ["provision_box", "build_config", "prepare", "run"]
     assert proc.pid == 4321
 
 
@@ -232,8 +255,12 @@ def test_run_defender_aborts_when_prepare_fails(tmp_path):
     """Prepare (external arming) failing must fail the experiment and NEVER launch the run loop — an
     undefended environment is never handed to the attacker (why prepare() blocks and raises)."""
     _ORDER_CALLS.clear()
+    d, exp, cfg = _PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)
+    async def _go():
+        prepared = await d.run_setup(exp, cfg)
+        return await run_defender(d, exp, cfg)
     with pytest.raises(RuntimeError, match="decoy deploy failed"):
-        asyncio.run(run_defender(_PrepareFailsDefender(), None, "ordfail", _run_cfg(tmp_path)))
+        asyncio.run(_go())
     assert "run-should-not-run" not in _ORDER_CALLS
 
 

@@ -159,9 +159,16 @@ async def teardown(self, experiment, cfg, lc=None) -> None: # tear the network d
 def attacker_spec(self, deployed, cfg) -> AttackerEnvSpec
 def defender_spec(self, deployed, cfg) -> DefenderEnvSpec    # host inventory {name, ip, role}
 # SETUP ACCESS (scoped key + bastion routing — used at setup time):
-def attacker_setup_access(self, deployed, mgmt_ip, cfg) -> list[SetupAccess]
-def defender_setup_access(self, deployed, mgmt_ip, cfg) -> list[SetupAccess]
+def attacker_setup_access(self, deployed, mgmt_ip, cfg) -> list[AttackerSetupAccess]
+def defender_setup_access(self, deployed, mgmt_ip, cfg) -> list[DefenderSetupAccess]
 ```
+**Symmetric specs.** `attacker/env_spec.py` and `defender/env_spec.py` MIRROR each other: the same parallel
+type tree with identical fields — `AttackerUser`/`DefenderUser`, `AttackerHost`/`DefenderHost`,
+`AttackerSubnet`/`DefenderSubnet`, `AttackerBox`/`DefenderBox`, `AttackerEnvSpec`/`DefenderEnvSpec`,
+`AttackerSetupAccess`/`DefenderSetupAccess`. The ONLY difference is which fields the producer *populates*
+(the info a system is entitled to know): the attacker gets just `objective` + its `box` (the foothold); the
+defender gets `objective` + `box` (the defender box) + the estate (`hosts`/`subnets`). `AttackerEnvSpec`
+also derives a `footholds` list (its `box` + any host it holds creds on) — see the two files' docstrings.
 
 **Scoped credentials — the core security contract.** Issue a separate key per system, each scoped to only
 that system's hosts; a leaked attacker key must open the foothold and nothing else:

@@ -52,11 +52,11 @@ import arena.defender.plugins   # noqa: F401
 import arena.traffic.plugins    # noqa: F401
 import arena.environment.plugins  # noqa: F401
 from arena.attacker.plugins.base import AttackerPlugin
-from arena.defender.plugins.base import DefenderPlugin
+from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
 from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment.plugins.base import EnvironmentPlugin
-from arena.environment import DeployedEnvironment, build_environment
-from arena.attacker.env_spec import AttackerEnvSpec, AttackerFoothold
+from arena.environment import build_environment
+from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
 
 _ARENA_ROOT = Path(__file__).resolve().parent.parent / "arena"
 
@@ -70,9 +70,8 @@ def _real_plugins(registry: dict) -> list[str]:
 # A canonical adversary-safe spec + deployed env that build_config consumes (no cloud needed).
 _FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective="conformance",
-    footholds=[AttackerFoothold(name="kali", host="192.168.202.100", user="root")],
+    box=AttackerBox(name="kali", ip="192.168.202.100", user="root"),
 )
-_FAKE_ENV = DeployedEnvironment(topology_spec="/tmp/equifax_small.json", ip="192.168.202.100", spec="equifax_small")
 
 # A credential/routing leak in an agent-facing config is exactly what the adversary-safe vs harness-only
 # split forbids (see docs/security-model.md). These target SSH/management material specifically — an LLM
@@ -325,7 +324,7 @@ def test_defender_plugin_conforms(name):
         problems.append(f"box_ingress() raised {type(e).__name__}: {e}")
     # build_config: well-formed, echoes the experiment name, leaks no SSH credential/routing
     try:
-        built = instance.build_config("ci_conformance", _FAKE_ENV)
+        built = instance.build_config("ci_conformance", None, PreparedDefender())
         if name not in _BUILD_CONFIG_LEAK_BASELINE:  # the leak guard for baselined plugins lives in test_no_god_key.py
             problems += _config_leak_problems(built, "build_config()")
         problems += _declared_keys_problems(cls, built)
