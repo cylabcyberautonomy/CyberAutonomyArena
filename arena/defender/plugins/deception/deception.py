@@ -232,7 +232,11 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         #    Perry Python — which needs py3.10+ — so the box's py3.8 is fine). Via the bastion jump.
         rsync_e = "ssh " + " ".join(shlex.quote(o) for o in ssh_opts)
         subprocess.run(
+            # artifacts/ is ansible-runner's OWN output (gitignored UUID job dirs — can grow to GBs over a
+            # live checkout's lifetime; no playbook reads it), so never ship it to the box: it has blown the
+            # 600s timeout on a bloated checkout. The box needs the YAML + vendored .deb/.zip inputs only.
             ["rsync", "-a", "--delete", "-e", rsync_e, "--exclude", ".git", "--exclude", "__pycache__",
+             "--exclude", "artifacts",
              repo_dir.rstrip("/") + "/ansible/", f"{target}:/root/ansible/"],
             check=True, timeout=600)
         agent_src = Path(repo_dir) / "defender" / "box_agent" / "agent.py"
