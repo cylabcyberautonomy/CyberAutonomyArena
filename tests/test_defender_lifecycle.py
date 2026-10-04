@@ -337,21 +337,67 @@ def test_box_access_persist_load_roundtrip(tmp_path):
     assert back is not None and [a.host for a in back] == ["10.0.0.9", "10.0.0.10"]
 
 
-def test_unstarted_box_launch_is_not_implemented(tmp_path):
-    """The box launch itself is a scaffold stub — a real runs_on_box defender that doesn't override it
-    gets a clear NotImplementedError pointing at the slice-3 work, not a silent no-op."""
-    class _Bare(DefenderPlugin, config_type="_bare_box_defender_test"):
-        type: str = "_bare_box_defender_test"
+def test_box_run_command_stdlib():
+    """box_python=None (stdlib runner, e.g. canary) => the box run-command runs the shipped runner under the
+    box's own python3, under _BOX_DIR, with no uv bootstrap. _box_run_command is PURE (no I/O)."""
+    cmd = _BoxDefender()._box_run_command()
+    assert cmd.startswith("set -e; mkdir -p /opt/arena-defender /opt/arena-defender/logs")
+    assert "exec python3 /opt/arena-defender/runner.py /opt/arena-defender/defender_config.json" in cmd
+    assert "uv venv" not in cmd and "astral.sh" not in cmd
+
+
+class _UvBoxDefender(DefenderPlugin, config_type="_uv_box_defender_test"):
+    """uv-venv box engine fake: box_python set + box_pip_spec overridden. '_'-prefixed => conformance skips."""
+    type: str = "_uv_box_defender_test"
+    runs_on_box: ClassVar[bool] = True
+    box_python: ClassVar[str] = "3.12"
+
+    @classmethod
+    def ui_schema(cls):
+        return {"config_type": "_uv_box_defender_test", "label": "uv", "fields": [], "cartesian_product": False}
+
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
+        return {"experiment_name": experiment_name}
+
+    async def run(self, config_path, experiment_name, cfg):
+        return SimpleNamespace(returncode=None)
+
+    def box_pip_spec(self):
+        return "my-engine-pkg"
+
+
+def test_box_run_command_uv():
+    """box_python set => install uv + a standalone CPython venv (the Terminus pattern, sidestepping the box's
+    broken apt + missing venv module) + the engine, then run the runner under that venv."""
+    cmd = _UvBoxDefender()._box_run_command()
+    assert "command -v uv" in cmd and "astral.sh/uv/install.sh" in cmd
+    assert "uv venv /opt/arena-defender/venv --python 3.12" in cmd
+    assert "uv pip install --python /opt/arena-defender/venv/bin/python my-engine-pkg" in cmd
+    assert "exec /opt/arena-defender/venv/bin/python /opt/arena-defender/runner.py /opt/arena-defender/defender_config.json" in cmd
+
+
+def test_uv_box_defender_requires_pip_spec():
+    """A uv-venv box engine (box_python set) that doesn't override box_pip_spec() fails loud with a clear
+    NotImplementedError pointing at slice 3 — not a silently-bare venv."""
+    class _UvBare(DefenderPlugin, config_type="_uv_bare_box_defender_test"):
+        type: str = "_uv_bare_box_defender_test"
         runs_on_box: ClassVar[bool] = True
+        box_python: ClassVar[str] = "3.12"
         @classmethod
         def ui_schema(cls):
-            return {"config_type": "_bare_box_defender_test", "label": "bare", "fields": [], "cartesian_product": False}
+            return {"config_type": "_uv_bare_box_defender_test", "label": "uvbare", "fields": [], "cartesian_product": False}
         def build_config(self, experiment_name, env_spec=None, prepared=None):
             return {"experiment_name": experiment_name}
         async def run(self, config_path, experiment_name, cfg):
             return SimpleNamespace(returncode=None)
     with pytest.raises(NotImplementedError, match="slice 3"):
-        asyncio.run(_Bare().start(PreparedDefender(), tmp_path / "c.json", "p", _run_cfg(tmp_path)))
+        _UvBare()._box_run_command()
+
+
+def test_tty_ssh_inserts_tt():
+    """_launch_on_box runs over `ssh -tt` so the local ssh pid proxies the remote runner (stop() SIGTERM
+    propagates). _tty_ssh inserts -tt right after `ssh`, before the opts/host."""
+    assert DefenderPlugin._tty_ssh(["ssh", "-i", "/k", "u@h"]) == ["ssh", "-tt", "-i", "/k", "u@h"]
 
 
 if __name__ == "__main__":

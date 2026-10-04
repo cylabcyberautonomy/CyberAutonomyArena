@@ -1,7 +1,11 @@
 import asyncio
+import inspect
 import json
 import os
+import shlex
 import signal
+import subprocess
+import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import ClassVar, Optional
@@ -91,6 +95,14 @@ class DefenderPlugin(BaseModel):
     # (_wait_box_ready) are stubs until live-validated; no shipped defender sets this yet. (This axis
     # subsumes executes_from_box, which slice 4 folds in once the control-plane channel lands.)
     runs_on_box: ClassVar[bool] = False
+
+    # Box runtime for a runs_on_box defender (how _launch_on_box provides the interpreter the box runner
+    # needs): None => run the shipped runner.py under the box's own `python3` (a stdlib-only runner, e.g.
+    # canary — the box is Ubuntu 20.04/py3.8). A version string like "3.12" => provision a `uv` venv with
+    # that interpreter on the box (downloads a standalone CPython — sidesteps the box's broken apt + missing
+    # venv module, the Terminus pattern) and run under it; such a plugin must also override box_pip_spec().
+    box_python: ClassVar[Optional[str]] = None
+    _BOX_DIR: ClassVar[str] = "/opt/arena-defender"  # where the runner + config (+ uv venv) live on the box
 
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
@@ -437,30 +449,120 @@ class DefenderPlugin(BaseModel):
         except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
             return None
 
-    # ------------------------------------------------------------------ SLICE 3 SCAFFOLD: box execution
-    # Opt-in via runs_on_box; stubs until live-validated (no shipped defender sets runs_on_box yet). These
-    # make the defender's long-running process symmetric with the attacker's: setup()/run_start launch it
-    # into the env via scoped access and block until it reports ready, so prepare()/the readiness marker
-    # collapse into the setup wait (the direct mirror of the attacker's C2 bring-up + wait_c2c_agent).
+    # ------------------------------------------------------------------ SLICE 3: box execution
+    # Opt-in via runs_on_box. Makes the defender's long-running process symmetric with the attacker's:
+    # run_start launches it INTO the env over the scoped box access and blocks until it reports ready, so
+    # prepare()/the readiness marker collapse into the launch wait (the mirror of the attacker's C2 bring-up
+    # + wait_c2c_agent). Control-plane cloud ops (restore/BlockIP/decoy) still route to the env over the
+    # token'd TCP channel (slice 4) — the box holds no cloud creds. Command construction is PURE
+    # (unit-testable); only the ship/ssh round-trips need a live box.
+    def _box_runner_src(self) -> Path:
+        """The plugin's own runner.py, shipped to the box. Each plugin keeps its runner next to its module
+        (the plugin-self-containment rule); the base just locates it generically."""
+        return Path(inspect.getfile(type(self))).parent / "runner.py"
+
+    def _box_paths(self) -> dict:
+        d = self._BOX_DIR
+        return {"dir": d, "runner": f"{d}/runner.py", "config": f"{d}/defender_config.json",
+                "venv": f"{d}/venv", "log_dir": f"{d}/logs", "ready": f"{d}/logs/defender_ready"}
+
+    def box_pip_spec(self) -> str:
+        """What `uv pip install` installs for a uv-venv box engine (e.g. the Perry defender package). Only
+        called when box_python is set; a stdlib runner (box_python is None, e.g. canary) never needs it.
+        Override in a uv-mode plugin — the base raises so a misconfigured one fails loud, not silently bare."""
+        raise NotImplementedError(
+            f"{type(self).__name__} sets box_python={self.box_python!r} but does not override box_pip_spec() "
+            "— a uv-venv box engine must declare what to install (see docs/agent-symmetry.md slice 3)")
+
+    def _box_run_command(self) -> str:
+        """PURE (no I/O — unit-testable): the remote shell command run over SSH to launch the box runner.
+          box_python is None  -> run the shipped runner under the box's own python3 (stdlib runner, e.g. canary).
+          box_python == "3.N" -> install uv + a standalone CPython venv (Terminus pattern, sidesteps the box's
+                                 broken apt + missing venv module) + the engine, then run under that venv.
+        `exec` so the runner replaces the shell as the ssh session's process; with `ssh -tt` the local ssh
+        pid then proxies it, so stop()'s local SIGTERM tears the box process down too."""
+        p = self._box_paths()
+        prelude = f"set -e; mkdir -p {shlex.quote(p['dir'])} {shlex.quote(p['log_dir'])}"
+        if self.box_python is None:
+            return f"{prelude}; exec python3 {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
+        venv_py = shlex.quote(p["venv"] + "/bin/python")
+        boot = (
+            "export PATH=$HOME/.local/bin:$PATH; "
+            "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh; "
+            "export PATH=$HOME/.local/bin:$PATH; "
+            f"test -d {shlex.quote(p['venv'])} || uv venv {shlex.quote(p['venv'])} --python {shlex.quote(self.box_python)}; "
+            f"uv pip install --python {venv_py} {self.box_pip_spec()}"
+        )
+        return f"{prelude}; {boot}; exec {venv_py} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
+
+    @staticmethod
+    def _tty_ssh(base: list[str]) -> list[str]:
+        """Insert `-tt` right after `ssh` so the remote process is bound to the ssh session: the LOCAL ssh
+        pid proxies the remote runner, so stop()'s SIGTERM to the local pid tears the box process down too."""
+        return [base[0], "-tt", *base[1:]]
+
+    async def _box_push(self, base: list[str], remote_path: str, content: str) -> None:
+        """Write `content` to `remote_path` on the box over the box's ssh access (no scp dependency)."""
+        proc = await asyncio.create_subprocess_exec(
+            *base, f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && cat > {shlex.quote(remote_path)}",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(proc.communicate(content.encode()), timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"shipping {remote_path} to the box failed: {err.decode()[-400:]}")
+
     async def _launch_on_box(self, prepared: "PreparedDefender", config_path: Path, experiment_name: str,
                              cfg: ExperimentManagerConfig, access) -> "asyncio.subprocess.Process":
-        """Launch the defender runner FROM THE BOX, reaching it over SSH with the box DefenderSetupAccess,
-        and return a process handle — mirroring how the attacker's setup() brings its C2/agent up on the
-        foothold (plugins/incalmo_strategy). Steps (TODO — live-validated in slice 3):
-          1. box = self.primary_access(access)            # the box entry (match env_spec.box.ip)
-          2. ship the runner + its config to the box (scp over box.ssh_base()), or run it in place
-          3. start it via box.ssh_base() and wrap that ssh in an asyncio subprocess to return
-        Credentials ride in `access` (threaded at launch), NOT in the runner config."""
-        raise NotImplementedError(
-            "box execution (runs_on_box=True) is scaffolded, not yet implemented — see docs/agent-symmetry.md slice 3")
+        """Launch the defender runner FROM THE BOX over SSH and return the ssh process (local pid proxies the
+        remote). Mirrors the attacker's foothold bring-up (terminus/incalmo): ship the runner + config, then
+        run it over `ssh -tt`. Credentials ride in `access` (threaded at launch), NEVER in the shipped config;
+        the config's log_dir is rewritten to a box path so the runner's readiness marker lands on the box,
+        which _wait_box_ready then bridges to the local marker the arena's wait_until_ready polls."""
+        box = self.primary_access(access)
+        base = box.ssh_base()
+        p = self._box_paths()
+        # ship the runner + a box-local copy of the config (log_dir -> box path; the runner writes its
+        # defender_ready marker there). Everything else in the config is run-spec data, safe to ship.
+        built = json.loads(Path(config_path).read_text())
+        built["log_dir"] = p["log_dir"]
+        await self._box_push(base, p["runner"], self._box_runner_src().read_text())
+        await self._box_push(base, p["config"], json.dumps(built))
+        log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "a")  # noqa: SIM115 — handed to the long-running subprocess
+        proc = await asyncio.create_subprocess_exec(
+            *self._tty_ssh(base), self._box_run_command(),
+            stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+        # block until the box runner arms, then bridge its box marker to the local one (main.py's
+        # wait_until_ready stays untouched — it keeps polling the local marker).
+        await self._wait_box_ready(experiment_name, cfg, box, proc)
+        return proc
 
-    async def _wait_box_ready(self, experiment, cfg: ExperimentManagerConfig, process, access) -> float:
-        """Block until the box runner reports armed, polling the box over SSH (`access`) — the box analog
-        of wait_until_ready's local-marker poll and the direct mirror of the attacker's wait_c2c_agent
-        (poll the C2 until an agent beacons). When runs_on_box lands, run_setup blocks on THIS instead of
-        the arena polling a local marker, so prepare()/wait_until_ready collapse into the setup wait. TODO."""
-        raise NotImplementedError(
-            "box readiness wait is scaffolded, not yet implemented — see docs/agent-symmetry.md slice 3")
+    async def _wait_box_ready(self, experiment_name: str, cfg: ExperimentManagerConfig, box, process,
+                              timeout_s: float = 600.0, poll_s: float = 5.0) -> float:
+        """Poll the box over SSH until the runner writes its readiness marker (the box analog of the local
+        wait_until_ready poll / the attacker's wait_c2c_agent), then TOUCH the local marker so the arena's
+        wait_until_ready passes unchanged. Raises if the box process dies first or the wait times out — an
+        undefended run must never be reported defended. Returns seconds waited."""
+        p = self._box_paths()
+        base = box.ssh_base()
+        start = time.monotonic()
+        while True:
+            if process.returncode is not None:
+                raise RuntimeError(
+                    f"box defender process exited (rc={process.returncode}) before arming — see defender.log")
+            check = await asyncio.create_subprocess_exec(
+                *base, f"test -f {shlex.quote(p['ready'])} && echo READY || true",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(check.communicate(), timeout=poll_s * 4)
+            if b"READY" in out:
+                break
+            if time.monotonic() - start > timeout_s:
+                raise RuntimeError(f"box defender did not arm within {timeout_s:.0f}s (no {p['ready']})")
+            await asyncio.sleep(poll_s)
+        local = self.ready_marker_path(experiment_name, cfg)  # bridge: the arena polls the LOCAL marker
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.touch()
+        return time.monotonic() - start
 
     @classmethod
     def validate_built_config(cls, built: dict) -> None:
