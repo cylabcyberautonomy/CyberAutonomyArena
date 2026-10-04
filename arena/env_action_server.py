@@ -12,6 +12,15 @@ token would be pure redundancy against a path nothing hostile can take. (Contras
 a TCP service INSIDE the environment, which keeps its token because it is reachable from in-env.) This
 reasoning holds only while the channel stays a UDS; a move to TCP would require restoring a token.
 
+SLICE 4 (the box model — see docs/agent-symmetry.md). A defender whose RUNNER executes in-env (on the
+box, runs_on_box=True) cannot reach this UDS. serve_env_actions_tcp() serves the SAME app over a TCP port
+bound to the box-facing interface, with the per-experiment token RESTORED (X-Arena-Token header, verified
+in handle_env_action when trusted_transport=False against exp._env_action_token). The UDS path stays
+token-free (trusted_transport=True) and unchanged. This deliberately moves the security boundary the
+UDS gave for free, so: the TCP server MUST bind only to the isolated, attacker-invisible box subnet
+(never 0.0.0.0), the token is required on every request and compared in constant time, and the whole
+path NEEDS A SECURITY REVIEW before it is trusted in production.
+
 The serving window + bounded primitive vocabulary remain — not as security layers but as correctness:
 topology mutation is valid only while the attack runs (ACTIVATE..DEACTIVATE) and only for the primitives
 within the defender's pre-reserved VM budget; each serviced event is recorded as experiment data.
@@ -22,10 +31,19 @@ serve_env_actions wraps it in a tiny UDS-bound FastAPI/uvicorn server started fr
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
+import secrets
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
+
+
+def new_env_action_token() -> str:
+    """A fresh per-experiment token for the TCP control-plane channel (serve_env_actions_tcp). The arena
+    generates one when it arms a runs_on_box defender, stamps it on exp._env_action_token, and threads it
+    to the box runner so its RemoteEnvOrchestrator can authenticate. Unused by the UDS path."""
+    return secrets.token_urlsafe(32)
 
 
 def resolve_socket_path(cfg) -> str:
@@ -55,7 +73,8 @@ def _trace_entry(request, result) -> dict:
     }
 
 
-async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
+async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
+                            token: Optional[str] = None, trusted_transport: bool = True) -> dict:
     """Authorize, budget-check, dispatch, and record ONE env-mutation event. Returns a plain dict with
     the EnvActionResult fields plus an internal "status" (HTTP status the transport should use, popped
     before the body is returned over the wire). Pure: no socket/transport here, so it is unit-testable.
@@ -63,11 +82,11 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
     The serving-window state is read off the LIVE Experiment object (registry.get) that the run loop
     stamps: _env_serving, _env_budget_remaining, _env_lifecycle.
 
-    NO authentication token: this channel is a Unix domain socket on the harness host, unreachable from
-    any in-env VM (where the adversary runs), so the transport IS the boundary — a per-experiment token
-    would be pure redundancy. (The box-agent channel, a TCP service inside the environment, keeps its
-    token because it IS reachable from in-env.) This holds only while the channel stays a UDS; if it ever
-    becomes a TCP port, restore the token."""
+    TRANSPORT + TOKEN. `trusted_transport` is True for the UDS server (unreachable from in-env — the
+    transport IS the boundary, so no token: historical behavior, unchanged). It is False for the TCP
+    server (serve_env_actions_tcp, used by a box-resident defender): then `token` MUST match this
+    experiment's _env_action_token (constant-time compare) or the call is rejected 403, before anything
+    else runs. See the module docstring's SLICE 4 note + security-model.md."""
     from .environment import EnvActionKind, EnvActionRequest, EnvActionResult, EnvRequestUnsupported
 
     name = payload.get("experiment_name")
@@ -78,6 +97,14 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
         exp = registry.get(name)
     except (KeyError, TypeError):
         return {"ok": False, "error": "unknown experiment", "status": 404}
+
+    # --- token (untrusted/TCP transport only) ------------------------------
+    # The UDS path is trusted (transport is the boundary); the TCP path must present this experiment's
+    # token. Checked right after existence, before the serving window / validation / any dispatch.
+    if not trusted_transport:
+        expected = getattr(exp, "_env_action_token", None)
+        if not expected or not token or not hmac.compare_digest(str(token), str(expected)):
+            return {"ok": False, "error": "forbidden (bad or missing env-action token)", "status": 403}
 
     # --- serving window ----------------------------------------------------
     if not getattr(exp, "_env_serving", False):
@@ -124,16 +151,20 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None) -> dict:
     return {**result.model_dump(mode="json"), "status": 200}
 
 
-def build_env_action_app(registry, cfg, lock):
-    """A tiny FastAPI app with the single action route, for serving over a UDS."""
-    from fastapi import FastAPI, Body
+def build_env_action_app(registry, cfg, lock, *, require_token: bool = False):
+    """A tiny FastAPI app with the single action route. `require_token=False` (the UDS server) trusts the
+    transport; `require_token=True` (the TCP server) marks the transport untrusted so handle_env_action
+    verifies the X-Arena-Token header against the experiment's token."""
+    from fastapi import FastAPI, Body, Header
     from fastapi.responses import JSONResponse
 
     app = FastAPI(title="arena-env-actions")
 
     @app.post("/environment/action")
-    async def _action(payload: dict = Body(...)):  # noqa: ANN202, B008
-        res = await handle_env_action(payload, registry=registry, cfg=cfg, lock=lock)
+    async def _action(payload: dict = Body(...),  # noqa: ANN202, B008
+                      x_arena_token: Optional[str] = Header(default=None)):  # noqa: B008
+        res = await handle_env_action(payload, registry=registry, cfg=cfg, lock=lock,
+                                      token=x_arena_token, trusted_transport=not require_token)
         status = res.pop("status", 200)
         return JSONResponse(res, status_code=status)
 
@@ -142,7 +173,7 @@ def build_env_action_app(registry, cfg, lock):
 
 async def serve_env_actions(socket_path: str, registry, cfg, lock) -> None:
     """Run the UDS server until cancelled (started as a lifespan task). Removes a stale socket file first
-    so a crashed prior manager doesn't block bind."""
+    so a crashed prior manager doesn't block bind. Token-free (the transport is the boundary)."""
     import uvicorn
 
     try:
@@ -151,6 +182,25 @@ async def serve_env_actions(socket_path: str, registry, cfg, lock) -> None:
     except OSError:
         pass
     Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
-    config = uvicorn.Config(build_env_action_app(registry, cfg, lock), uds=socket_path, log_level="warning")
+    config = uvicorn.Config(build_env_action_app(registry, cfg, lock, require_token=False),
+                            uds=socket_path, log_level="warning")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+async def serve_env_actions_tcp(host: str, port: int, registry, cfg, lock) -> None:
+    """Serve the SAME env-action app over TCP, TOKEN-REQUIRED, for a defender whose runner executes in-env
+    (on the box, runs_on_box=True) and so cannot reach the harness UDS.
+
+    SECURITY (see the module docstring's SLICE 4 note): `host` MUST be the mgmt host's address on the
+    isolated, attacker-invisible defender/box subnet — NEVER 0.0.0.0 or a victim/attacker-reachable
+    interface. Every request must carry the per-experiment token (X-Arena-Token == exp._env_action_token),
+    verified in constant time by handle_env_action. This restores the token the UDS design could omit
+    because, once the channel is a reachable TCP port, the transport is no longer the boundary. NEEDS A
+    SECURITY REVIEW before production use."""
+    import uvicorn
+
+    app = build_env_action_app(registry, cfg, lock, require_token=True)
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     await server.serve()
