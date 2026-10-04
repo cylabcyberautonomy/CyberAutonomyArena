@@ -146,11 +146,12 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        env_spec=None,
         prepared=None,  # Phase-A baton; velociraptor has no box ES, so it is unused
     ) -> dict:
-        # No topology_spec: the monitored estate came from the arena-injected defender_env_spec in setup()
-        # (backend-agnostic); the runner drives the already-deployed server and never parses a topology.
-        return {
+        # No topology_spec: the monitored estate comes from defender_env_spec (emitted here from the typed
+        # env_spec arg), backend-agnostic; the runner drives the already-deployed server, never a topology.
+        built = {
             "experiment_name": experiment_name,
             "install_dir": deploy.INSTALL_DIR,
             "server_ip": self._server_ip,          # the defender box (server runs here)
@@ -162,6 +163,8 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
             "ready_timeout": 600,
             "planted_data_paths": self.planted_data_paths,
         }
+        built.update(self._env_spec_key(env_spec))   # agent-facing host inventory (typed arg)
+        return built
 
     async def run(
         self,

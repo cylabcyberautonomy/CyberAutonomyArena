@@ -64,13 +64,12 @@ async def run_defender(
         defender_env_spec=defender_env_spec, defender_access=defender_access,
         needs_agent=env_action_socket is not None,
     )
-    built = defender.build_config(experiment_name, environment, box_prepared)
+    built = defender.build_config(experiment_name, environment, defender_env_spec, box_prepared)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
-    # Agent-facing DefenderEnvSpec (host inventory, no creds) + harness-only SetupAccess (key + bastion
-    # routing per victim), both produced by the environment plugin. A migrated defender reads these
-    # instead of computing its own SSH key / parsing the topology.
-    if defender_env_spec is not None:
-        built["defender_env_spec"] = defender_env_spec.model_dump()
+    # The agent-facing DefenderEnvSpec (host inventory, NO creds) is now a TYPED build_config arg the plugin
+    # emits itself (DefenderPlugin._env_spec_key) — symmetric with the attacker's build_config(env_spec, ...).
+    # The harness-only SetupAccess (scoped key + bastion routing) is still INJECTED below: it carries
+    # credentials, so it stays OUT of build_config's output (kept credential-free by the leak guard).
     # Box-only execution: scope the controller's setup access to the DEFENDER BOX only. The controller is
     # NOT handed victim-reaching entries — it never acts on victims directly; it asks the box agent (which
     # alone holds victim access, shipped there by prepare_box_agent) and the env. This makes "executes from

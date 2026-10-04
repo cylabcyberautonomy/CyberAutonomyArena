@@ -124,6 +124,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        env_spec,
         prepared: PreparedDefender,
     ) -> dict:
         # No topology_spec: this defender builds its Perry Network from the arena-injected
@@ -133,6 +134,7 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
             "strategy": self.strategy,
             "arsenal": self.arsenal,
         }
+        built.update(self._env_spec_key(env_spec))   # agent-facing host inventory (typed arg)
         built.update(self._baton_keys(prepared))  # box ES tunnel url + indices + box agent (Phase A)
         return built
 

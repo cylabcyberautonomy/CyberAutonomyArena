@@ -246,6 +246,16 @@ class DefenderPlugin(BaseModel):
             await asyncio.sleep(2)
 
     @staticmethod
+    def _env_spec_key(env_spec) -> dict:
+        """The agent-facing DefenderEnvSpec (host inventory / subnets / box — NO credentials) as a config
+        key. A defender's build_config() does `built.update(self._env_spec_key(env_spec))`: it receives the
+        spec as a TYPED arg (symmetric with the attacker's build_config(env_spec, ...)) and emits it itself,
+        instead of the arena injecting it after. Credential-bearing SetupAccess is deliberately NOT here —
+        it stays arena-injected after build_config so build_config's output remains credential-free (the
+        tests/test_plugin_conformance leak guard bans ssh_key / ProxyCommand in build_config output)."""
+        return {"defender_env_spec": env_spec.model_dump()} if env_spec is not None else {}
+
+    @staticmethod
     def _baton_keys(prepared: "PreparedDefender") -> dict:
         """The subset of the Phase-A baton that goes into the runner config, skipping None. A telemetry
         defender's build_config() does `built.update(self._baton_keys(prepared))` so es_url / falco_index /
@@ -276,6 +286,7 @@ class DefenderPlugin(BaseModel):
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        env_spec,
         prepared: "PreparedDefender",
     ) -> dict: ...
 

@@ -120,6 +120,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         self,
         experiment_name: str,
         environment: Optional[DeployedEnvironment],
+        env_spec,
         prepared: PreparedDefender,
     ) -> dict:
         built = {
@@ -131,6 +132,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         }
         # Bake the Phase-A baton (box ES tunnel url + indices, box agent endpoint) the runner reads —
         # produced by provision_box() before this call, replacing the old prepare_box_es config patch.
+        built.update(self._env_spec_key(env_spec))   # agent-facing host inventory (typed arg)
         built.update(self._baton_keys(prepared))
         return built
 
