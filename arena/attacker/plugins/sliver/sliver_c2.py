@@ -9,7 +9,7 @@ Split by trust/venv:
   * All sliver-py (operator gRPC client) work lives in _sliver_ops.py, run under the dedicated sliver
     venv (cfg.get_sliver_python()), because the manager venv has no sliver-py. setup_c2 shells out to it.
 
-Reaches the foothold ONLY through the env-provided SetupAccess (scoped key + bastion routing) — no
+Reaches the foothold ONLY through the env-provided AttackerSetupAccess (scoped key + bastion routing) — no
 management key off disk, same contract as c2.py / foothold.py.
 
 NOT LIVE-VALIDATED. The SSH/orchestration shape here is solid, but the exact sliver-server CLI flags,
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ...env_spec import SetupAccess
+from ...env_spec import AttackerSetupAccess
 from ..base import PreparedAttacker
 
 _STATE_DIR = Path("/tmp/mhbench-sliver-c2")
@@ -50,8 +50,8 @@ def _statefile(experiment_name: str) -> Path:
     return _STATE_DIR / f"{experiment_name}.json"
 
 
-def _ssh(access: SetupAccess) -> list[str]:
-    """ssh argv to the foothold over the env-provided SetupAccess (scoped key + bastion routing).
+def _ssh(access: AttackerSetupAccess) -> list[str]:
+    """ssh argv to the foothold over the env-provided AttackerSetupAccess (scoped key + bastion routing).
     Mirrors c2.py's _ssh_to_foothold — routing is opaque in access.ssh_common_args."""
     args = ["ssh"]
     if access.ssh_key:
@@ -65,7 +65,7 @@ def _ssh(access: SetupAccess) -> list[str]:
     return args
 
 
-async def _ssh_run(access: SetupAccess, remote_cmd: str, timeout: int = 600) -> tuple[int, str]:
+async def _ssh_run(access: AttackerSetupAccess, remote_cmd: str, timeout: int = 600) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         *_ssh(access), remote_cmd,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -118,11 +118,11 @@ async def _run_sliver_ops(cfg, subcmd: str, args: list[str], timeout: int = 300)
     return proc.returncode, out.decode("utf-8", "replace")
 
 
-async def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: Optional[str] = None) -> SliverPreparedC2:
+async def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip: Optional[str] = None) -> SliverPreparedC2:
     """Bring the Sliver C2 up on the foothold and return once the initial session is in. Raises on
     failure (the plugin tears down a partial C2 via teardown_c2)."""
     if access is None or not access.host:
-        raise RuntimeError(f"[sliver-c2] need a foothold SetupAccess with a host (got {access!r})")
+        raise RuntimeError(f"[sliver-c2] need a foothold AttackerSetupAccess with a host (got {access!r})")
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     foothold = access.host
     work = _STATE_DIR / experiment_name
@@ -230,7 +230,7 @@ async def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: O
     return SliverPreparedC2(operator_cfg=str(operator_cfg), listener_addr=listener_addr, control_port=local_port)
 
 
-def _open_tunnel(access: SetupAccess, local_port: int, remote_port: int, log_path: Path) -> subprocess.Popen:
+def _open_tunnel(access: AttackerSetupAccess, local_port: int, remote_port: int, log_path: Path) -> subprocess.Popen:
     """Resilient ssh -L 127.0.0.1:<local_port> -> 127.0.0.1:<remote_port> on the foothold, through the
     bastion. Supervised auto-reconnect, same shape as c2.py's tunnel. The supervisor's stdout/stderr go
     to log_path (NOT /dev/null) so a failing/looping ssh -L is diagnosable (ExitOnForwardFailure, a
@@ -278,7 +278,7 @@ def teardown_c2(experiment_name: str, cfg=None) -> None:
     acc = state.get("access")
     if acc:
         try:
-            access = SetupAccess.model_validate(acc)
+            access = AttackerSetupAccess.model_validate(acc)
             subprocess.run(_ssh(access) + [
                 "pkill -f 'sliver-server daemon'; pkill -f /tmp/implant; rm -f /tmp/implant /tmp/op.cfg || true"],
                 timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

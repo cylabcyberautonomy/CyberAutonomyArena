@@ -47,7 +47,7 @@ from arena.attacker.plugins.incalmo_strategy.incalmo_strategy import IncalmoPrep
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
 from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment import DeployedEnvironment
-from arena.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAccess
+from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox, AttackerSetupAccess
 from arena.experiment.models import ExperimentSpecs
 
 ENV_SPEC = "environments/non-generated/equifax_small.json"  # path (relative to mhbench_dir)
@@ -73,7 +73,7 @@ def _env_security_params():
 # The adversary-safe spec build_config consumes: objective + foothold identity only (no keys/bastion).
 FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective=ENV_STEM,
-    footholds=[AttackerFoothold(name="kali", host="192.168.202.100", user="root")],
+    box=AttackerBox(name="kali", ip="192.168.202.100", user="root"),
 )
 
 
@@ -233,17 +233,17 @@ def test_attacker_env_spec_is_adversary_safe():
     """AttackerEnvSpec could be handed to the adversary and be fine: objective + foothold IDENTITY
     only, no keys / bastion / routing. Those live in the harness-only SetupAccess."""
     spec_fields = set(AttackerEnvSpec.model_fields)
-    assert spec_fields == {"objective", "footholds"}, f"spec leaks fields: {spec_fields}"
-    foothold_fields = set(AttackerFoothold.model_fields)
-    assert foothold_fields == {"name", "host", "user"}, f"foothold leaks fields: {foothold_fields}"
+    assert spec_fields == {"objective", "box", "hosts", "subnets", "network_name", "management_sg"}, f"spec fields: {spec_fields}"
+    box_fields = set(AttackerBox.model_fields)
+    assert box_fields == {"name", "ip", "subnet", "user"}, f"box fields: {box_fields}"
     # anything sensitive must NOT be nameable on the adversary-safe types
     for banned in ("ssh_key", "ssh_common_args", "jump", "bastion", "key"):
-        assert banned not in spec_fields and banned not in foothold_fields
+        assert banned not in spec_fields and banned not in box_fields
 
 
 def test_foothold_access_is_harness_only_and_carries_routing():
     """SetupAccess is the harness-only side: keys + opaque routing for the trusted plugin's prep."""
-    fields = set(SetupAccess.model_fields)
+    fields = set(AttackerSetupAccess.model_fields)
     assert {"ssh_key", "ssh_common_args", "host", "user"} <= fields
 
 
@@ -724,7 +724,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     and the harness-only SetupAccess for both sides. Invariant: agent-facing specs carry NO credential
     field; SetupAccess carries the key + routing."""
     from arena.environment import build_environment, DeployedEnvironment
-    from arena.attacker.env_spec import AttackerEnvSpec, AttackerFoothold, SetupAccess
+    from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox, AttackerSetupAccess
     from arena.defender.env_spec import DefenderEnvSpec, DefenderHost
 
     md = _mhbench_dir()
@@ -747,11 +747,11 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     # attacker: agent-facing spec = objective + foothold identity, NO creds
     aspec = env.attacker_spec(deployed, cfg)
     assert isinstance(aspec, AttackerEnvSpec)
-    assert aspec.primary and aspec.primary.host == "192.168.202.100"
-    assert "ssh_key" not in AttackerFoothold.model_fields and "ssh_key" not in AttackerEnvSpec.model_fields
+    assert aspec.primary and aspec.primary.ip == "192.168.202.100"
+    assert "ssh_key" not in AttackerBox.model_fields and "ssh_key" not in AttackerEnvSpec.model_fields
     # attacker: setup access = harness-only creds + bastion routing
     aacc = env.attacker_setup_access(deployed, "1.2.3.4", cfg)
-    assert aacc and isinstance(aacc[0], SetupAccess) and aacc[0].ssh_key
+    assert aacc and isinstance(aacc[0], AttackerSetupAccess) and aacc[0].ssh_key
     assert "ProxyCommand" in aacc[0].ssh_common_args
 
     # defender: agent-facing spec = host inventory (victims only, roles), NO creds
@@ -767,7 +767,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert dspec.management_sg == "ci_proj-management_sg"
     ws = next((s for s in dspec.subnets if any(h.role == "webserver" for h in s.hosts)), None)
     assert ws is not None and ws.network == f"ci_proj-{ws.name}" and ws.sec_group == f"ci_proj-{ws.name}_sg"
-    assert any("tomcat" in h.users for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
+    assert any("tomcat" in [u.name for u in h.users] for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
     # The attacker's own segment is NOT in the defended estate (a real blue team doesn't know where the
     # red team sits) — so there's no attacker subnet and no "attacker" field to leak its position.
     assert all(s.name != "attacker_subnet" for s in dspec.subnets)
@@ -808,7 +808,7 @@ def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
     assert net_name == "net0" and mgmt_sg == "proj-management_sg"
     ws = next(s for s in subnets if s.name == "webserver_subnet")
     assert ws.perimeter is True and ws.network == "proj-webserver_subnet" and ws.sec_group == "proj-webserver_subnet_sg"
-    assert ws.hosts[0].users == ["ubuntu", "tomcat"] and ws.hosts[0].telemetry is True
+    assert [u.name for u in ws.hosts[0].users] == ["ubuntu", "tomcat"] and ws.hosts[0].telemetry is True
     corp = next(s for s in subnets if s.name == "corporate_subnet")
     assert corp.perimeter is False  # only the marked tier is the bait target
     # the attacker's position never leaks: no subnet carries an attacker flag
@@ -888,7 +888,7 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     # attacker SetupAccess: all use the attacker cred; hosts are the foothold(s) ONLY
     aacc = env.attacker_setup_access(deployed, "1.2.3.4", cfg)
     assert aacc and all(a.ssh_key == acred for a in aacc)
-    foothold_hosts = {f.host for f in env.attacker_spec(deployed, cfg).footholds}
+    foothold_hosts = {f.ip for f in env.attacker_spec(deployed, cfg).footholds}
     assert {a.host for a in aacc} <= foothold_hosts
 
     # defender SetupAccess: all use the defender cred; the attacker foothold is NOT reachable with it
@@ -992,7 +992,7 @@ def test_c2_builds_ssh_from_scoped_setupaccess():
     """Regression: the foothold C2 reaches the foothold via the SetupAccess (scoped key + env routing),
     not a management key read off disk."""
     from arena.attacker.plugins.incalmo_strategy import c2
-    fa = SetupAccess(name="foothold", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
+    fa = AttackerSetupAccess(name="foothold", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
                      ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')
     cmd = " ".join(c2._ssh_to_foothold(fa))
     assert "/scoped/attacker_key" in cmd and "ProxyCommand" in cmd and "root@192.168.0.9" in cmd

@@ -75,7 +75,7 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
         _preflight_sliver_venv(cfg)
         foothold_access = self.primary_access(access) if access else None
         if foothold_access is None:
-            raise RuntimeError("the Sliver C2 runs on the attacker foothold, but setup() got no SetupAccess")
+            raise RuntimeError("the Sliver C2 runs on the attacker foothold, but setup() got no AttackerSetupAccess")
         try:
             return await sliver_c2.setup_c2(experiment.experiment_name, cfg, foothold_access, bastion_ip)
         except Exception:

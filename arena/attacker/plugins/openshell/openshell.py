@@ -195,10 +195,10 @@ class OpenShellAttacker(AttackerPlugin, config_type="openshell"):
             "objective": self.objective or _OBJECTIVE,
             "sandbox_name": experiment_name,
             "output_dir": f"{_REMOTE_DIR}/logs/{experiment_name}",
-            "foothold_ip": (env_spec.primary.host if env_spec.primary else None),
+            "foothold_ip": (env_spec.box.ip if env_spec.box else None),
         }
 
-    # -- ssh plumbing: reach the foothold via the env-provided SetupAccess (not hardcoded foothold) ----
+    # -- ssh plumbing: reach the foothold via the env-provided AttackerSetupAccess (not hardcoded foothold) ----
     async def _push(self, base: list[str], dest: str, content: str) -> None:
         proc = await asyncio.create_subprocess_exec(
             *base, f"cat > {dest}", stdin=asyncio.subprocess.PIPE,
