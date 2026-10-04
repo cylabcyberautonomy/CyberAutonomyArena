@@ -35,7 +35,7 @@ async def _stop_defender_process(experiment, process) -> None:
         pass
     if lc is not None and lc.status != DefenderSignal.FAILED:
         await lc.emit(DefenderSignal.STOPPED)
-from .defender import run_defender, run_defender_setup
+from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
@@ -1039,7 +1039,8 @@ async def _run_experiment(experiment: Experiment) -> None:
                 defender_lc = DefenderLifecycle(on_emit=_defender_signal_recorder(experiment))
                 experiment._defender_lifecycle = defender_lc
                 await defender_lc.send(DefenderCommand.START_SETUP)
-                await defender_lc.emit(DefenderSignal.SETUP_STARTED)
+                # SETUP_STARTED is emitted by DefenderPlugin.run_setup (symmetric with the attacker's
+                # run_setup), not here.
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
                 # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
                 # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
@@ -1071,11 +1072,11 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                # SETUP phase: produce the PreparedDefender baton (setup + box ES/agent) BEFORE the run
-                # phase, mirroring the attacker's `prepared = await _drive_attacker_setup(...)` then
-                # `run_attacker(..., prepared)`. run_defender then only does build_config(prepared) + arm + run.
-                defender_prepared = await run_defender_setup(experiment.defender, experiment, cfg)
-                defender_process = await run_defender(experiment.defender, experiment, cfg, defender_prepared)
+                # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
+                # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
+                # run_defender then only launches the reactive loop (the defender analog of run_attacker).
+                await experiment.defender.run_setup(experiment, cfg)
+                defender_process = await run_defender(experiment.defender, experiment, cfg)
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:

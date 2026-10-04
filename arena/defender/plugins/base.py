@@ -9,8 +9,10 @@ from typing import ClassVar, Optional
 from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
-from ...experiment_log import output_root
+from ...experiment_log import log, output_root
 from ...ui_schema import PluginUISchema
+from ..lifecycle import DefenderSignal
+from ...env_action_server import resolve_socket_path
 
 
 class PreparedDefender(BaseModel):
@@ -277,6 +279,85 @@ class DefenderPlugin(BaseModel):
         args (not reading a written config) is what lets it run before build_config. Default: an empty
         baton, for a defender with no box telemetry (canary / velociraptor)."""
         return PreparedDefender()
+
+    @staticmethod
+    def _lifecycle(experiment):
+        """The DefenderLifecycle the arena attached (mirrors AttackerPlugin._lifecycle); None in tests
+        that drive run_setup without one."""
+        return getattr(experiment, "_defender_lifecycle", None)
+
+    async def run_setup(self, experiment, cfg: ExperimentManagerConfig) -> "PreparedDefender":
+        """The SETUP phase — the defender analog of AttackerPlugin.run_setup: fully ARM the defender, so
+        the RUN phase (run_defender) only launches the loop. Emit SETUP_STARTED, then:
+          setup() + provision_box()   -> the box ES / box-agent baton (what build_config consumes)
+          build_config(env_spec, baton) + inject creds/routing + write the runner config
+          prepare()                   -> EXTERNAL arming (decoy / honey-cred deploy) that consumes that config
+        Returns the PreparedDefender from prepare(). Symmetric with the attacker, whose run_setup also runs
+        build_config + writes the config after setup() (its arming — the C2 — happens in setup() itself).
+
+        For the defender build_config lives HERE, not in run_defender: the written config IS part of arming
+        (prepare() reads it, and so does the run loop). The credential-bearing SetupAccess + bastion routing
+        are injected into the written config (kept OUT of build_config's own output by the leak guard),
+        because the defender's runner acts on victims/the box during the run.
+
+        It does NOT emit READY: a defender is READY only once its RUNNER has armed (the readiness marker,
+        gated by wait_until_ready after run()), not when setup finishes. FAILED stays centralized in the
+        arena's defender error handler (it covers the whole setup→run block), so this just raises."""
+        lc = self._lifecycle(experiment)
+        if lc is not None:
+            await lc.emit(DefenderSignal.SETUP_STARTED)
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
+        access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
+        bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
+        # The dynamic topology-mutation window (+ box agent) is armed only for an executes_from_box defender —
+        # the arena sets experiment._env_dynamic and opens the window before this runs.
+        env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
+        needs_agent = env_action_socket is not None
+        # Phase-A baton: box ES + ssh -L tunnel (+ box agent), produced BEFORE build_config.
+        await self.setup(experiment_name, cfg, bastion_ip,
+                         defender_env_spec=env_spec, defender_access=access)
+        prepared = await self.provision_box(
+            experiment_name, cfg, bastion_ip,
+            defender_env_spec=env_spec, defender_access=access,
+            needs_agent=needs_agent,
+        )
+        # build_config(env_spec, baton) -> write the runner config (the defender's arming config).
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, prepared)
+        type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
+        # INJECT the credential-bearing SetupAccess + routing (kept OUT of build_config's output by the leak
+        # guard). Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts
+        # on victims directly, it asks the box agent (which alone holds victim access) and the env.
+        _access = list(access or [])
+        if getattr(type(self), "executes_from_box", False) and env_spec is not None:
+            _box = getattr(env_spec, "box", None)
+            _box_ip = getattr(_box, "ip", None) if _box else None
+            if _box_ip:
+                _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
+        built["defender_setup_access"] = [a.model_dump() for a in _access]
+        # Inject the running plugin's code dir under the stable runner key "deception_dir" (a self-contained
+        # defender declares no code_dir_field and gets nothing). management_ip is the harness's own fixed host
+        # (NOT an ES address); bastion_ip is this experiment's ephemeral bastion FIP the runner ProxyCommands
+        # through to reach internal hosts.
+        if type(self).code_dir_field:
+            built["deception_dir"] = str(cfg.plugin_dir(type(self).code_dir_field))
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        # Dynamic topology-mutation channel (UDS, no token — unreachable from in-env); present only for an
+        # executes_from_box defender.
+        if env_action_socket is not None:
+            built["env_action_socket"] = env_action_socket
+            built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
+        config_path.write_text(json.dumps(built, indent=2))
+        log(experiment_name, f"Prepared defender ({self.type}) config: {config_path}")
+        # EXTERNAL arming (decoy / honey-cred deploy) that CONSUMES the written config. BLOCKS + raises on
+        # failure, before the attacker starts. run() then only launches the reactive loop.
+        armed = await self.prepare(config_path, experiment_name, cfg)
+        log(experiment_name, f"Defender armed (armed_in_setup={armed.armed_in_setup})")
+        return armed
 
     @abstractmethod
     def build_config(

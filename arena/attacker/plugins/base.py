@@ -198,6 +198,16 @@ class AttackerPlugin(BaseModel):
             self._persist_access(experiment.experiment_name, cfg, access)  # so run_start/stop/collect recover it
         try:
             prepared = await self.setup(experiment, cfg, bastion_ip, access)
+            # build_config runs in the SETUP phase (symmetric with the defender): setup() produces
+            # `prepared`, build_config(env_spec, prepared) derives the runner config from it, and run_start
+            # then only launches. (cfg is None only in the lifecycle unit tests that isolate the handshake.)
+            if cfg is not None:
+                config_path = (output_root(experiment.experiment_name, cfg)
+                               / experiment.experiment_name / "attacker" / "attacker_config.json")
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                built = self.build_config(experiment.experiment_name, experiment._attacker_env_spec, prepared)
+                type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract
+                config_path.write_text(json.dumps(built, indent=2))
         except Exception as e:  # noqa: BLE001 — surface as a FAILED signal, then re-raise for the arena
             if lc is not None:
                 await lc.emit(AttackerSignal.FAILED, error=str(e))

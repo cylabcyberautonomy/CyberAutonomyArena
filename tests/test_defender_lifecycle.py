@@ -19,7 +19,7 @@ from arena.defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_recorder,
 )
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
-from arena.defender.defender import run_defender, run_defender_setup
+from arena.defender.defender import run_defender
 from arena.experiment.models import Experiment, ExperimentStatus
 
 
@@ -241,8 +241,8 @@ def test_run_defender_runs_prepare_before_run(tmp_path):
     _ORDER_CALLS.clear()
     d, exp, cfg = _OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)
     async def _go():
-        prepared = await run_defender_setup(d, exp, cfg)   # SETUP phase: setup + provision_box -> baton
-        return await run_defender(d, exp, cfg, prepared)   # RUN phase: build_config(baton) -> prepare -> run
+        prepared = await d.run_setup(exp, cfg)   # SETUP phase: setup + provision_box -> baton
+        return await run_defender(d, exp, cfg)   # RUN phase: build_config(baton) -> prepare -> run
     proc = asyncio.run(_go())
     # the unified lifecycle: setup-phase baton (provision_box) -> build_config(baton) -> arming (prepare)
     # -> run, mirroring the attacker's _drive_attacker_setup()->run_attacker(..., prepared).
@@ -256,8 +256,8 @@ def test_run_defender_aborts_when_prepare_fails(tmp_path):
     _ORDER_CALLS.clear()
     d, exp, cfg = _PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)
     async def _go():
-        prepared = await run_defender_setup(d, exp, cfg)
-        return await run_defender(d, exp, cfg, prepared)
+        prepared = await d.run_setup(exp, cfg)
+        return await run_defender(d, exp, cfg)
     with pytest.raises(RuntimeError, match="decoy deploy failed"):
         asyncio.run(_go())
     assert "run-should-not-run" not in _ORDER_CALLS
