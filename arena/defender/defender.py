@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from pydantic_core import core_schema
 
 from ..config import ExperimentManagerConfig
-from .plugins.base import DefenderPlugin
+from .plugins.base import DefenderPlugin, PreparedDefender
 from ..experiment_log import log, output_root
 from ..env_action_server import resolve_socket_path
 from . import plugins  # noqa: F401 — triggers auto-discovery
@@ -40,37 +40,59 @@ class DefenderConfig:
         )
 
 
-async def run_defender(
+async def run_defender_setup(
     defender: DefenderConfig,
     experiment,
     cfg: ExperimentManagerConfig,
-) -> asyncio.subprocess.Process:
-    # Symmetric with run_attacker(attacker, experiment, cfg, prepared): take the experiment and read the
-    # run context off it, instead of a long list of loose args. The env-produced agent-facing spec and the
-    # scoped SetupAccess are attached by the arena exactly like the attacker's _attacker_env_spec.
+) -> PreparedDefender:
+    """The defender SETUP phase — the exact analog of the attacker's setup()/_drive_attacker_setup: do the
+    one-time setup and PRODUCE the PreparedDefender baton BEFORE the config is written, so the arena drives
+    it under the lifecycle and hands the baton to run_defender (just as the attacker's setup() produces a
+    PreparedAttacker the arena hands to run_attacker).
+
+    Runs defender.setup() (any bespoke sensor install) then provision_box() — this run's per-experiment box
+    ES + ssh -L tunnel, and the box agent when the run armed dynamic topology — and returns the baton
+    (es_url / falco_index / sysflow_index / box_agent_*), which build_config bakes in. Default no-op baton
+    for a defender with no box telemetry (canary / velociraptor)."""
     experiment_name = experiment.experiment_name
     env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
     access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
     bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
-    # The dynamic topology-mutation window is armed only for an executes_from_box defender — the arena sets
-    # experiment._env_dynamic and opens the window before calling us — so derive the UDS path from that flag
-    # (absent/False for a non-mutating defender, which then gets no env_action_socket).
+    # The box agent is shipped only for an executes_from_box defender — the arena sets experiment._env_dynamic
+    # and opens the window before the setup phase runs — so needs_agent follows that flag.
+    needs_agent = bool(getattr(experiment, "_env_dynamic", False))
+    await defender.setup(experiment_name, cfg, bastion_ip,
+                         defender_env_spec=env_spec, defender_access=access)
+    return await defender.provision_box(
+        experiment_name, cfg, bastion_ip,
+        defender_env_spec=env_spec, defender_access=access,
+        needs_agent=needs_agent,
+    )
+
+
+async def run_defender(
+    defender: DefenderConfig,
+    experiment,
+    cfg: ExperimentManagerConfig,
+    prepared: PreparedDefender,
+) -> asyncio.subprocess.Process:
+    # Identical in shape to run_attacker(attacker, experiment, cfg, prepared): build_config(env_spec,
+    # prepared) -> write -> launch. `prepared` is the baton run_defender_setup produced (box ES url +
+    # indices + box agent endpoint), which build_config bakes in. Context is read off the experiment the
+    # arena attached, exactly like the attacker's _attacker_env_spec.
+    # Two defender-specific steps have NO attacker analog and stay here: (1) the credential-bearing
+    # SetupAccess + bastion routing are INJECTED into the written config (kept OUT of build_config's output
+    # by the leak guard) because the defender's RUNNER acts on victims/the box during the run; (2) external
+    # arming — prepare() — runs AFTER the config is written because it CONSUMES that config (es_url etc.),
+    # unlike the attacker whose arming is self-contained in setup().
+    experiment_name = experiment.experiment_name
+    env_spec = experiment._defender_env_spec
+    access = experiment._defender_access
+    bastion_ip = experiment._bastion_ip
     env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    await defender.setup(experiment_name, cfg, bastion_ip,
-                         defender_env_spec=env_spec, defender_access=access)
-    # PHASE A: produce the baton (this run's per-experiment box ES + ssh -L tunnel, and the box agent when
-    # the run armed dynamic topology) BEFORE build_config — the defender analog of the attacker's
-    # setup()->prepared->build_config. It takes env_spec/access as args (the config isn't written yet) and
-    # returns es_url / falco_index / sysflow_index / box_agent_*, which build_config bakes in. Default no-op
-    # for a defender with no box telemetry (canary / velociraptor).
-    box_prepared = await defender.provision_box(
-        experiment_name, cfg, bastion_ip,
-        defender_env_spec=env_spec, defender_access=access,
-        needs_agent=env_action_socket is not None,
-    )
-    built = defender.build_config(experiment_name, env_spec, box_prepared)
+    built = defender.build_config(experiment_name, env_spec, prepared)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
     # The agent-facing DefenderEnvSpec (host inventory, NO creds) is now a TYPED build_config arg the plugin
     # emits itself (DefenderPlugin._env_spec_key) — symmetric with the attacker's build_config(env_spec, ...).

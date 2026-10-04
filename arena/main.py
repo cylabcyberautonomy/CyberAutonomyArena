@@ -35,7 +35,7 @@ async def _stop_defender_process(experiment, process) -> None:
         pass
     if lc is not None and lc.status != DefenderSignal.FAILED:
         await lc.emit(DefenderSignal.STOPPED)
-from .defender import run_defender
+from .defender import run_defender, run_defender_setup
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
@@ -1071,7 +1071,11 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                defender_process = await run_defender(experiment.defender, experiment, cfg)
+                # SETUP phase: produce the PreparedDefender baton (setup + box ES/agent) BEFORE the run
+                # phase, mirroring the attacker's `prepared = await _drive_attacker_setup(...)` then
+                # `run_attacker(..., prepared)`. run_defender then only does build_config(prepared) + arm + run.
+                defender_prepared = await run_defender_setup(experiment.defender, experiment, cfg)
+                defender_process = await run_defender(experiment.defender, experiment, cfg, defender_prepared)
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:
