@@ -103,7 +103,6 @@ field silently backs several.
 | `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
 | `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |
 | `velociraptor_dir` | `velociraptor` defender | Velociraptor repo (holds `bin/velociraptor`; a Go binary, no venv). |
-| `caldera_human_dir` | `caldera_human` traffic | caldera-human-traffic repo (no venv). |
 | `arena_host_ip` | defenders | The arena/manager host's own IP (as seen from the deployed VMs), passed to defenders as `management_ip` for self-protection. **Not** the per-experiment bastion. |
 
 **Tunable parameters** — adjust these to control how the harness runs experiments:

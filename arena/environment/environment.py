@@ -1,6 +1,6 @@
 """EnvironmentConfig — the environment section of an experiment submission.
 
-Explicit shape (environment only; attacker/defender/traffic keep the embedded-selector idiom),
+Explicit shape (environment only; attacker/defender keep the embedded-selector idiom),
 consistent with the attacker's `attacker_plugin` + `attacker_spec`:
 
     environment:

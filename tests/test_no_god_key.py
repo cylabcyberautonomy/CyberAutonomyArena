@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_PLUGIN_ROOTS = ["attacker/plugins", "defender/plugins", "traffic/plugins"]
+_PLUGIN_ROOTS = ["attacker/plugins", "defender/plugins"]
 
 # God-key read signatures. Deliberately does NOT match the CORRECT pattern (access["ssh_key"] /
 # access.get("ssh_key")) — consuming the injected scoped key is exactly what we want.
@@ -43,9 +43,6 @@ _BASELINE = {
     # baseline (the guard is strict for them now).
     # Velociraptor — FIXED (out of baseline): its server runs on the defender box reached via the injected
     # scoped defender key (box_access.ssh_key -> self._ssh_key in setup()); the old id_ed25519 fallback is gone.
-    # Traffic — TABLED: needs its own victims-only scoped key (no adversary/agent, lower risk). Remove
-    # when the traffic scoped key lands.
-    "traffic/plugins/caldera_human/caldera_human.py": "tabled: needs a victims-only traffic scoped key",
 }
 
 

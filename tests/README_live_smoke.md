@@ -51,7 +51,7 @@ python3 tests/run_experiment_smoke.py --delete-only --name smoke_arena_contract 
 ```
 
 Key flags: `--url` (default `http://localhost:8000`), `--environment`, `--attacker` (Incalmo
-strategy), `--defender` (llm_soc strategy or `none`), `--traffic` (persona or `none`), `--keep`,
+strategy), `--defender` (llm_soc strategy or `none`), `--keep`,
 `--overwrite`, `--timeout`, `--output-root`. `--yes` skips the confirmation prompt.
 
 Or by hand:

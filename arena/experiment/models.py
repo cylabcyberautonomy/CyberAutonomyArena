@@ -9,7 +9,6 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from ..attacker import AttackerConfig
 from ..defender import DefenderConfig
-from ..traffic import TrafficConfig
 from ..environment import build_environment
 from ..environment.environment import EnvironmentConfig
 
@@ -68,7 +67,6 @@ class ExperimentSpecs(BaseModel):
     attacker_spec: Optional[Union[dict, str]] = None
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
-    traffic: Optional[TrafficConfig] = None  # third plugin class: benign background traffic on victim hosts
     c2c_server: Optional[str] = None  # TEST ONLY: bypasses C2 container startup
     trial: int = 0
     output_dir: Optional[str] = None  # write this experiment's output tree here instead of cfg.output_dir
@@ -96,7 +94,7 @@ class ExperimentSpecs(BaseModel):
         so everything downstream (Experiment.attacker, build_config, ...) is unchanged.
 
         The attacker is selected only by the (plugin, spec) pair. `attacker` is derived, not an input.
-        The experiment base is environment + attacker (both required); defender and traffic are optional."""
+        The experiment base is environment + attacker (both required); the defender is optional."""
         if self.attacker is not None:
             raise ValueError("select the attacker with attacker_plugin (+ attacker_spec), not an "
                              "embedded 'attacker' block ('attacker' is a derived field).")
@@ -123,7 +121,6 @@ _CONFIG_KEYS = {
     "environment": ("config", "spec"),
     "attacker": ("config", "plugin", "spec_path"),
     "defender": ("config",),
-    "traffic": ("config",),
 }
 
 
@@ -210,13 +207,9 @@ class Experiment:
     defender_ready_at = _Field("defender", "ready_at")
     defender_stopping_at = _Field("defender", "stopping_at")
     defender_stopped_at = _Field("defender", "stopped_at")
-    # --- traffic (third plugin class: background traffic on victim hosts) ---
-    traffic = _Field("traffic", "config")
-    traffic_started_at = _Field("traffic", "started_at")
-    traffic_finished_at = _Field("traffic", "finished_at")
 
     def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
-                 traffic=None, trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
+                 trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
         # `environment` is an EnvironmentConfig or the explicit {environment_plugin, environment_spec}
         # dict; validate to the config and derive the resolved name for the internal readers of the spec.
@@ -245,9 +238,6 @@ class Experiment:
                 "config": defender, "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
                 "stopping_at": None, "stopped_at": None,
-            },
-            "traffic": {
-                "config": traffic, "started_at": None, "finished_at": None,
             },
         }
 

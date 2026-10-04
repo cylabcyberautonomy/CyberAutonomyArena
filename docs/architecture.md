@@ -1,23 +1,22 @@
 # Architecture
 
 The arena runs cyber-range **experiments**: an offensive agent attacks a victim network, optionally
-against a defensive system, with optional benign background traffic. It is built so that each of those
+against a defensive system. It is built so that each of those
 roles is a **swappable plugin** behind a fixed contract — you change the matchup by choosing different
 plugins, never by changing the arena.
 
-## The four systems
+## The three systems
 
-An experiment pairs four pluggable systems. Two are required, two optional:
+An experiment pairs three pluggable systems. Two are required, one optional:
 
 | System          | Role                                                              | Required? |
 |-----------------|------------------------------------------------------------------|-----------|
 | **environment** | deploys the network the experiment runs on, sizes it for admission, issues scoped access, produces the agent-facing specs | yes |
 | **attacker**    | the offensive agent, run from a foothold the environment provides | yes |
 | **defender**    | the defensive system — detection, deception, and/or active response | optional |
-| **traffic**     | benign background activity on the victim hosts                    | optional |
 
 Each is a plugin: a class that subclasses its system's base (`EnvironmentPlugin` / `AttackerPlugin` /
-`DefenderPlugin` / `TrafficPlugin`) and registers itself with a `config_type`. See the repo-root
+`DefenderPlugin`) and registers itself with a `config_type`. See the repo-root
 `CLAUDE.md` (one section per system) for how to write one.
 
 ## The arena vs. the plugins
@@ -41,7 +40,7 @@ repo-root `CLAUDE.md` for the exact form):
   registered plugin, `environment_spec` is a path; no bare-string shorthand).
 - **attacker** — a `(plugin, spec)` pair: `attacker_plugin` + `attacker_spec` (an inline dict *or* a path
   to a JSON/YAML file). This is the only attacker form.
-- **defender** / **traffic** — the embedded `{type, ...}` form.
+- **defender** — the embedded `{type, ...}` form.
 
 ```json
 {

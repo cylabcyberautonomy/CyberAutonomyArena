@@ -64,7 +64,6 @@ class ExperimentManagerConfig(BaseModel):
     prompt_injection_dir: Optional[Path] = None      # Defense/Perry repo — prompt_injection defender
     prompt_injection_python: Optional[Path] = None
     velociraptor_dir: Optional[Path] = None          # Velociraptor repo — velociraptor defender (holds bin/velociraptor); a Go binary, no venv/python
-    caldera_human_dir: Optional[Path] = None         # caldera-human-traffic repo — caldera_human traffic (ships pyhuman to victims; no local venv/python)
 
     def plugin_dir(self, field: str) -> Path:
         """The external code checkout for the plugin whose dir field is `field` (per-plugin, set in

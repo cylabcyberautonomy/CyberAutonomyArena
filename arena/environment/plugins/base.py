@@ -1,5 +1,5 @@
-"""Base class for the environment plugin — one of the four selectable systems
-(environment / attacker / defender / traffic).
+"""Base class for the environment plugin — one of the selectable systems
+(environment / attacker / defender).
 
 An environment plugin deploys and tears down the network an experiment runs on, sizes it for
 admission, and produces the run specs (plus the setup access) the attacker and
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 class EnvironmentPlugin(BaseModel):
     """Base for environment deployers. Subclass with ``config_type="..."`` to register
-    a selectable plugin (matches the attacker/defender/traffic pattern)."""
+    a selectable plugin (matches the attacker/defender pattern)."""
 
     _registry: ClassVar[dict[str, type["EnvironmentPlugin"]]] = {}
 

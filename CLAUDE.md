@@ -1,13 +1,12 @@
 # The arena
 
-The arena runs cyber-range **experiments**. An experiment pairs four pluggable systems:
+The arena runs cyber-range **experiments**. An experiment pairs three pluggable systems:
 
 | System          | Role                                                              | Required? |
 |-----------------|------------------------------------------------------------------|-----------|
 | **environment** | deploys the network the experiment runs on, sizes it, issues scoped access, produces the agent-facing specs | yes |
 | **attacker**    | the offensive agent, run from a foothold in that network         | yes |
 | **defender**    | the defensive system (detection / deception / active response)   | optional |
-| **traffic**     | benign background activity on the victim hosts                   | optional |
 
 The arena (`arena/main.py`) drives each system through a fixed lifecycle and **never reaches
 inside a plugin**; no plugin reaches into the arena. Swapping any system is choosing a different plugin —
@@ -45,7 +44,7 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
   path to a JSON/YAML file). This is the only attacker form.
 - **environment** — the explicit `{environment_plugin, environment_spec}` (`environment_plugin` names a
   registered plugin, `environment_spec` is a path; no bare-string shorthand).
-- **defender** / **traffic** — the embedded `{type, ...}` form.
+- **defender** — the embedded `{type, ...}` form.
 
 **Two invariants every plugin must respect** (full rationale in `docs/security-model.md`):
 1. **No god key.** The environment issues a scoped credential per system — the attacker key opens its
@@ -78,7 +77,7 @@ that don't use it, and not shared via a cross-plugin helper module). The one exc
 standalone *runner scripts* (which can't inherit a base) — that stays a module, labelled as such.
 
 **Plugin code paths.** A plugin that shells out to an external codebase (Incalmo, MHBench, the
-Defense/Perry defender repo, Velociraptor, Sliver, the bg-traffic repo) needs that checkout's path set in
+Defense/Perry defender repo, Velociraptor, Sliver) needs that checkout's path set in
 `config.yaml`. There is **one `*_dir` field per plugin** (plus an optional `*_python` override, defaulting
 to `<its_dir>/.venv/bin/python`); **set only the paths for the plugins you use** — `mhbench_dir` is the one
 always required (the environment backend). A plugin resolves its own path via `cfg.plugin_dir(self.code_dir_field)`
@@ -103,7 +102,6 @@ pytest tests/
 - `tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
 - `tests/test_defender_lifecycle.py` — the defender handshake + the `wait_until_ready` readiness-marker gate
   (returns on the marker, raises if the runner dies first or arming times out).
-- `tests/test_traffic_lifecycle.py` — the traffic no-op-default coroutines + the arena's drive order.
 - `tests/test_no_god_key.py` — the scoped-key regression guard.
 
 There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud + LLM
@@ -120,7 +118,6 @@ arena/
   environment/  environment plugin type (backend-neutral interface); plugins/mhbench/ is the MHBench backend
   attacker/     attacker plugin type + implementations
   defender/     defender plugin type + implementations
-  traffic/      traffic plugin type + caldera_human
 ```
 
 ---
@@ -351,12 +348,3 @@ def box_ingress(self):
             "forward":   [8000]}   # victim -> mgmt -> box passthrough (server-mediated EDR clients)
 ```
 A defender that needs nothing returns `{}` and opens nothing.
-
----
-
-## Adding a TRAFFIC plugin
-
-Generates benign background activity on the victim hosts so the attacker's actions aren't the only thing
-in the telemetry. Subclass `TrafficPlugin` (`traffic/plugins/base.py`) with a `config_type`;
-`plugins/caldera_human/` is the working reference to copy. The full extension guide is pending while the
-interface settles — follow the same registration + selection pattern as the other systems.
