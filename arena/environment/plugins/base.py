@@ -80,6 +80,16 @@ class EnvironmentPlugin(BaseModel):
         """Pull host logs into the experiment's output tree before teardown. Best-effort."""
         raise NotImplementedError(f"{type(self).__name__} must implement collect()")
 
+    @classmethod
+    async def clean_slate(cls, cfg: ExperimentManagerConfig) -> None:
+        """Reset this backend's GLOBAL state at manager startup — plugin-agnostically, the same way the
+        arena asks every attacker TYPE to sweep_stale_state(). The arena calls clean_slate() on EVERY
+        registered environment plugin at startup and NEVER touches the backend itself, so all backend
+        reset (e.g. wiping leftover cloud resources, setting OS_CLOUD) lives here, in the backend that
+        owns it. Default: no-op — a backend with nothing global to reset. Must be best-effort (log and
+        continue if the backend is unreachable)."""
+        return None
+
     async def teardown(
         self, experiment: "Experiment", cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

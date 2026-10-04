@@ -110,6 +110,13 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .collect import collect_environment
         await collect_environment(experiment, cfg)
 
+    @classmethod
+    async def clean_slate(cls, cfg: ExperimentManagerConfig) -> None:
+        # Backend reset at startup: sets OS_CLOUD + (OpenStack) wipes leftover cloud resources, or no-ops
+        # on GCP. Owned here, not in the arena — see environment/plugins/mhbench/clean_slate.py.
+        from .clean_slate import clean_slate as _mhbench_clean_slate
+        await _mhbench_clean_slate(cfg)
+
     # -- spec production (the environment is the producer of the agent-facing specs + setup access) --
     def attacker_spec(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import attacker_env_spec
