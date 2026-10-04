@@ -29,7 +29,8 @@ def build_network_from_spec(spec: Optional[dict]):
 
     `environment.network` is imported lazily (not at module scope): the plugins package imports every
     module it finds at manager startup so DefenderPlugin subclasses self-register, but `environment` only
-    exists on the runner subprocess's sys.path (deception_dir), never the manager's — a module-scope
+    exists on the runner subprocess's sys.path (the arena spawns it with cwd + PYTHONPATH set to the
+    plugin's repo), never the manager's — a module-scope
     import here would crash the manager on boot with ModuleNotFoundError."""
     from environment.network import Network, Subnet, Host
 

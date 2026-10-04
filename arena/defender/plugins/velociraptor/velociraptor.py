@@ -34,16 +34,6 @@ from . import deploy
 _MGMT_ADVERTISE_IP = "10.0.1.10"
 
 
-def _require_velociraptor_dir(cfg: ExperimentManagerConfig) -> Path:
-    d = getattr(cfg, "velociraptor_dir", None)
-    if not d:
-        raise RuntimeError(
-            "defender=velociraptor requested but cfg.velociraptor_dir is unset — point it at a dir "
-            "holding bin/velociraptor (the static binary) in config.yaml."
-        )
-    return Path(d)
-
-
 def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:
     return cfg.mhbench_dir / ".venv" / "bin" / "ansible-playbook"
 
@@ -57,6 +47,10 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
 
     type: Literal["velociraptor"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "response_mode"})
+    # External code path (per-plugin, like every other repo-backed plugin): the Velociraptor checkout
+    # holding bin/velociraptor. It's a Go binary, so there is no venv — code_python_field stays None.
+    # Resolved generically via self._code_dir(cfg) / cfg.plugin_dir("velociraptor_dir").
+    code_dir_field = "velociraptor_dir"
     # off | kill | quarantine | both  — what to do when a kill-chain rule fires.
     response_mode: str = "kill"
     poll_interval: float = 15.0
@@ -80,7 +74,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     ) -> None:
         if bastion_ip is None:
             raise RuntimeError("Velociraptor defender needs the experiment bastion IP (bastion_ip).")
-        velo_dir = _require_velociraptor_dir(cfg)
+        velo_dir = self._code_dir(cfg)
         # The server runs ON the defender box. Read the box + the SCOPED defender access (key + bastion
         # routing) from the env-produced specs the arena injected (defender_env_spec / defender_access) —
         # NOT a specific backend's deployer — so this stays environment-agnostic. The box + victims sit

@@ -289,12 +289,11 @@ class DefenderPlugin(BaseModel):
             if _box_ip:
                 _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
         built["defender_setup_access"] = [a.model_dump() for a in _access]
-        # Inject the running plugin's code dir under the stable runner key "deception_dir" (a self-contained
-        # defender declares no code_dir_field and gets nothing). management_ip is the harness's own fixed host
-        # (NOT an ES address); bastion_ip is this experiment's ephemeral bastion FIP the runner ProxyCommands
-        # through to reach internal hosts.
-        if type(self).code_dir_field:
-            built["deception_dir"] = str(cfg.plugin_dir(type(self).code_dir_field))
+        # No plugin-named repo-path key in the config (the old "deception_dir" — dropped in PR #32): every
+        # defender runner is spawned with cwd + PYTHONPATH set to its repo and reads its repo-relative files
+        # (config/config.json) via cwd. management_ip is the harness's own fixed host (NOT an ES address);
+        # bastion_ip is this experiment's ephemeral bastion FIP the runner ProxyCommands through to reach
+        # internal hosts.
         built["management_ip"] = cfg.arena_host_ip
         built["bastion_ip"] = bastion_ip
         built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")

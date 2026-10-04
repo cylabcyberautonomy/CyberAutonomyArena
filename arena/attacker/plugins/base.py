@@ -62,6 +62,19 @@ class AttackerPlugin(BaseModel):
     # well-formedness is checked). Declare only ALWAYS-emitted keys; per-config-optional keys stay out.
     REQUIRED_CONFIG_KEYS: ClassVar[frozenset[str]] = frozenset()
 
+    # Per-plugin external code path: an attacker backed by an external repo (Incalmo, Sliver, …) names its
+    # own config fields here, so no single field silently backs several plugins. Default None = a
+    # self-contained attacker. Mirrors DefenderPlugin — the attacker reaches its repo via cwd/PYTHONPATH
+    # (resolved with these), it never writes the path into the agent config.
+    code_dir_field: ClassVar[Optional[str]] = None
+    code_python_field: ClassVar[Optional[str]] = None
+
+    def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_dir(self.code_dir_field)
+
+    def _code_python(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_python(self.code_dir_field, self.code_python_field)
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:

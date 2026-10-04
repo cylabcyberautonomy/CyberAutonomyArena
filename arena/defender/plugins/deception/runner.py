@@ -2,7 +2,7 @@
 """Subprocess entry point for the Deception defense plugin.
 
 Receives a config JSON path as argv[1]. The JSON must contain:
-  experiment_name, strategy, arsenal, deception_dir, management_ip, log_dir,
+  experiment_name, strategy, arsenal, management_ip, log_dir,
   and the arena-injected defender_env_spec (the env run spec Perry's Network is built from)
 """
 import json
@@ -15,15 +15,12 @@ from pathlib import Path
 
 config = json.loads(Path(sys.argv[1]).read_text())
 
-# deception_dir is prepended to sys.path so its packages are importable
-# regardless of where this script is invoked from.
-_deception_dir = config.get("deception_dir", "")
-if _deception_dir and _deception_dir not in sys.path:
-    sys.path.insert(0, _deception_dir)
+# The plugin's repo is already importable: the arena spawns this runner with cwd + PYTHONPATH set to it
+# (see the plugin's run() / _run_deception_script), so there is no repo-path key in the config.
 
 # The three defender runners are standalone scripts, not package modules, so the
 # plugins/ directory (which holds the shared perry_network builder) has to go on
-# sys.path explicitly - the same way deception_dir does above.
+# sys.path explicitly (the repo itself is already importable via the arena-set PYTHONPATH).
 _plugins_dir = str(Path(__file__).resolve().parent.parent)
 if _plugins_dir not in sys.path:
     sys.path.insert(0, _plugins_dir)
@@ -71,7 +68,7 @@ log_dir.mkdir(parents=True, exist_ok=True)
 PerryLogger.setup_logger(str(log_dir))
 action_logger = setup_action_logger(str(log_dir))
 
-perry_config_data = json.loads((Path(config["deception_dir"]) / "config" / "config.json").read_text())
+perry_config_data = json.loads((Path("config") / "config.json").read_text())  # cwd is the repo (arena sets it)
 perry_cfg = Config(**perry_config_data)
 # This run's Elasticsearch indices are scoped to this experiment
 # (falco-<name> / sysflow-<name>). The ES on the harness host is shared and
