@@ -19,7 +19,6 @@ from arena.defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_recorder,
 )
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
-from arena.defender.defender import run_defender
 from arena.experiment.models import Experiment, ExperimentStatus
 
 
@@ -184,11 +183,14 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
 
     async def run(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("run")
+        # The real runner writes the readiness marker once its loop is armed; simulate that so the
+        # wait_until_ready that run_setup now blocks on returns immediately.
+        _write_marker(experiment_name, cfg)
         return SimpleNamespace(returncode=None, pid=4321)
 
 
 class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender_test"):
-    """prepare() (external arming) fails -> run_defender must raise and NEVER reach run()."""
+    """prepare() (external arming) fails -> run_setup must raise and NEVER reach run()."""
     type: str = "_prepare_fails_defender_test"
 
     @classmethod
@@ -207,13 +209,13 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
 
 
 def _run_cfg(tmp_path: Path):
-    # the cfg attrs run_defender touches: output_dir, arena_host_ip, defender_ready_timeout_seconds.
+    # the cfg attrs run_setup touches: output_dir, arena_host_ip, defender_ready_timeout_seconds.
     return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, arena_host_ip="10.0.0.1",
                            defender_ready_timeout_seconds=30.0)
 
 
 def _run_exp(experiment_name: str):
-    """A minimal fake Experiment carrying what run_defender reads off it — the arena attaches these before
+    """A minimal fake Experiment carrying what run_setup reads off it — the arena attaches these before
     the call (deployed_environment + the env-produced _defender_env_spec / _defender_access / _bastion_ip),
     exactly as the attacker's _attacker_env_spec. No _env_dynamic => no env_action_socket is derived."""
     return SimpleNamespace(experiment_name=experiment_name, deployed_environment=None,
@@ -236,31 +238,25 @@ def test_prepared_defender_baton_roundtrips():
     assert back.es_url == "http://127.0.0.1:9200" and back.falco_index == "falco"
 
 
-def test_run_defender_runs_prepare_before_run(tmp_path):
-    """The external-arming contract: run_defender calls prepare() (deploy decoys / plant creds to
-    completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
+def test_run_setup_arms_launches_and_ends_ready(tmp_path):
+    """run_setup now drives the WHOLE setup→READY sequence in order and returns the running loop process:
+    provision_box (baton) -> build_config(baton) -> prepare (external arming) -> run (launch loop) ->
+    wait_until_ready. There is no separate run step — the launch lives in run_setup because a defender's
+    readiness IS its live loop, mirroring the attacker's run_setup ending READY."""
     _ORDER_CALLS.clear()
     d, exp, cfg = _OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)
-    async def _go():
-        prepared = await d.run_setup(exp, cfg)   # SETUP phase: setup + provision_box -> baton
-        return await run_defender(d, exp, cfg)   # RUN phase: build_config(baton) -> prepare -> run
-    proc = asyncio.run(_go())
-    # the unified lifecycle: setup-phase baton (provision_box) -> build_config(baton) -> arming (prepare)
-    # -> run, mirroring the attacker's _drive_attacker_setup()->run_attacker(..., prepared).
+    proc = asyncio.run(d.run_setup(exp, cfg))
     assert _ORDER_CALLS == ["provision_box", "build_config", "prepare", "run"]
-    assert proc.pid == 4321
+    assert proc.pid == 4321  # run_setup returns the launched, armed loop process
 
 
-def test_run_defender_aborts_when_prepare_fails(tmp_path):
-    """Prepare (external arming) failing must fail the experiment and NEVER launch the run loop — an
+def test_run_setup_aborts_when_prepare_fails(tmp_path):
+    """Prepare (external arming) failing must raise from run_setup and NEVER launch the run loop — an
     undefended environment is never handed to the attacker (why prepare() blocks and raises)."""
     _ORDER_CALLS.clear()
     d, exp, cfg = _PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)
-    async def _go():
-        prepared = await d.run_setup(exp, cfg)
-        return await run_defender(d, exp, cfg)
     with pytest.raises(RuntimeError, match="decoy deploy failed"):
-        asyncio.run(_go())
+        asyncio.run(d.run_setup(exp, cfg))
     assert "run-should-not-run" not in _ORDER_CALLS
 
 

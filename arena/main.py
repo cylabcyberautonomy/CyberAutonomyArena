@@ -35,7 +35,6 @@ async def _stop_defender_process(experiment, process) -> None:
         pass
     if lc is not None and lc.status != DefenderSignal.FAILED:
         await lc.emit(DefenderSignal.STOPPED)
-from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
@@ -1043,7 +1042,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # run_setup), not here.
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
                 # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
-                # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
+                # bastion IP) to the experiment so run_setup reads them off it, exactly like the attacker
                 # reads experiment._attacker_env_spec — no loose args.
                 experiment._defender_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
                 experiment._defender_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
@@ -1059,7 +1058,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # Arm the dynamic topology-mutation window. Box-only execution: a defender that
                 # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
                 # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
-                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
+                # block/restore-only defender). OPEN THE WINDOW NOW, before run_setup → prepare(): a
                 # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
                 # not only during the attack. It stays open through the attack and closes at DEACTIVATE
                 # (finally). No token: the env channel is a UDS unreachable from in-env.
@@ -1072,49 +1071,29 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
-                # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
-                # run_defender then only launches the reactive loop (the defender analog of run_attacker).
-                await experiment.defender.run_setup(experiment, cfg)
-                defender_process = await run_defender(experiment.defender, experiment, cfg)
+                # SETUP phase: fully ARM the defender AND launch its loop, blocking until it signals READY
+                # (the readiness marker the runner writes once armed). run_setup now ends READY — symmetric
+                # with the attacker's run_setup — and RETURNS the running process; the launch lives inside
+                # run_setup because a defender's readiness IS its live loop (it can't be established before
+                # launch the way the attacker's external C2 + beaconed agent can). Gating the attacker on the
+                # defender being armed is deliberate: a run that silently degraded into attacker-only would
+                # misreport "defender vs attacker" with no defender ever having armed.
+                defender_process = await experiment.defender.run_setup(experiment, cfg)
                 experiment.defender_started_at = datetime.now(timezone.utc)
-                await registry.update(experiment)
-            except Exception as e:
-                # A configured defender that fails to start must fail the experiment outright
-                # rather than silently degrade into an undefended attacker-only run - that
-                # would produce a "defender vs attacker" result with no defender ever having
-                # run, and nothing in the recorded outcome to say so.
-                exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
-                _lc = getattr(experiment, "_defender_lifecycle", None)
-                if _lc is not None:
-                    await _lc.emit(DefenderSignal.FAILED, str(e))
-                await _handle_failure(experiment, f"Failed to start defender — {e}")
-                return
-
-            # Wait for the defender to actually arm before letting the attacker in.
-            # run_defender() only spawns the process; the strategy's initialize()
-            # (deploying decoys, planting fake data and honey credentials) runs
-            # inside it and takes minutes. Without this the attacker could complete
-            # its entire chain against an environment that had no deception in it
-            # yet - which produced a "defense held / did not hold" result that
-            # measured nothing. Failing here is deliberate: a defense that never
-            # armed must not be reported as a defended run.
-            try:
-                await experiment.defender.wait_until_ready(
-                    experiment.experiment_name, cfg, defender_process, log
-                )
-                # Armed: the detection loop is up and reading telemetry. A passive detector is live
-                # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
-                # is gated on READY above; RUNNING marks "defender actively defending").
-                await defender_lc.emit(DefenderSignal.READY)
+                # READY was emitted by run_setup once the loop armed. A passive detector is live from the
+                # moment it arms, so READY is immediately followed by RUNNING ("defender actively defending").
                 await defender_lc.send(DefenderCommand.START)
                 await defender_lc.emit(DefenderSignal.RUNNING)
                 await registry.update(experiment)
             except Exception as e:
-                exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
-                await defender_lc.emit(DefenderSignal.FAILED, str(e))
-                await _stop_defender_process(experiment, defender_process)
-                await _handle_failure(experiment, f"Defender failed to arm — {e}")
+                exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+                _lc = getattr(experiment, "_defender_lifecycle", None)
+                if _lc is not None:
+                    await _lc.emit(DefenderSignal.FAILED, str(e))
+                # run_setup kills its own loop if arming fails; this covers a failure AFTER it returned READY.
+                if defender_process:
+                    await _stop_defender_process(experiment, defender_process)
+                await _handle_failure(experiment, f"Failed to start defender — {e}")
                 return
 
     # Background traffic (third plugin class): INSTALL on the victim hosts before rotation, so the

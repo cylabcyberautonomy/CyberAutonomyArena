@@ -60,7 +60,7 @@ def build_environment(value):
     """Build the executable EnvironmentPlugin from an EnvironmentConfig, its explicit
     {environment_plugin, environment_spec} dict, or an already-built plugin. Lazy imports inside (the
     plugins import deployer/capacity) avoid an import cycle at module load. The env analog of
-    attacker.run_attacker / defender.run_defender living beside its config (re-exported from __init__)."""
+    attacker.run_attacker / defender.run_setup living beside its config (re-exported from __init__)."""
     from .plugins.base import EnvironmentPlugin
     from . import plugins  # noqa: F401 — triggers plugin auto-discovery
 

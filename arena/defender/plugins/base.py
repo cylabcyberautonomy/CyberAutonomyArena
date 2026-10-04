@@ -46,12 +46,13 @@ class DefenderPlugin(BaseModel):
         REQUIRED_CONFIG_KEYS / code_dir_field / code_python_field / executes_from_box  — declarations.
 
     FRAMEWORK — the arena calls these; do NOT override:
-        run_setup(experiment, cfg) -> PreparedDefender — the SETUP phase the arena drives: it runs setup()
-            + provision_box() + build_config() + writes the config + prepare(), fully arming the defender.
-            The arena calls run_setup (then run_defender only launches run()); it never calls your
-            setup()/provision_box()/prepare()/build_config() directly.
-        wait_until_ready / ready_marker_path / clear_ready_marker — the readiness-marker gate: the arena
-            blocks on it before the attacker runs; your RUNNER touches the marker once its loop is armed.
+        run_setup(experiment, cfg) -> Process — the SETUP phase the arena drives: it runs setup() +
+            provision_box() + build_config() + writes the config + prepare(), then LAUNCHES run() and blocks
+            on wait_until_ready, emits READY, and returns the running loop process — so run_setup ends READY,
+            symmetric with the attacker's run_setup. The arena calls run_setup and then only emits RUNNING;
+            it never calls your setup()/provision_box()/prepare()/build_config()/run() directly.
+        wait_until_ready / ready_marker_path / clear_ready_marker — the readiness-marker gate run_setup blocks
+            on before emitting READY; your RUNNER touches the marker once its loop is armed.
         validate_built_config, __init_subclass__ (registration), _lifecycle.
       Helpers you MAY call (not override): _code_dir(cfg) / _code_python(cfg). (defender_env_spec + the box
       baton are forwarded into the runner config by run_setup, so build_config never emits them itself — it
@@ -122,7 +123,7 @@ class DefenderPlugin(BaseModel):
         hosts). Runs once, before build_config()/run() - default no-op. Mirrors
         AttackerPlugin.setup(); unlike that one there's no per-defender resource (a C2
         container) to tear down on failure, so this has no transactional cleanup -
-        raising here just fails the defender start (see run_defender()'s caller).
+        raising here just fails the defender start (see run_setup()'s caller).
 
         `bastion_ip` is this experiment's own bastion floating IP (from MHBench
         provisioning) - NOT the same as cfg.arena_host_ip (the harness's own fixed
@@ -228,23 +229,26 @@ class DefenderPlugin(BaseModel):
     # FRAMEWORK — the arena calls these; do NOT override. (See the class docstring.)
     # ========================================================================
 
-    async def run_setup(self, experiment, cfg: ExperimentManagerConfig) -> "PreparedDefender":
-        """The SETUP phase — the defender analog of AttackerPlugin.run_setup: fully ARM the defender, so
-        the RUN phase (run_defender) only launches the loop. Emit SETUP_STARTED, then:
+    async def run_setup(self, experiment, cfg: ExperimentManagerConfig) -> asyncio.subprocess.Process:
+        """The SETUP phase — the defender analog of AttackerPlugin.run_setup: fully bring the defender to
+        READY and return its running loop process. Emit SETUP_STARTED, then:
           setup() + provision_box()   -> the box ES / box-agent baton (what build_config consumes)
           build_config(env_spec, baton) + inject creds/routing + write the runner config
           prepare()                   -> EXTERNAL arming (decoy / honey-cred deploy) that consumes that config
-        Returns the PreparedDefender from prepare(). Symmetric with the attacker, whose run_setup also runs
-        build_config + writes the config after setup() (its arming — the C2 — happens in setup() itself).
+          run() + wait_until_ready    -> launch the reactive loop, block on the readiness marker, emit READY
+        Returns the running process. Symmetric with the attacker, whose run_setup also runs build_config +
+        writes the config after setup() and ends READY.
 
-        For the defender build_config lives HERE, not in run_defender: the written config IS part of arming
-        (prepare() reads it, and so does the run loop). The credential-bearing SetupAccess + bastion routing
-        are injected into the written config (kept OUT of build_config's own output by the leak guard),
-        because the defender's runner acts on victims/the box during the run.
+        For the defender build_config lives HERE (the written config IS part of arming: prepare() reads it,
+        and so does the run loop). The credential-bearing SetupAccess + bastion routing are injected into the
+        written config (kept OUT of build_config's output by the leak guard), because the runner acts on
+        victims/the box during the run.
 
-        It does NOT emit READY: a defender is READY only once its RUNNER has armed (the readiness marker,
-        gated by wait_until_ready after run()), not when setup finishes. FAILED stays centralized in the
-        arena's defender error handler (it covers the whole setup→run block), so this just raises."""
+        Unlike the attacker — whose readiness is external (a C2 up + an agent beaconed, established inside
+        setup() before the attack process launches) — a defender's readiness IS the live loop being up and
+        subscribed. So the launch happens HERE and run_setup blocks on wait_until_ready before emitting READY;
+        there is no separate run phase that establishes readiness. FAILED stays centralized in the arena's
+        defender error handler, so this just raises (after killing a loop that failed to arm)."""
         lc = self._lifecycle(experiment)
         if lc is not None:
             await lc.emit(DefenderSignal.SETUP_STARTED)
@@ -308,8 +312,26 @@ class DefenderPlugin(BaseModel):
         # EXTERNAL arming (decoy / honey-cred deploy) that CONSUMES the written config. BLOCKS + raises on
         # failure, before the attacker starts. run() then only launches the reactive loop.
         await self.prepare(config_path, experiment_name, cfg)
-        log(experiment_name, f"Defender armed ({self.type})")
-        return prepared  # the provision_box box baton, mirroring the attacker's run_setup returning its baton
+        log(experiment_name, f"Defender externally armed ({self.type}); launching loop")
+        # LAUNCH the reactive loop and BLOCK until it signals armed (the readiness marker), then emit READY —
+        # so run_setup ends READY, symmetric with the attacker's run_setup. For a defender the launch lives
+        # HERE rather than in a later step because its readiness IS the live loop being up + subscribed; it
+        # can't be established before launch the way the attacker's (external C2 + beaconed agent) can.
+        # Transactional: a loop that fails to arm is killed, so a half-armed defender never leaks.
+        process = await self.run(config_path, experiment_name, cfg)
+        log(experiment_name, f"Defender process started (pid={getattr(process, 'pid', '?')})")
+        try:
+            await self.wait_until_ready(experiment_name, cfg, process, log)
+        except BaseException:
+            try:
+                process.kill()
+            except Exception:  # noqa: BLE001 — best-effort reap; the real failure is re-raised below
+                pass
+            raise
+        if lc is not None:
+            await lc.emit(DefenderSignal.READY)
+        log(experiment_name, f"Defender armed + ready ({self.type})")
+        return process  # the running, armed loop process — the arena tracks it and only emits RUNNING after
 
     @classmethod
     def validate_built_config(cls, built: dict) -> None:

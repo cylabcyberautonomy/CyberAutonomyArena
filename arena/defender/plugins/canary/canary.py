@@ -19,7 +19,7 @@ Checks (any subset via `checks`):
 required check fails, turning the canary into a hard gate.
 
 The canary reads its hosts and per-host SSH access from the arena-produced DefenderEnvSpec +
-SetupAccess (injected into its config by run_defender); it does not resolve an MHBench SSH key or
+SetupAccess (injected into its config by run_setup); it does not resolve an MHBench SSH key or
 parse the topology itself.
 """
 from __future__ import annotations

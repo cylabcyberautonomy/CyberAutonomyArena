@@ -35,7 +35,7 @@ EXP = CFG["experiment_name"]
 LOG_DIR = Path(CFG["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-BASTION_IP = CFG.get("bastion_ip")            # added by run_defender
+BASTION_IP = CFG.get("bastion_ip")            # added by run_setup
 SSH_KEY = os.path.expanduser(CFG["ssh_key"])
 INSTALL_DIR = CFG["install_dir"]
 API_CONFIG = f"{INSTALL_DIR}/api.yaml"

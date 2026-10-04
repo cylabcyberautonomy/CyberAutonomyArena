@@ -1,3 +1,3 @@
-from .defender import DefenderConfig, run_defender
+from .defender import DefenderConfig
 
-__all__ = ["DefenderConfig", "run_defender"]
+__all__ = ["DefenderConfig"]
