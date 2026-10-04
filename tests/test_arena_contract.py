@@ -737,7 +737,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     env = build_environment(ENV)
     deployed = DeployedEnvironment(topology_spec=str(topo), ip="192.168.202.100", spec=ENV_STEM,
                                    project_name="ci_proj")
-    from arena.config import EnvBackendConfig
+    from arena.environment.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=md, env_backend=EnvBackendConfig(mhbench_config=None))
 
     # method presence on the base contract
@@ -838,7 +838,7 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
         pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
                     f"infra guarantees are covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
-    from arena.config import EnvBackendConfig
+    from arena.environment.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=(_mhbench_dir() or "/tmp"), env_backend=EnvBackendConfig(gcp_relay_ip="10.0.1.10"))
 
     # the generic infra methods are on the base contract. There is no telemetry_ingest/program_telemetry/
@@ -876,7 +876,7 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
         pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
                     f"scoped-credential invariant is covered")
     env = build_environment({"environment_plugin": plugin_name, "environment_spec": spec_val})
-    from arena.config import EnvBackendConfig
+    from arena.environment.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=(_mhbench_dir() or "/tmp"),
                           env_backend=EnvBackendConfig(gcp_relay_ip="10.0.1.10", mhbench_config=None))
     deployed = _deployed_for(plugin_name)

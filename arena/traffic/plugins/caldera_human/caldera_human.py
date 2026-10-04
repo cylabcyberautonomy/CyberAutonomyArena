@@ -15,6 +15,7 @@ Config (``type: "caldera_human"``):
     allow_browser:   permit browser workflows (needs Chromium baked into victim images)
 """
 from __future__ import annotations
+from ....environment.config import env_backend  # MHBench config path (pre-existing traffic->env coupling)
 
 import json
 import os
@@ -59,7 +60,7 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> Path:
     falling back to the default all three MHBench configs use."""
     default = Path("~/.ssh/id_ed25519").expanduser()
     try:
-        rel = cfg.env_backend.mhbench_config or "config/config.yaml"
+        rel = env_backend(cfg).mhbench_config or "config/config.yaml"
         data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
         backend = data.get("backend", "openstack")
         block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}

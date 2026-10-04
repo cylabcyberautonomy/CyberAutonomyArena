@@ -1,25 +1,18 @@
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 _HERE = Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _HERE / "config.yaml"
 
-_FLAT_BACKEND_FIELDS = ("cloud_backend", "os_cloud", "mhbench_config", "gcp_relay_ip", "gcp_flavor_cpu_cost")
-
-
-class EnvBackendConfig(BaseModel):
-    """Environment-backend (MHBench) settings — the deployment target. Owned by the ENVIRONMENT layer, not
-    a top-level arena or defender concern: the defender is fully backend-agnostic and reads none of these.
-    Lives under `env_backend:` in config.yaml."""
-    cloud_backend: str = "openstack"          # "openstack" (default) or "gcp"
-    os_cloud: str = "openstack"               # clouds.yaml cloud name for the OpenStack CLI/SDK
-    mhbench_config: Optional[str] = None       # MHBench cli --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"
-    gcp_relay_ip: str = "10.0.1.10"           # mgmt/bastion internal IP on the victim-reachable CIDR (telemetry relay + defender-box fallback). Named gcp_* for historical reasons.
-    gcp_flavor_cpu_cost: Dict[str, int] = {}  # MHBench flavor -> GCP CPUS_ALL_REGIONS cost; feeds max_active_cpus + decoy CPU estimate
+# Environment-backend settings (cloud_backend/os_cloud/mhbench_config/gcp_relay_ip/gcp_flavor_cpu_cost) are
+# NOT arena config — they belong to the environment layer and live in arena/environment/config.py
+# (EnvBackendConfig, loaded from config.yaml's `env_backend:` section). The arena is backend-neutral; it
+# no longer carries these fields. Deprecated flat forms in config.yaml are ignored here (extra keys) and
+# migrated by the env-layer loader for back-compat.
 
 
 class ExperimentManagerConfig(BaseModel):
@@ -29,7 +22,6 @@ class ExperimentManagerConfig(BaseModel):
     ansible_log_dir: str = "experiment/ansible"  # per-experiment subpath under output_dir/<exp>/ for per-host ansible logs
     registry_path: Path = _HERE / "experiment_registry.yaml"
     env_action_socket: Optional[str] = None  # path of the UDS the defender→env action channel listens on. None = derived per-manager from a hash of output_dir (so two managers on one host don't collide). Never a TCP port: an in-env VM must not be able to reach it (see env_action_server.py).
-    env_backend: EnvBackendConfig = EnvBackendConfig()  # environment-backend (MHBench) settings — owned by the ENVIRONMENT layer, NOT a top-level arena/defender concern. The defender is fully backend-agnostic and reads none of these. (The before-validator migrates deprecated flat fields into here.)
     max_concurrent_openstack_ops: int = 3   # concurrent PROVISION (VM spin-up) + teardown — compute-heavy, keep tight
     max_concurrent_configures: int = 5       # concurrent ansible CONFIGURE — light, gate wider than provision
     max_concurrent_collects: int = 2         # concurrent post-attacker host-log COLLECT. Collect fans a per-host SSH burst out over the experiment's bastion; many large collects finishing together storm the shared FIP/L3 datapath (which the vCPU/VM trackers don't model) and wedge (observed: collects hung >1.5h). Gate it like configure so the storm never forms. Non-fatal + holds no other slot, so a small cap only briefly delays teardown.
@@ -73,22 +65,6 @@ class ExperimentManagerConfig(BaseModel):
     prompt_injection_python: Optional[Path] = None
     velociraptor_dir: Optional[Path] = None          # Velociraptor repo — velociraptor defender (holds bin/velociraptor); a Go binary, no venv/python
     caldera_human_dir: Optional[Path] = None         # caldera-human-traffic repo — caldera_human traffic (ships pyhuman to victims; no local venv/python)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _env_backend_section(cls, data):
-        """Default env_backend, and migrate the DEPRECATED flat backend fields (cloud_backend/os_cloud/
-        mhbench_config/gcp_relay_ip/gcp_flavor_cpu_cost) into it for back-compat with existing config.yaml.
-        The canonical home is now the `env_backend:` section — these settings belong to the environment
-        layer, not the top-level arena config."""
-        if not isinstance(data, dict):
-            return data
-        eb = dict(data.get("env_backend") or {})
-        flat = {k: data.pop(k) for k in _FLAT_BACKEND_FIELDS if k in data}
-        for k, v in flat.items():
-            eb.setdefault(k, v)  # explicit env_backend wins over a stale flat field
-        data["env_backend"] = eb
-        return data
 
     def plugin_dir(self, field: str) -> Path:
         """The external code checkout for the plugin whose dir field is `field` (per-plugin, set in
