@@ -207,9 +207,17 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
 
 
 def _run_cfg(tmp_path: Path):
-    # the attrs run_defender touches: output_dir, deception_dir, arena_host_ip.
+    # the cfg attrs run_defender touches: output_dir, arena_host_ip, defender_ready_timeout_seconds.
     return SimpleNamespace(output_dir=tmp_path, deception_dir=tmp_path, arena_host_ip="10.0.0.1",
                            defender_ready_timeout_seconds=30.0)
+
+
+def _run_exp(experiment_name: str):
+    """A minimal fake Experiment carrying what run_defender reads off it — the arena attaches these before
+    the call (deployed_environment + the env-produced _defender_env_spec / _defender_access / _bastion_ip),
+    exactly as the attacker's _attacker_env_spec. No _env_dynamic => no env_action_socket is derived."""
+    return SimpleNamespace(experiment_name=experiment_name, deployed_environment=None,
+                           _defender_env_spec=None, _defender_access=None, _bastion_ip=None)
 
 
 def test_base_prepare_is_noop_baton(tmp_path):
@@ -231,7 +239,7 @@ def test_run_defender_runs_prepare_before_run(tmp_path):
     """The external-arming contract: run_defender calls prepare() (deploy decoys / plant creds to
     completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
     _ORDER_CALLS.clear()
-    proc = asyncio.run(run_defender(_OrderDefender(), None, "ord", _run_cfg(tmp_path)))
+    proc = asyncio.run(run_defender(_OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)))
     # the unified lifecycle: Phase A baton (provision_box) -> build_config(baton) -> Phase B arming
     # (prepare) -> run, mirroring the attacker's setup()->build_config(prepared)->start().
     assert _ORDER_CALLS == ["provision_box", "build_config", "prepare", "run"]
@@ -243,7 +251,7 @@ def test_run_defender_aborts_when_prepare_fails(tmp_path):
     undefended environment is never handed to the attacker (why prepare() blocks and raises)."""
     _ORDER_CALLS.clear()
     with pytest.raises(RuntimeError, match="decoy deploy failed"):
-        asyncio.run(run_defender(_PrepareFailsDefender(), None, "ordfail", _run_cfg(tmp_path)))
+        asyncio.run(run_defender(_PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)))
     assert "run-should-not-run" not in _ORDER_CALLS
 
 

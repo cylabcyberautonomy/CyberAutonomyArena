@@ -9,6 +9,7 @@ from ..config import ExperimentManagerConfig
 from ..environment import DeployedEnvironment
 from .plugins.base import DefenderPlugin
 from ..experiment_log import log, output_root
+from ..env_action_server import resolve_socket_path
 from . import plugins  # noqa: F401 — triggers auto-discovery
 
 
@@ -42,18 +43,25 @@ class DefenderConfig:
 
 async def run_defender(
     defender: DefenderConfig,
-    environment: Optional[DeployedEnvironment],
-    experiment_name: str,
+    experiment,
     cfg: ExperimentManagerConfig,
-    bastion_ip: Optional[str] = None,
-    defender_env_spec=None,
-    defender_access=None,
-    env_action_socket: Optional[str] = None,
 ) -> asyncio.subprocess.Process:
+    # Symmetric with run_attacker(attacker, experiment, cfg, prepared): take the experiment and read the
+    # run context off it, instead of a long list of loose args. The env-produced agent-facing spec and the
+    # scoped SetupAccess are attached by the arena exactly like the attacker's _attacker_env_spec.
+    experiment_name = experiment.experiment_name
+    environment = experiment.deployed_environment
+    env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
+    access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
+    bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
+    # The dynamic topology-mutation window is armed only for an executes_from_box defender — the arena sets
+    # experiment._env_dynamic and opens the window before calling us — so derive the UDS path from that flag
+    # (absent/False for a non-mutating defender, which then gets no env_action_socket).
+    env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     await defender.setup(experiment_name, environment, cfg, bastion_ip,
-                         defender_env_spec=defender_env_spec, defender_access=defender_access)
+                         defender_env_spec=env_spec, defender_access=access)
     # PHASE A: produce the baton (this run's per-experiment box ES + ssh -L tunnel, and the box agent when
     # the run armed dynamic topology) BEFORE build_config — the defender analog of the attacker's
     # setup()->prepared->build_config. It takes env_spec/access as args (the config isn't written yet) and
@@ -61,10 +69,10 @@ async def run_defender(
     # for a defender with no box telemetry (canary / velociraptor).
     box_prepared = await defender.provision_box(
         experiment_name, cfg, bastion_ip,
-        defender_env_spec=defender_env_spec, defender_access=defender_access,
+        defender_env_spec=env_spec, defender_access=access,
         needs_agent=env_action_socket is not None,
     )
-    built = defender.build_config(experiment_name, environment, defender_env_spec, box_prepared)
+    built = defender.build_config(experiment_name, environment, env_spec, box_prepared)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
     # The agent-facing DefenderEnvSpec (host inventory, NO creds) is now a TYPED build_config arg the plugin
     # emits itself (DefenderPlugin._env_spec_key) — symmetric with the attacker's build_config(env_spec, ...).
@@ -76,9 +84,9 @@ async def run_defender(
     # the box" structural: the controller has no victim target+key to act from the arena with. (Residual:
     # the box key is today the same scoped key that also opens victims — a box-key != victim-key split is a
     # further hardening.) prepare_box_es/prepare_box_agent still find the box entry they need.
-    _access = list(defender_access or [])
-    if getattr(type(defender), "executes_from_box", False) and defender_env_spec is not None:
-        _box = getattr(defender_env_spec, "box", None)
+    _access = list(access or [])
+    if getattr(type(defender), "executes_from_box", False) and env_spec is not None:
+        _box = getattr(env_spec, "box", None)
         _box_ip = getattr(_box, "ip", None) if _box else None
         if _box_ip:
             _access = [a for a in _access if getattr(a, "host", None) == _box_ip]

@@ -1041,9 +1041,12 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await defender_lc.send(DefenderCommand.START_SETUP)
                 await defender_lc.emit(DefenderSignal.SETUP_STARTED)
                 # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
-                # setup access (key + bastion routing), symmetric with the attacker.
-                _dfn_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
-                _dfn_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+                # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
+                # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
+                # reads experiment._attacker_env_spec — no loose args.
+                experiment._defender_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
+                experiment._defender_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+                experiment._bastion_ip = bastion_ip
                 # Defender-requested box ingress: open EXACTLY the ports the defender declares
                 # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
                 # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
@@ -1068,16 +1071,7 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                defender_process = await run_defender(
-                    experiment.defender,
-                    experiment.deployed_environment,
-                    experiment.experiment_name,
-                    cfg,
-                    bastion_ip,
-                    defender_env_spec=_dfn_env_spec,
-                    defender_access=_dfn_access,
-                    env_action_socket=(resolve_socket_path(cfg) if _env_dynamic else None),
-                )
+                defender_process = await run_defender(experiment.defender, experiment, cfg)
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:
