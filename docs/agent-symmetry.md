@@ -171,12 +171,16 @@ installed) that can't be derived offline. What's landed vs what's left:
   local readiness marker so `main.py`'s `wait_until_ready` is untouched. Command construction is pure and
   can be unit-tested; the scp/ssh round-trips need a live box.
 
-**MHBench env plugin — remaining (needs cloud):**
-- `defender_setup_access` currently stamps **harness→bastion** ProxyCommand routing; a box-resident
-  runner needs **box-relative** victim routing (the box reaches victims in-env, not via the harness
-  bastion). Produce that routing for `runs_on_box` defenders.
-- Expose the mgmt host's **box-facing interface address** so `main.py` can bind `serve_env_actions_tcp`
-  to it (and only it).
+**MHBench env plugin — victim routing RESOLVED (no change needed); box-facing address still open:**
+- `defender_setup_access` stamps **harness→bastion** ProxyCommand routing, and that **already works from
+  the box** — EMPIRICALLY CONFIRMED by the canary-on-box live run (ssh 7/7 + resolve 7/7 reaching all
+  original victims *from the box* via the existing ProxyCommand). So **no box-relative-routing change is
+  needed**; a direct-hop (decoys are already direct) would be a mere optimization. This was the big open
+  question for this side — now closed.
+- Still open (and only for the active-response/control-plane path): expose the mgmt host's **box-facing
+  address** so `main.py` can bind `serve_env_actions_tcp` to it — but per the reverse-tunnel decision
+  (option 2, ssh -R), the harness *initiates* the tunnel, so this may not need a bound box-facing address
+  at all. Settle it at the tunnel pairing.
 
 **Defense repo — remaining (branch off its `arena-integration`; needs cloud):**
 - `RemoteEnvOrchestrator`: POST env actions to the **TCP URL + `X-Arena-Token`** (from the shipped
@@ -185,10 +189,13 @@ installed) that can't be derived offline. What's landed vs what's left:
   vendored; telemetry box-local; victim actions via the box's scoped key). velociraptor's active response
   is via its own server, so it may not need the TCP channel at all — confirm live.
 
-**Validation order (live, OpenStack, `equifax_small`):** flip `canary` first (control-plane-free, stdlib
-runner) to prove `_launch_on_box` + box routing end-to-end; then an active-response defender (`llm_soc`)
-to exercise the TCP token channel; then the Defense-repo defenders. The TCP boundary move gets a security
-review before it is trusted.
+**Validation order (live, OpenStack, `equifax_small`):** `canary` first — **DONE, LIVE-VALIDATED**
+(canary `runs_on_box=True`, GraphSearch attacker → Finished; `_launch_on_box` ship+ssh-tt launch,
+credential-threading, `_wait_box_ready` marker-bridge, and `-tt` teardown all worked; box→victim routing
+confirmed as above; telemetry gap reproduced identically = pre-existing, orthogonal). On
+`feature/defender-box-uv-engine` (off `9ae812f`, +2 commits, 114 tests). Next: an active-response defender
+(`llm_soc`, needs the Perry uv path + the reverse-tunnel) to exercise the TCP token channel; then the
+Defense-repo defenders. The TCP boundary move still gets a security review before it is trusted.
 
 ## Corrections from the live decoy-deploy work (teammate, arena-integration)
 
