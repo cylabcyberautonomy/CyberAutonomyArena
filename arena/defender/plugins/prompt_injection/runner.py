@@ -257,7 +257,7 @@ if mode == "prepare":
     print(f"[{experiment_name}] Defender preparing (strategy={strategy_name})", flush=True)
     defender.prepare()
     (log_dir / "defender_prepared.json").write_text(
-        json.dumps({"armed_in_setup": bool(defender.strategy.ARMS_IN_SETUP)}))
+        json.dumps({}))  # empty baton; the arena reads it back as PreparedDefender
     print(f"[{experiment_name}] Defender prepared "
           f"(armed_in_setup={defender.strategy.ARMS_IN_SETUP})", flush=True)
     sys.exit(0)

@@ -180,7 +180,7 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
 
     async def prepare(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("prepare")
-        return PreparedDefender(armed_in_setup=True)
+        return PreparedDefender()
 
     async def run(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("run")
@@ -221,18 +221,19 @@ def _run_exp(experiment_name: str):
 
 
 def test_base_prepare_is_noop_baton(tmp_path):
-    """A defender with no external arming (the base default) returns an empty baton, armed_in_setup=False:
-    its arming, if any, happens in the loop and still uses the readiness marker."""
+    """A defender with no external arming (the base default) returns an empty baton: its arming, if any,
+    happens in the loop and still uses the readiness marker."""
     prepared = asyncio.run(_FakeDefender().prepare(tmp_path / "c.json", "p", _cfg(tmp_path)))
     assert isinstance(prepared, PreparedDefender)
-    assert prepared.armed_in_setup is False
+    assert prepared.es_url is None  # empty baton
 
 
 def test_prepared_defender_baton_roundtrips():
-    """The baton crosses the prepare->run process boundary as JSON (the prepare-mode runner writes it,
-    the arena reads it back in _run_prepare_and_wait)."""
-    back = PreparedDefender.model_validate_json(PreparedDefender(armed_in_setup=True).model_dump_json())
-    assert back.armed_in_setup is True
+    """The box baton round-trips as JSON (a Perry defender's prepare-mode runner writes it and
+    _run_prepare_and_wait reads it back; provision_box likewise returns one build_config consumes)."""
+    back = PreparedDefender.model_validate_json(
+        PreparedDefender(es_url="http://127.0.0.1:9200", falco_index="falco").model_dump_json())
+    assert back.es_url == "http://127.0.0.1:9200" and back.falco_index == "falco"
 
 
 def test_run_defender_runs_prepare_before_run(tmp_path):

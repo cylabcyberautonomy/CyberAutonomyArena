@@ -79,10 +79,10 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
         try:
             return await sliver_c2.setup_c2(experiment.experiment_name, cfg, foothold_access, bastion_ip)
         except Exception:
-            await self.stop_c2c(experiment.experiment_name)  # tear down a partial C2 (keyed by name)
+            await self.teardown(experiment.experiment_name, cfg)  # tear down a partial C2 (keyed by name)
             raise
 
-    async def stop_c2c(self, experiment_name: str) -> None:
+    async def teardown(self, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
         await asyncio.get_event_loop().run_in_executor(None, sliver_c2.teardown_c2, experiment_name, None)
 
     @classmethod

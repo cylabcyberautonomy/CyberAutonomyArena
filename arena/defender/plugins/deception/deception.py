@@ -138,7 +138,7 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
             agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
             baton.update(agent)
-        return PreparedDefender(armed_in_setup=False, **baton)
+        return PreparedDefender(**baton)
 
     async def prepare(
         self,
@@ -153,9 +153,26 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         # build_config from the Phase-A baton). Blocks and RAISES on deploy failure, so an undefended
         # environment is never handed to the attacker. (Box ES + box agent standup moved to provision_box.)
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
-        return await self._run_prepare_and_wait(
-            Path(__file__).parent / "runner.py", config_path, experiment_name, cfg, log_path
+        marker = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_prepared.json"
+        marker.unlink(missing_ok=True)  # drop any stale baton from a prior run of this name
+        repo_dir, python = self._code_dir(cfg), self._code_python(cfg)
+        # Launch runner.py in the Perry venv in "prepare" mode (its packages import via PYTHONPATH=repo), and
+        # WAIT: a failure (non-zero exit or no baton) raises below, so an undefended env never reaches the
+        # attacker. (Same inline spawn as run(), just mode="prepare" + awaited.)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        pythonpath = os.pathsep.join(p for p in (str(repo_dir), os.environ.get("PYTHONPATH", "")) if p)
+        proc = await asyncio.create_subprocess_exec(
+            str(python), str(Path(__file__).parent / "runner.py"), str(config_path), "prepare",
+            cwd=str(repo_dir), env={**os.environ, "PYTHONPATH": pythonpath},
+            stdout=open(log_path, "a"), stderr=subprocess.STDOUT,
         )
+        rc = await proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"Defender prepare (external arming) exited {rc} - see {log_path}")
+        if not marker.exists():
+            raise RuntimeError(f"Defender prepare exited 0 but wrote no baton at {marker} - see {log_path}")
+        return PreparedDefender.model_validate_json(marker.read_text())
+
 
     async def teardown(
         self,
@@ -175,9 +192,14 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         # The box ES + the strategy's external arming happened in prepare(); here we only launch the
         # long-running reactive loop ("run" mode -> runner.py calls defender.start(prepared=True)).
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
-        return await self._run_deception_script(
-            Path(__file__).parent / "runner.py", config_path, cfg, log_path,
-            self._code_dir(cfg), self._code_python(cfg),
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_dir = self._code_dir(cfg)
+        pythonpath = os.pathsep.join(p for p in (str(repo_dir), os.environ.get("PYTHONPATH", "")) if p)
+        # Launch runner.py in the Perry venv ("run" = the reactive loop); same inline spawn as prepare().
+        return await asyncio.create_subprocess_exec(
+            str(self._code_python(cfg)), str(Path(__file__).parent / "runner.py"), str(config_path), "run",
+            cwd=str(repo_dir), env={**os.environ, "PYTHONPATH": pythonpath},
+            stdout=open(log_path, "a"), stderr=subprocess.STDOUT,
         )
 
     # -- per-experiment Elasticsearch on the defender box -----------------------------------------

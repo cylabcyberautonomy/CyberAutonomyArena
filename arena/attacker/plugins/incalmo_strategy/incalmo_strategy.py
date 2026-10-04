@@ -177,7 +177,7 @@ class IncalmoStrategyAttacker(AttackerPlugin, config_type="incalmo_strategy"):
             if local_url:
                 await self.wait_c2c_agent(local_url, experiment.experiment_name)
         except Exception:
-            await self.stop_c2c(experiment.experiment_name)  # tear down a partial C2 (keyed by name)
+            await self.teardown(experiment.experiment_name, cfg)  # tear down a partial C2 (keyed by name)
             raise
         return IncalmoPreparedC2(remote_url=remote_url, local_url=local_url)
 
@@ -203,7 +203,7 @@ class IncalmoStrategyAttacker(AttackerPlugin, config_type="incalmo_strategy"):
     async def wait_c2c_agent(self, local_url: str, experiment_name: str) -> None:
         await wait_for_agent(local_url, experiment_name)
 
-    async def stop_c2c(self, experiment_name: str) -> None:
+    async def teardown(self, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
         await stop_c2c_server(experiment_name)
 
     # ---- strategy-specific config + launch -----------------------------------------------------------

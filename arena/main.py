@@ -533,7 +533,7 @@ async def _clean_slate() -> None:
             except Exception:
                 logger.exception("Failed to stop attacker process for '%s'", experiment.experiment_name)
             try:
-                await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
+                await experiment.attacker.teardown(experiment.experiment_name, cfg)  # no-op if this attacker has no C2
             except Exception:
                 logger.exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
@@ -570,7 +570,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # teardown, keyed by experiment_name — the arena no longer tracks a container id.
     if experiment.attacker and delete_c2:
         try:
-            await experiment.attacker.stop_c2c(experiment.experiment_name)
+            await experiment.attacker.teardown(experiment.experiment_name, cfg)
         except Exception:
             get_logger(experiment.experiment_name).exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
@@ -722,7 +722,7 @@ async def _cancel_and_remove(name: str) -> None:
         except Exception:
             logger.exception("Failed to stop attacker process for '%s'", name)
         try:
-            await experiment.attacker.stop_c2c(experiment.experiment_name)  # no-op if this attacker has no C2
+            await experiment.attacker.teardown(experiment.experiment_name, cfg)  # no-op if this attacker has no C2
         except Exception:
             logger.exception("Failed to stop C2 for '%s'", name)
     if experiment.defender:

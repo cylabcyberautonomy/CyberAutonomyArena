@@ -161,7 +161,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
             agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
             baton.update(agent)
-        return PreparedDefender(armed_in_setup=False, **baton)
+        return PreparedDefender(**baton)
 
     # -- box agent deploy (the defender's in-environment effector) ---------------------------------
     # Copied per dynamic-defender plugin (box_agent_install.sh co-located), like prepare_box_es. Ships the
