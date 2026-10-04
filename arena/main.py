@@ -40,6 +40,7 @@ from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentS
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
+from .environment.config import env_backend  # env-layer-owned backend settings (not in ExperimentManagerConfig)
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -205,14 +206,16 @@ async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
     logger.warning("arena starting: env_backend.cloud_backend=%s (config=%s)",
-                   cfg.env_backend.cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
+                   env_backend().cloud_backend, os.environ.get("EXPERIMENT_MANAGER_CONFIG", "<default config.yaml>"))
     # LLM keys into os.environ so plugin subprocesses (env={**os.environ,…}) inherit them, however the
     # harness was launched. The keys historically live in the Incalmo repo's .env; load from whichever
     # incalmo code dir(s) are configured (per-plugin now). Best-effort; an already-exported key still wins.
     for _incalmo_dir in (cfg.incalmo_strategy_dir, cfg.incalmo_llm_dir):
         if _incalmo_dir:
             load_dotenv(_incalmo_dir / ".env")
-    os.environ["OS_CLOUD"] = cfg.env_backend.os_cloud
+    # OS_CLOUD for the arena's own OpenStack clean-slate + the MHBench subprocesses it spawns (they inherit
+    # os.environ). Sourced from the env layer — the arena no longer owns the backend config object.
+    os.environ["OS_CLOUD"] = env_backend().os_cloud
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)

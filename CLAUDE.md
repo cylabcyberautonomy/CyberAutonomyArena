@@ -86,7 +86,9 @@ always required (the environment backend). A plugin resolves its own path via `c
 (e.g. `llm_soc_dir`, `incalmo_llm_dir`). Redundancy is intentional: plugins sharing a repo (the two incalmo
 attackers; the three Defense/Perry defenders) each name it, so no field silently backs several. See the
 README's *Config reference* for the full table. (These still live in the top-level arena config; longer term
-they belong in each plugin's own config, same as the cloud-backend block.)
+they belong in each plugin's own config — the way the environment-backend settings now live in the
+environment layer: `arena/environment/config.py` owns `EnvBackendConfig`, loaded from config.yaml's
+`env_backend:` section, and `ExperimentManagerConfig` no longer carries them.)
 
 **Running the tests** (fast, cloud-free — run before committing):
 ```

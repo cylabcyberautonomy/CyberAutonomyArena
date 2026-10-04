@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...config import env_backend  # env-layer backend settings
 
 import asyncio
 import json
@@ -54,7 +55,7 @@ def resolve_topology_path(environment_spec: str, cfg) -> Path:
 
 def _mhb_config_args(cfg) -> list:
     # Route MHBench at a non-default backend config (e.g. GCP). Group option, before the subcommand.
-    return ["--config", cfg.env_backend.mhbench_config] if cfg.env_backend.mhbench_config else []
+    return ["--config", env_backend(cfg).mhbench_config] if env_backend(cfg).mhbench_config else []
 
 
 def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
@@ -62,7 +63,7 @@ def _mhbench_ssh_key(cfg: ExperimentManagerConfig) -> str:
     import yaml  # local import: only the attacker-spec adapter needs it
     default = str(Path("~/.ssh/id_ed25519").expanduser())
     try:
-        rel = cfg.env_backend.mhbench_config or "config/config.yaml"
+        rel = env_backend(cfg).mhbench_config or "config/config.yaml"
         data = yaml.safe_load((cfg.mhbench_dir / rel).read_text())
         backend = data.get("backend", "openstack")
         block = data.get(backend, {}) if isinstance(data.get(backend), dict) else {}
