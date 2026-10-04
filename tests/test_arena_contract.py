@@ -449,17 +449,6 @@ def test_defender_lifecycle_methods_present():
     assert callable(getattr(DefenderPlugin, "prepare"))
 
 
-def test_capacity_counts_only_topology_vms():
-    """Admission counts ONLY the topology VMs — no 'extra'/decoy pre-reservation. capacity must not
-    own a decoy estimate, and reserve() must not take extra_vms/extra_vcpus."""
-    import inspect
-    from arena.environment import capacity
-    assert not hasattr(capacity, "estimate_decoy_vms"), "capacity must not own a decoy estimate"
-    params = set(inspect.signature(capacity.CapacityTracker.reserve).parameters)
-    assert "extra_vms" not in params and "extra_vcpus" not in params, \
-        "reserve() must not carry extra_vms/extra_vcpus"
-
-
 def test_environment_is_a_plugin():
     """Environment is now the 4th selectable plugin type, with mhbench registered."""
     import arena.environment.plugins  # noqa: F401 — auto-discovery
@@ -490,7 +479,7 @@ def test_environment_plugin_lifecycle_and_signals():
     from arena.environment.plugins.base import EnvironmentPlugin
     from arena.environment import EnvironmentLifecycle, EnvironmentSignal, build_environment
     env = build_environment(ENV)  # → MHBenchEnvironment
-    for m in ("capacity", "provision", "configure", "collect", "teardown"):
+    for m in ("provision", "configure", "collect", "teardown"):
         assert callable(getattr(env, m)), f"environment plugin missing {m}()"
     for m in ("provision", "configure", "teardown"):
         assert "lc" in inspect.signature(getattr(env, m)).parameters, f"{m}() must accept lc"
@@ -594,7 +583,7 @@ def test_env_action_handler_window_budget():
             return exp
 
     reg = _Reg()
-    run = lambda p: asyncio.run(handle_env_action(p, registry=reg, cfg=None, lock=None))  # noqa: E731
+    run = lambda p: asyncio.run(handle_env_action(p, registry=reg, cfg=None))  # noqa: E731
     add = {"experiment_name": "ci_dyn", "action": {"kind": "AddHost", "name": "decoy0"}}
 
     assert run({"experiment_name": "nope", "action": {"kind": "AddHost"}})["status"] == 404

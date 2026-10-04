@@ -1,5 +1,4 @@
 import asyncio
-import heapq
 import json
 import logging
 import os
@@ -39,7 +38,6 @@ from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .env_action_server import resolve_socket_path, serve_env_actions
-from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
@@ -68,47 +66,6 @@ def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecy
 
 logger = logging.getLogger(__name__)
 
-
-class _PriorityLock:
-    """Priority semaphore that serves waiters in priority order (lower number = higher priority)."""
-
-    def __init__(self, capacity: int = 1):
-        self._capacity = capacity
-        self._count = 0
-        self._waiters: list[tuple[int, int, asyncio.Future]] = []
-        self._seq = 0
-
-    @asynccontextmanager
-    async def acquire(self, priority: int = 0):
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._seq += 1
-        heapq.heappush(self._waiters, (priority, self._seq, fut))
-        self._wake_next()
-        await fut
-        try:
-            yield
-        finally:
-            self._count -= 1
-            self._wake_next()
-
-    def _wake_next(self):
-        while self._count < self._capacity and self._waiters:
-            _, _, fut = heapq.heappop(self._waiters)
-            if not fut.done():
-                self._count += 1
-                fut.set_result(None)
-
-
-_PRIORITY_TEARDOWN = 0
-_PRIORITY_DEPLOY = 1
-
-
-def _gate_priority(experiment) -> int:
-    """Setup-gate priority for an experiment (lower = served first, per _PriorityLock). A labeled
-    priority run (experiment.priority > 0) maps to a lower gate number so it is admitted ahead of
-    normal runs; the default priority 0 maps to _PRIORITY_DEPLOY (unchanged behavior)."""
-    return _PRIORITY_DEPLOY - int(getattr(experiment, "priority", 0) or 0)
 
 
 def _force_kill_attacker(pid: Optional[int], exp_log) -> None:
@@ -188,19 +145,16 @@ _ACTIVE_STATUSES = {  # non-terminal / in-flight: their C2 must survive other ex
 
 cfg: ExperimentManagerConfig
 registry: Registry
-_openstack_lock: _PriorityLock
-_configure_lock: _PriorityLock
-_collect_lock: asyncio.Semaphore  # caps concurrent post-attacker host-log collects (bastion SSH burst / shared FIP-L3 load)
-_attacker_setup_lock: _PriorityLock  # caps concurrent C2-attacker bring-up (bastion-FIP SSH into the foothold)
-_deploy_buffer: asyncio.Semaphore
-_inflight_gate: _PriorityLock  # caps concurrently-active (non-queued, non-terminal) experiments; priority-ordered
-_capacity: CapacityTracker
-_tasks: dict[str, asyncio.Task] = {}  # experiment_name -> its _run_experiment task; lets a single run be cancelled/evicted (rerun) without a whole-harness restart
+# Purely sequential: a single worker drains _queue and runs ONE experiment at a time, in submission order.
+_queue: asyncio.Queue  # Experiments awaiting their turn
+_pending: dict[str, Experiment] = {}  # name -> the live queued Experiment. A queue entry whose object no longer matches here was cancelled (DELETE) or superseded (overwrite) while it waited, so the worker skips it.
+_worker_task: asyncio.Task  # the single consumer of _queue
+_tasks: dict[str, asyncio.Task] = {}  # name -> the CURRENTLY-RUNNING experiment's task; lets _cancel_and_remove evict the active run without a harness restart
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cfg, registry, _openstack_lock, _configure_lock, _collect_lock, _attacker_setup_lock, _deploy_buffer, _inflight_gate, _capacity
+    global cfg, registry, _queue, _worker_task
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = ExperimentManagerConfig.load()
     logger.warning("arena starting (config=%s)",
@@ -214,39 +168,62 @@ async def lifespan(app: FastAPI):
     # OS_CLOUD + the backend wipe are the ENVIRONMENT's concern now: the env plugin's clean_slate()
     # (run from _clean_slate below) sets OS_CLOUD and resets the backend. The arena never touches it.
     registry = Registry(cfg.registry_path)
-    _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent PROVISION (active nova spin-up)
-    _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent CONFIGURE (active ansible)
-    _collect_lock = asyncio.Semaphore(cfg.max_concurrent_collects)        # concurrent COLLECT (post-attacker host-log fetch burst)
-    _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent C2-attacker bring-up (gated by requires_docker)
-    _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # DEPLOYING+DEPLOYED cap — back-pressure: held from provision-start until configure-start, so provisioning halts when configure backs up (no infinite host pile-up)
-    _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments; overflow waits in QUEUED (priority-ordered)
     # Always run clean-slate — the arena manages its OpenStack infra directly (the old gcp-skip gate is
     # gone now that the backend is the environment's concern, not an arena-level switch). _clean_slate is
     # internally best-effort, so it logs and continues if OpenStack isn't reachable.
     await _clean_slate()
-    # The registry is the tracker's source of truth: the VM count is derived on every check
-    # from which experiments currently hold VMs (capacity._holds_vms), not from paired
-    # reserve/release calls - so no finish/failure/retry/cancel path can leak a count.
-    _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
-                                max_active_cpus=cfg.max_active_cpus)
-    await _capacity.initialize()
+    _queue = asyncio.Queue()  # purely sequential: one worker drains this, one experiment at a time
+    _worker_task = asyncio.create_task(_experiment_worker())  # the single sequential runner
     # Defender→environment action channel: a UDS-only listener (no TCP port, so no in-env VM can reach
     # it) that services EnvActionRequest events from a running defender. Per-manager socket path keeps the
     # two managers one host may run from colliding. Inert unless a defender arms the serving window.
+    # The arena is purely sequential, so there is no provisioning lock to serialise cloud mutations against.
     _env_action_socket_path = resolve_socket_path(cfg)
     _env_action_task = asyncio.create_task(
-        serve_env_actions(_env_action_socket_path, registry, cfg, _openstack_lock)
+        serve_env_actions(_env_action_socket_path, registry, cfg)
     )
     logger.warning("env-action channel listening on UDS %s", _env_action_socket_path)
     try:
         yield
     finally:
+        _worker_task.cancel()  # stop pulling new experiments before we tear infra down
         _env_action_task.cancel()
         try:
             await _env_action_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 — never let channel teardown mask shutdown
             pass
     await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
+
+
+async def _experiment_worker() -> None:
+    """The single sequential runner. There is exactly ONE of these, so experiments run strictly
+    one-at-a-time in submission (FIFO) order — no lock or concurrency gate is needed, because nothing
+    else ever runs an experiment. `add_experiment` and the retry path just `_queue.put(...)`.
+
+    A dequeued experiment is skipped if it is no longer the live entry for its name (`_pending[name]`):
+    that means it was cancelled (DELETE) or replaced (overwrite) while it waited in the queue. The run
+    itself is launched as a tracked task in `_tasks[name]` so `_cancel_and_remove` can still evict the
+    ACTIVE run mid-flight; the worker catches that cancellation and moves on to the next experiment."""
+    while True:
+        experiment = await _queue.get()
+        try:
+            name = experiment.experiment_name
+            if _pending.get(name) is not experiment:
+                continue  # stale: cancelled or superseded while queued
+            _pending.pop(name, None)  # consume the pending marker — it's running now, not waiting
+            task = asyncio.create_task(_run_experiment_gated(experiment))
+            _tasks[name] = task
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass  # evicted mid-run by _cancel_and_remove; the single worker must survive and continue
+            except Exception:
+                logger.exception("Experiment '%s' crashed in the runner", name)
+            finally:
+                if _tasks.get(name) is task:
+                    _tasks.pop(name, None)
+        finally:
+            _queue.task_done()
 
 
 def _proc_cmdline(pid: int) -> str:
@@ -451,14 +428,9 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
             get_logger(experiment.experiment_name).exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
     # Pull ground-truth host logs while the range is still up. Best-effort: a collection failure
-    # must never block teardown (leaking VMs is worse than losing logs). It takes no OpenStack
-    # op-slot (SSH via the bastion, not a nova API call), but it DOES fan a per-host SSH burst out
-    # over the bastion, so it acquires the dedicated _collect_lock: many large collects finishing
-    # together otherwise storm the shared FIP/L3 datapath and wedge (see max_concurrent_collects).
-    # The lock is released before teardown so a wedged collect can't hold a slot past its own cap.
+    # must never block teardown (leaking VMs is worse than losing logs).
     try:
-        async with _collect_lock:
-            await experiment.environment.collect(experiment, cfg)
+        await experiment.environment.collect(experiment, cfg)
     except Exception:
         get_logger(experiment.experiment_name).exception("Host-log collection failed for '%s'", experiment.experiment_name)
 
@@ -487,20 +459,14 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # and an env sitting on its VMs while it waits for a slot is exactly what starves the next batch's attacker.
     try:
         await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment, EnvironmentCommand.TEARDOWN))
-        # This is what stops the experiment holding VMs in the CapacityTracker (see
-        # capacity._holds_vms). On failure it stays unset on purpose: the VMs may well
-        # still be on the cluster, so the experiment keeps holding its count until a
-        # DELETE (which re-attempts teardown, then drops it from the registry).
+        # On failure teardown_finished_at stays unset on purpose: the VMs may well still be on the
+        # cluster, so a later DELETE re-attempts teardown before dropping it from the registry.
         experiment.teardown_finished_at = datetime.now(timezone.utc)
         await registry.update(experiment)
         tore_down = True
     except Exception:
         get_logger(experiment.experiment_name).exception("Failed to tear down environment for '%s'", experiment.experiment_name)
         tore_down = False  # env not cleanly destroyed — caller must not redeploy over it
-    # Always: re-read nova (a partial teardown still freed something) and wake waiters so
-    # they re-derive the VM count from state. Whether THIS experiment still holds VMs is
-    # decided by teardown_finished_at above, not by this call.
-    _capacity.release(experiment.experiment_name)
     return tore_down
 
 
@@ -537,11 +503,6 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         experiment.status = ExperimentStatus.RETRYING
         experiment.error = None  # fresh attempt — clear the prior failure reason
         experiment.deployed_environment = experiment.pid = None
-        # Clearing vms_reserved is what un-holds the failed attempt's VMs in the
-        # CapacityTracker: teardown_finished_at is reset to None just below, so without
-        # this the old attempt would count again alongside the retry's reservation.
-        experiment.vcpus_reserved = experiment.ram_mb_reserved = None
-        experiment.disk_gb_reserved = experiment.vms_reserved = None
         for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
                   "defender_started_at", "defender_finished_at", "attacker_started_at",
                   "attacker_finished_at", "teardown_started_at", "teardown_finished_at"):
@@ -549,7 +510,8 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         await registry.update(experiment)
         get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
                               name, experiment.retry_count, cfg.max_retries)
-        _tasks[name] = asyncio.create_task(_run_experiment_gated(experiment))
+        _pending[name] = experiment        # re-queue the same experiment for its retry
+        await _queue.put(experiment)       # the single worker picks it up when it reaches the front
     else:
         experiment.status = ExperimentStatus.ERROR  # escalate to the caller (phdpt)
         await registry.update(experiment)
@@ -561,7 +523,9 @@ async def _cancel_and_remove(name: str) -> None:
     """Cancel one experiment and free its name — the no-restart path behind DELETE and overwrite-rerun.
     Cancels its task, kills its in-flight MHBench subprocess (scoped by --project-name, so peers are
     untouched), stops its attacker + C2, tears down its VMs BY NAME (robust even mid-provision, since it's
-    name-based not from the in-memory object), releases capacity, then drops it from the registry."""
+    name-based not from the in-memory object), then drops it from the registry. Also evicts it from the
+    queue if it was still waiting to run."""
+    _pending.pop(name, None)   # if still queued (not yet started), the worker skips the now-stale entry
     task = _tasks.pop(name, None)
     if task and not task.done():
         task.cancel()
@@ -598,11 +562,7 @@ async def _cancel_and_remove(name: str) -> None:
         await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment, EnvironmentCommand.TEARDOWN))  # deletes all VMs/networks by project name
     except Exception:
         logger.exception("Failed to tear down environment for '%s'", name)
-    # This path never sets teardown_finished_at, so it is the registry removal that stops
-    # the experiment holding VMs in the CapacityTracker (capacity._holds_vms only sees
-    # experiments still in the registry). Hence remove FIRST, then wake the waiters.
     await registry.remove(name)
-    _capacity.release(name)
 
 
 async def _docker_preflight() -> Optional[str]:
@@ -632,26 +592,22 @@ async def _docker_preflight() -> Optional[str]:
 
 
 async def _run_experiment_gated(experiment: Experiment) -> None:
-    """Run an experiment under the active-concurrency cap. The experiment stays
-    QUEUED (its status is not advanced here) until a slot frees, so no more than
-    cfg.max_active_experiments experiments are ever past QUEUED (DEPLOYING through
-    RUNNING and teardown) at once. Released on every exit path, including retries
-    and exceptions, so a slot is never leaked. Priority-ordered: a labeled-priority experiment
-    takes the next freed active slot ahead of normal queued ones."""
-    async with _inflight_gate.acquire(_gate_priority(experiment)):
-        timeout = getattr(cfg, "experiment_timeout_seconds", None)
-        if not timeout:
-            await _run_experiment(experiment)
-            return
-        # Overall experiment wall-clock backstop: bound the WHOLE lifecycle so a total hang (a wedged
-        # provision/configure/collect/teardown the per-phase waits don't catch) can't run forever or
-        # strand VMs. On the deadline, _run_experiment is cancelled mid-phase and we force the cleanup it
-        # didn't reach. (CancelledError is a BaseException, so _run_experiment's own `except Exception`
-        # handlers don't swallow it; its `finally`/`async with` still release the deploy slot + locks.)
-        try:
-            await asyncio.wait_for(_run_experiment(experiment), timeout)
-        except asyncio.TimeoutError:
-            await _handle_experiment_timeout(experiment)
+    """Run one experiment to completion. Called ONLY by the single _experiment_worker, so runs never
+    overlap (purely sequential) — no lock needed. Optionally bounds the whole run with
+    experiment_timeout_seconds."""
+    timeout = getattr(cfg, "experiment_timeout_seconds", None)
+    if not timeout:
+        await _run_experiment(experiment)
+        return
+    # Overall experiment wall-clock backstop: bound the WHOLE lifecycle so a total hang (a wedged
+    # provision/configure/collect/teardown the per-phase waits don't catch) can't run forever or
+    # strand VMs. On the deadline, _run_experiment is cancelled mid-phase and we force the cleanup it
+    # didn't reach. (CancelledError is a BaseException, so _run_experiment's own `except Exception`
+    # handlers don't swallow it; its `finally` blocks still run.)
+    try:
+        await asyncio.wait_for(_run_experiment(experiment), timeout)
+    except asyncio.TimeoutError:
+        await _handle_experiment_timeout(experiment)
 
 
 async def _handle_experiment_timeout(experiment: Experiment) -> None:
@@ -733,78 +689,34 @@ async def _run_experiment(experiment: Experiment) -> None:
     await registry.update(experiment)
 
     bastion_ip = None
-    deploy_slot_held = False
     try:
-        vm_specs = await experiment.environment.capacity(experiment, cfg)
-        # Admission counts the topology VMs (incl. the management host) PLUS the defender's declared
-        # VM budget — the max extra hosts a running defender may spin up via EnvActionRequests (opt-in;
-        # default [] so a defender that never mutates topology reserves topology+0 and nothing changes).
-        # Pre-reserving the budget here is what lets a mid-run add_host draw from already-held capacity
-        # and never block or oversubscribe the cluster — closing the old "defender decoys are not
-        # pre-reserved" gap. Guarded getattr mirrors box_ingress(): a pre-merge defender requests none.
-        if experiment.defender is not None:
-            _vm_budget = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-            if _vm_budget:
-                vm_specs = list(vm_specs) + [tuple(s) for s in _vm_budget]
-
-        def _record_reservation(res) -> None:
-            # Runs INSIDE the tracker's lock at the moment of admission, so the registry
-            # already shows this experiment holding its VMs before any other reserve()
-            # can evaluate the count (capacity._holds_vms keys off vms_reserved).
-            experiment.vcpus_reserved, experiment.ram_mb_reserved = res.vcpus, res.ram_mb
-            experiment.disk_gb_reserved, experiment.vms_reserved = res.disk_gb, res.n_vms
-
-        await _capacity.reserve(vm_specs, name,
-                                on_admit=_record_reservation,
-                                priority=int(getattr(experiment, "priority", 0) or 0))
         config_path.write_text(experiment.config_json())
         await registry.update(experiment)
 
-        # Enter the deploy stage (DEPLOYING+DEPLOYED ≤ max_deployed). This slot is held until CONFIGURE
-        # actually starts (below) — so when the configure gate is saturated, provisioned envs pile up here
-        # and new provisions block, instead of spinning up hosts that then sit idle waiting to configure.
-        await _deploy_buffer.acquire()
-        deploy_slot_held = True
-
-        async with _openstack_lock.acquire(_gate_priority(experiment)):
-
-            experiment.status = ExperimentStatus.DEPLOYING
-            experiment.environment_deploy_started_at = datetime.now(timezone.utc)
+        experiment.status = ExperimentStatus.DEPLOYING
+        experiment.environment_deploy_started_at = datetime.now(timezone.utc)
+        await registry.update(experiment)
+        try:
+            deployed, bastion_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.PROVISION))
+            experiment.deployed_environment = deployed
             await registry.update(experiment)
+        except NotImplementedError:
+            experiment.deployed_environment = None
+            exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
 
-            # Launch the C2 only now that we hold a deploy slot, so queued experiments don't each idle a
-            # heavy Caldera container. On failure, re-raise so the OUTER handler runs _handle_failure AFTER
-            # this lock releases — its teardown re-acquires the same semaphore, so doing it here deadlocks.
-            try:
-                deployed, bastion_ip = await experiment.environment.provision(experiment, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.PROVISION))
-                experiment.deployed_environment = deployed
-                await registry.update(experiment)
-            except NotImplementedError:
-                experiment.deployed_environment = None
-                exp_log.warning("Deployer stub hit — proceeding without environment for '%s'", experiment.experiment_name)
-
-        # Provisioning done → DEPLOYED: VMs are up but we still hold the deploy slot while waiting for a
-        # configure slot. The slot only frees once CONFIGURING actually starts (below), so a saturated
-        # configure gate back-pressures onto provisioning (DEPLOYED experiments pile up, new provisions block).
         experiment.status = ExperimentStatus.DEPLOYED
         await registry.update(experiment)
-        async with _configure_lock.acquire(_gate_priority(experiment)):
-            _deploy_buffer.release()   # DEPLOYED → CONFIGURING hand-off: free the deploy slot so a queued env can provision now
-            deploy_slot_held = False
-            experiment.status = ExperimentStatus.CONFIGURING
-            await registry.update(experiment)
-            await experiment.environment.configure(experiment, bastion_ip, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.CONFIGURE))
-            experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
-            experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
-            await registry.update(experiment)
+        experiment.status = ExperimentStatus.CONFIGURING
+        await registry.update(experiment)
+        await experiment.environment.configure(experiment, bastion_ip, None, cfg, lc=_env_lc(experiment, EnvironmentCommand.CONFIGURE))
+        experiment.environment_deploy_finished_at = datetime.now(timezone.utc)
+        experiment.status = ExperimentStatus.CONFIGURED   # configured; waiting for the attack to start
+        await registry.update(experiment)
 
     except Exception as e:
         exp_log.exception("Failed to provision/configure environment for '%s'", experiment.experiment_name)
         await _handle_failure(experiment, f"Deploy/configure failed — {e}")
         return
-    finally:
-        if deploy_slot_held:
-            _deploy_buffer.release()   # release the deploy slot on any exit before configure started (e.g. provision failure)
 
     # Interface-contract validation (the ARENA's job — not the defender plugin's). The environment must
     # supply what each configured system requires; the arena refuses a deploy whose env↔system contract is
@@ -867,11 +779,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         # C2 attackers; shell agents do no C2 bring-up and run ungated). Teardown on failure is uncapped
         # and never takes this lock, so _handle_failure below cannot deadlock.
         await attacker_lc.send(AttackerCommand.START_SETUP)  # arena -> attacker: begin setup
-        if getattr(experiment.attacker, "requires_docker", False):
-            async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
-                prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
-        else:
-            prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
+        prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
         await registry.update(experiment)   # persist the setup_started/ready signals
         # `prepared` is the attacker's opaque setup handle — the arena passes it straight to
         # run_attacker without inspecting it. A C2 attacker reads its own URLs off it; teardown is
@@ -883,103 +791,97 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     defender_process = None
     if experiment.defender:
-        # Serialize defender arming under the SAME gate as the harness's configure step
-        # (_configure_lock / max_concurrent_configures). Arming runs heavy ansible over
-        # the shared bastion/mgmt host — deploying decoy VMs, planting fake data and
-        # honey credentials — and letting it overlap another experiment's configure
-        # saturates the mgmt host (the SSH "banner exchange"/timeout failures we hit).
-        # Holding the lock here, not just around configure_environment, makes ALL setup
-        # ansible single-file while the attack phase still runs many-in-parallel.
-        # Teardown on failure is uncapped and never takes this lock, so calling
-        # _handle_failure inside the block cannot deadlock; the lock releases on return.
-        async with _configure_lock.acquire(_gate_priority(experiment)):
-            try:
-                # Drop any marker left by a previous run of this experiment name
-                # (overwrite=true reuses the output dir) before the gate below.
-                experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
-                # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
-                # arena records each phase so an observer sees where the defender is and a hang shows
-                # as a stalled status, not one opaque "failed to arm".
-                defender_lc = DefenderLifecycle(on_emit=_defender_signal_recorder(experiment))
-                experiment._defender_lifecycle = defender_lc
-                await defender_lc.send(DefenderCommand.START_SETUP)
-                # SETUP_STARTED is emitted by DefenderPlugin.run_setup (symmetric with the attacker's
-                # run_setup), not here.
-                # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
-                # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
-                # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
-                # reads experiment._attacker_env_spec — no loose args.
-                experiment._defender_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
-                experiment._defender_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
-                experiment._bastion_ip = bastion_ip
-                # Defender-requested box ingress: open EXACTLY the ports the defender declares
-                # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
-                # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
-                # the box stays fully isolated. Guarded getattr so a defender plugin without box_ingress
-                # (pre-merge) simply requests nothing.
-                _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
-                if _ingress:
-                    await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
-                # Arm the dynamic topology-mutation window. Box-only execution: a defender that
-                # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
-                # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
-                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
-                # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
-                # not only during the attack. It stays open through the attack and closes at DEACTIVATE
-                # (finally). No token: the env channel is a UDS unreachable from in-env.
-                _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
-                if _env_dynamic:
-                    experiment._env_dynamic = True
-                    experiment._env_budget_remaining = len(_budget_specs)
-                    experiment._env_lifecycle = _env_lc(experiment)
-                    experiment._env_serving = True
-                    experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
-                    experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
-                # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
-                # run_defender then only launches the reactive loop (the defender analog of run_attacker).
-                await experiment.defender.run_setup(experiment, cfg)
-                defender_process = await run_defender(experiment.defender, experiment, cfg)
-                experiment.defender_started_at = datetime.now(timezone.utc)
-                await registry.update(experiment)
-            except Exception as e:
-                # A configured defender that fails to start must fail the experiment outright
-                # rather than silently degrade into an undefended attacker-only run - that
-                # would produce a "defender vs attacker" result with no defender ever having
-                # run, and nothing in the recorded outcome to say so.
-                exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
-                _lc = getattr(experiment, "_defender_lifecycle", None)
-                if _lc is not None:
-                    await _lc.emit(DefenderSignal.FAILED, str(e))
-                await _handle_failure(experiment, f"Failed to start defender — {e}")
-                return
+        # Arm the defender: run_setup fully arms it (setup + box ES/agent + build_config + write + decoy/
+        # honey-cred deploy), then run_defender launches the reactive loop and we wait until it is actually
+        # armed before letting the attacker in. The arena is purely sequential, so this heavy bastion/
+        # mgmt-host ansible never overlaps another experiment — no concurrency gate is needed.
+        try:
+            # Drop any marker left by a previous run of this experiment name
+            # (overwrite=true reuses the output dir) before the gate below.
+            experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
+            # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
+            # arena records each phase so an observer sees where the defender is and a hang shows
+            # as a stalled status, not one opaque "failed to arm".
+            defender_lc = DefenderLifecycle(on_emit=_defender_signal_recorder(experiment))
+            experiment._defender_lifecycle = defender_lc
+            await defender_lc.send(DefenderCommand.START_SETUP)
+            # SETUP_STARTED is emitted by DefenderPlugin.run_setup (symmetric with the attacker's
+            # run_setup), not here.
+            # The ENVIRONMENT PLUGIN produces the defender's agent-facing spec + harness-only
+            # setup access (key + bastion routing), symmetric with the attacker. Attach them (and the
+            # bastion IP) to the experiment so run_defender reads them off it, exactly like the attacker
+            # reads experiment._attacker_env_spec — no loose args.
+            experiment._defender_env_spec = experiment.environment.defender_spec(experiment.deployed_environment, cfg)
+            experiment._defender_access = experiment.environment.defender_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+            experiment._bastion_ip = bastion_ip
+            # Defender-requested box ingress: open EXACTLY the ports the defender declares
+            # (box_ingress() -> {"telemetry": [ports], "forward": [ports]}). telemetry routes the
+            # relay to box:port; forward opens victim->mgmt:port->box:port. {} -> nothing opened, so
+            # the box stays fully isolated. Guarded getattr so a defender plugin without box_ingress
+            # (pre-merge) simply requests nothing.
+            _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
+            if _ingress:
+                await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
+            # Arm the dynamic topology-mutation window. Box-only execution: a defender that
+            # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
+            # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
+            # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
+            # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
+            # not only during the attack. It stays open through the attack and closes at DEACTIVATE
+            # (finally). No token: the env channel is a UDS unreachable from in-env.
+            _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
+            _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
+            if _env_dynamic:
+                experiment._env_dynamic = True
+                experiment._env_budget_remaining = len(_budget_specs)
+                experiment._env_lifecycle = _env_lc(experiment)
+                experiment._env_serving = True
+                experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
+                experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
+            # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
+            # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
+            # run_defender then only launches the reactive loop (the defender analog of run_attacker).
+            await experiment.defender.run_setup(experiment, cfg)
+            defender_process = await run_defender(experiment.defender, experiment, cfg)
+            experiment.defender_started_at = datetime.now(timezone.utc)
+            await registry.update(experiment)
+        except Exception as e:
+            # A configured defender that fails to start must fail the experiment outright
+            # rather than silently degrade into an undefended attacker-only run - that
+            # would produce a "defender vs attacker" result with no defender ever having
+            # run, and nothing in the recorded outcome to say so.
+            exp_log.exception("Failed to start defender for '%s'", experiment.experiment_name)
+            _lc = getattr(experiment, "_defender_lifecycle", None)
+            if _lc is not None:
+                await _lc.emit(DefenderSignal.FAILED, str(e))
+            await _handle_failure(experiment, f"Failed to start defender — {e}")
+            return
 
-            # Wait for the defender to actually arm before letting the attacker in.
-            # run_defender() only spawns the process; the strategy's initialize()
-            # (deploying decoys, planting fake data and honey credentials) runs
-            # inside it and takes minutes. Without this the attacker could complete
-            # its entire chain against an environment that had no deception in it
-            # yet - which produced a "defense held / did not hold" result that
-            # measured nothing. Failing here is deliberate: a defense that never
-            # armed must not be reported as a defended run.
-            try:
-                await experiment.defender.wait_until_ready(
-                    experiment.experiment_name, cfg, defender_process, log
-                )
-                # Armed: the detection loop is up and reading telemetry. A passive detector is live
-                # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
-                # is gated on READY above; RUNNING marks "defender actively defending").
-                await defender_lc.emit(DefenderSignal.READY)
-                await defender_lc.send(DefenderCommand.START)
-                await defender_lc.emit(DefenderSignal.RUNNING)
-                await registry.update(experiment)
-            except Exception as e:
-                exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
-                await defender_lc.emit(DefenderSignal.FAILED, str(e))
-                await _stop_defender_process(experiment, defender_process)
-                await _handle_failure(experiment, f"Defender failed to arm — {e}")
-                return
+        # Wait for the defender to actually arm before letting the attacker in.
+        # run_defender() only spawns the process; the strategy's initialize()
+        # (deploying decoys, planting fake data and honey credentials) runs
+        # inside it and takes minutes. Without this the attacker could complete
+        # its entire chain against an environment that had no deception in it
+        # yet - which produced a "defense held / did not hold" result that
+        # measured nothing. Failing here is deliberate: a defense that never
+        # armed must not be reported as a defended run.
+        try:
+            await experiment.defender.wait_until_ready(
+                experiment.experiment_name, cfg, defender_process, log
+            )
+            # Armed: the detection loop is up and reading telemetry. A passive detector is live
+            # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
+            # is gated on READY above; RUNNING marks "defender actively defending").
+            await defender_lc.emit(DefenderSignal.READY)
+            await defender_lc.send(DefenderCommand.START)
+            await defender_lc.emit(DefenderSignal.RUNNING)
+            await registry.update(experiment)
+        except Exception as e:
+            exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
+            await defender_lc.emit(DefenderSignal.FAILED, str(e))
+            await _stop_defender_process(experiment, defender_process)
+            await _handle_failure(experiment, f"Defender failed to arm — {e}")
+            return
 
     # Host-log rotation is now an MHBench wrapper detail run inside mhbench.configure() (right after
     # configuring), NOT an arena step — so there is no rotate call here.
@@ -1195,27 +1097,9 @@ async def add_experiment(data: ExperimentSpecs):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    _tasks[experiment.experiment_name] = asyncio.create_task(_run_experiment_gated(experiment))
+    _pending[experiment.experiment_name] = experiment
+    await _queue.put(experiment)  # the single worker runs it when it reaches the front (sequential)
     return {"experiment_name": experiment.experiment_name, "status": experiment.status}
-
-
-@app.post("/experiments/{experiment_name}/priority")
-async def set_priority(experiment_name: str, body: dict):
-    """Re-prioritize an experiment on the fly (higher = admitted from the queue sooner). Works
-    whether it is still QUEUED (re-ranks it in the capacity queue immediately) or already running
-    (updates the record + its remaining setup-gate acquires). Returns whether it was re-ranked in
-    the live queue (waiting=true) vs only recorded (already admitted / not yet at the gate)."""
-    try:
-        priority = max(0, min(1000, int(body.get("priority"))))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="body must be {\"priority\": <int>}")
-    experiment = next((e for e in registry.load() if e.experiment_name == experiment_name), None)
-    if experiment is None:
-        raise HTTPException(status_code=404, detail=f"'{experiment_name}' not found")
-    experiment.priority = priority
-    await registry.update(experiment)
-    waiting = await _capacity.reprioritize(experiment_name, priority)
-    return {"experiment_name": experiment_name, "priority": priority, "requeued": waiting}
 
 
 @app.get("/experiments")

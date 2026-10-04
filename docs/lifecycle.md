@@ -6,10 +6,9 @@ one piece of cross-system timing that matters: the defender-readiness handshake.
 
 ## Stages
 
-1. **Admission / capacity.** Before anything deploys, the arena asks the environment plugin for the
-   experiment's VM footprint (`capacity()` → per-VM `(vcpus, ram_mb, disk_gb)`) and queues it against the
-   configured caps (total VMs, CPUs, concurrent setups). A matchup larger than the cap still runs — alone
-   — rather than deadlocking.
+1. **Admission (sequential).** The arena runs exactly ONE experiment at a time. A submitted experiment is
+   `QUEUED` until the current run finishes, then runs in submission (FIFO) order. There is no capacity
+   tracker and no parallel-experiment cap.
 
 2. **Provision.** `environment.provision()` spins up the network (victims, the attacker's foothold, the
    bastion/management host, and — when a defender is present — an isolated defender box). Emits
@@ -34,8 +33,8 @@ one piece of cross-system timing that matters: the defender-readiness handshake.
    experiment's output tree *before* teardown. Best-effort and bounded.
 
 7. **Teardown.** `defender.teardown()` (harness-side cleanup) runs first, then `environment.teardown()`
-   reclaims all VMs/networks. Emits `TEARING_DOWN → TORN_DOWN`. Teardown is uncapped so a finished
-   experiment releases its VMs immediately instead of queueing behind new provisions. Backend-specific
+   reclaims all VMs/networks. Emits `TEARING_DOWN → TORN_DOWN`. Teardown runs to completion before the
+   next queued experiment starts (the run is sequential). Backend-specific
    stray-VM cleanup (e.g. sweeping decoy VMs before the network teardown) is the environment's job, done
    as the first step of its own teardown.
 

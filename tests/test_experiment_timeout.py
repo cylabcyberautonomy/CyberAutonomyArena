@@ -13,7 +13,7 @@ import logging
 from types import SimpleNamespace
 
 import arena.main as m
-from arena.main import _run_experiment_gated, _handle_experiment_timeout, _PriorityLock
+from arena.main import _run_experiment_gated, _handle_experiment_timeout
 from arena.experiment.models import ExperimentStatus
 
 
@@ -27,7 +27,6 @@ def _exp(name="to_test", pid=None, priority=0):
 def test_timeout_cancels_hung_run_and_dispatches_handler(monkeypatch):
     """Past the deadline, the hung _run_experiment is cancelled and _handle_experiment_timeout fires."""
     monkeypatch.setattr(m, "cfg", SimpleNamespace(experiment_timeout_seconds=0.05), raising=False)
-    monkeypatch.setattr(m, "_inflight_gate", _PriorityLock(10), raising=False)
     cancelled = {"v": False}
 
     async def fake_run(exp):
@@ -54,7 +53,6 @@ def test_timeout_cancels_hung_run_and_dispatches_handler(monkeypatch):
 def test_no_timeout_when_run_finishes_in_time(monkeypatch):
     """A run that completes within the cap returns normally; the handler never fires."""
     monkeypatch.setattr(m, "cfg", SimpleNamespace(experiment_timeout_seconds=5), raising=False)
-    monkeypatch.setattr(m, "_inflight_gate", _PriorityLock(10), raising=False)
     ran, called = {"v": False}, {"v": False}
 
     async def fake_run(exp):
@@ -74,7 +72,6 @@ def test_no_timeout_when_run_finishes_in_time(monkeypatch):
 def test_disabled_cap_runs_without_the_wrapper(monkeypatch):
     """cap=None (the default) runs _run_experiment directly, no deadline, no handler."""
     monkeypatch.setattr(m, "cfg", SimpleNamespace(experiment_timeout_seconds=None), raising=False)
-    monkeypatch.setattr(m, "_inflight_gate", _PriorityLock(10), raising=False)
     ran, called = {"v": False}, {"v": False}
 
     async def fake_run(exp):

@@ -50,15 +50,6 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             ],
         }
 
-    async def capacity(
-        self, experiment: "Experiment", cfg: ExperimentManagerConfig
-    ) -> list[tuple[int, int, int]]:
-        from .capacity import count_vm_specs
-        from .deployer import resolve_topology_path
-        topology_path = resolve_topology_path(self.environment_spec, cfg)
-        return await count_vm_specs(topology_path, cfg.mhbench_dir,
-                                    flavor_cpu_cost=(env_backend(cfg).gcp_flavor_cpu_cost or None))
-
     async def provision(
         self, experiment: "Experiment", c2c_url: Optional[str], cfg: ExperimentManagerConfig,
         lc: Optional[EnvironmentLifecycle] = None,

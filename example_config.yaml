@@ -64,26 +64,16 @@ env_backend:
   cloud_backend: openstack     # "openstack" (default) or "gcp"
   # mhbench_config: config/config.gcp.yaml   # passed to MHBench as --config (relative to mhbench_dir); set for gcp
   # gcp_relay_ip: 10.0.1.10                  # internal mgmt-host IP on the victim-reachable CIDR (telemetry relay + defender-box fallback)
-  # gcp_flavor_cpu_cost:                     # MHBench flavor -> GCP CPUS_ALL_REGIONS cost; feeds max_active_cpus below
-  #   m1.small: 1    # -> e2-small
-  #   m2.large: 8    # -> e2-standard-8
+  # gcp_flavor_cpu_cost:                     # MHBench flavor -> GCP CPUS_ALL_REGIONS cost (an env_backend
+  #   m1.small: 1    # -> e2-small             field; unused in this sequential build, which has no CPU-budget
+  #   m2.large: 8    # -> e2-standard-8        admission — kept so the env config matches the full line)
 
-# ---- Concurrency / admission -------------------------------------------------
-# Defaults bound cluster network load (routers / FIPs / L3) that the vCPU tracker
-# does not model. Loosen only if your fabric can take it.
-max_concurrent_openstack_ops: 3    # concurrent provision + teardown (compute-heavy)
-max_concurrent_configures: 5       # concurrent ansible configure (light)
-max_concurrent_collects: 2         # concurrent post-run host-log collect
-max_concurrent_attacker_setups: 2  # concurrent C2-attacker bring-up
-max_active_experiments: 25         # hard cap on concurrently active experiments
-max_deployed: 10                   # cap experiments in the deploy stage (back-pressure)
-max_retries: 3
-# max_active_vms: 100              # optional cap on total VMs across active experiments
-
-# ---- GCP-only capacity (leave unset for OpenStack) ---------------------------
-# On GCP the binding quota is the GLOBAL CPUS_ALL_REGIONS, which a VM count can't model.
-# max_active_cpus: 80          # CPU-budget admission cap, sized to the GCP CPUS_ALL_REGIONS quota
-# (the per-flavor CPU cost it uses is env_backend.gcp_flavor_cpu_cost, above)
+# ---- Execution ---------------------------------------------------------------
+# This build is PURELY SEQUENTIAL: the arena runs exactly ONE experiment at a time; submitting more
+# just queues them to run one after another (in submission order). There are no parallel-experiment
+# or capacity knobs (max_active_experiments, max_concurrent_*, max_deployed, max_active_vms/cpus) and
+# no capacity tracker.
+max_retries: 3                     # per-experiment retry attempts on failure
 
 # ---- Timeouts ----------------------------------------------------------------
 # attacker_timeout_seconds: 2700        # real wall-clock cap on the attacker (scored TimedOut); unset = no cap

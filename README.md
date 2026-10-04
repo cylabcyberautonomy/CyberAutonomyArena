@@ -109,7 +109,7 @@ field silently backs several.
 
 | Key | Default | Effect |
 |---|---|---|
-| `max_concurrent_experiments` | `1` | How many experiments may deploy or run at the same time. Teardowns are always prioritized over new deployments when the limit is reached. |
+| _(sequential)_ | — | This build runs exactly one experiment at a time; additional submissions queue and run in submission order. There is no concurrency setting. |
 | `max_retries` | `3` | How many times a failed experiment is automatically retried. Set to `0` to disable retries. |
 
 ---

@@ -202,11 +202,10 @@ class DefenderPlugin(BaseModel):
         return {}
 
     def defender_vm_budget(self) -> list[tuple[int, int, int]]:
-        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
-        specs — the same shape EnvironmentPlugin.capacity() returns, so the arena simply appends them to
-        the topology's footprint at admission. The cluster then holds room for `topology + this budget`
-        BEFORE the experiment is admitted, so every mid-run add_host draws from an already-reserved pool
-        and can never block or oversubscribe; the arena rejects an add that would exceed the ceiling.
+        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb) specs.
+        In this purely-sequential build it is a RUNTIME CAP: the serving window admits at most this many
+        mid-run add_host requests (via EnvActionRequests) and rejects any beyond the ceiling. (There is no
+        capacity pre-reservation at admission — the arena runs exactly one experiment at a time.)
 
         OPT-IN, like box_ingress(): a defender that never changes topology (canary, velociraptor, a
         passive SOC) returns [] (default) and needs no other change — the whole dynamic-host path is

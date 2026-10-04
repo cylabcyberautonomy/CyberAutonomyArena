@@ -333,7 +333,7 @@ def test_defender_plugin_conforms(name):
 
 # --------------------------------------------------------------------------- environment conformance
 
-_ENV_ASYNC_METHODS = {"capacity": True, "provision": True, "configure": True, "collect": True,
+_ENV_ASYNC_METHODS = {"provision": True, "configure": True, "collect": True,
                       "teardown": True, "program_ingress": True}
 _ENV_SYNC_METHODS = {"resolve_spec": False, "attacker_spec": False, "defender_spec": False,
                      "attacker_setup_access": False, "defender_setup_access": False,
