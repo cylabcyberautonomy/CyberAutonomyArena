@@ -116,3 +116,44 @@ These live behind clearly-labelled "DEFENDER CAPABILITY" banners so the twin str
 
 Slices 1–2 are behavior-preserving and land first. 3–4 touch the security boundary and the cloud, and
 need live validation (OpenStack; GCP has the known Falco/driver limits).
+
+## Full conversion (convert every defender to run on the box) — per-component live work
+
+Investigating the real conversion surfaced that it spans **three** components, and several seams are
+determined by live facts (box→victim routing, the box-facing mgmt address, what the bare box has
+installed) that can't be derived offline. What's landed vs what's left:
+
+**Landed (offline, tested):**
+- arena base twins (slices 1–2), the `runs_on_box` scaffold (slice 3), and the token'd TCP channel
+  keystone (slice 4): `serve_env_actions_tcp` + `handle_env_action(token, trusted_transport)` +
+  `new_env_action_token()`. 110 tests green.
+
+**arena repo — remaining (needs cloud):**
+- `main.py`: when arming a `runs_on_box` defender, `new_env_action_token()` → `exp._env_action_token`,
+  start `serve_env_actions_tcp` bound to the box-facing mgmt address for the serving window, and thread
+  the token + TCP URL to the box runner (in the config it ships). For `runs_on_box`, set the config's
+  `log_dir` to a box-side path and SKIP the cred-injection (TODO already marked in `run_setup`).
+- `DefenderPlugin._launch_on_box` (live mechanics): scp the runner + config to the box and run it over
+  `ssh -tt` (foreground, so the local pid proxies the remote — `stop()`'s local SIGTERM propagates);
+  `_wait_box_ready` polls the box marker over ssh (the mirror of `wait_c2c_agent`), then bridges the
+  local readiness marker so `main.py`'s `wait_until_ready` is untouched. Command construction is pure and
+  can be unit-tested; the scp/ssh round-trips need a live box.
+
+**MHBench env plugin — remaining (needs cloud):**
+- `defender_setup_access` currently stamps **harness→bastion** ProxyCommand routing; a box-resident
+  runner needs **box-relative** victim routing (the box reaches victims in-env, not via the harness
+  bastion). Produce that routing for `runs_on_box` defenders.
+- Expose the mgmt host's **box-facing interface address** so `main.py` can bind `serve_env_actions_tcp`
+  to it (and only it).
+
+**Defense repo — remaining (branch off its `arena-integration`; needs cloud):**
+- `RemoteEnvOrchestrator`: POST env actions to the **TCP URL + `X-Arena-Token`** (from the shipped
+  config) instead of the UDS, when box-resident.
+- The deception / prompt_injection / velociraptor runners must run **on the box** (their deps present or
+  vendored; telemetry box-local; victim actions via the box's scoped key). velociraptor's active response
+  is via its own server, so it may not need the TCP channel at all — confirm live.
+
+**Validation order (live, OpenStack, `equifax_small`):** flip `canary` first (control-plane-free, stdlib
+runner) to prove `_launch_on_box` + box routing end-to-end; then an active-response defender (`llm_soc`)
+to exercise the TCP token channel; then the Defense-repo defenders. The TCP boundary move gets a security
+review before it is trusted.
