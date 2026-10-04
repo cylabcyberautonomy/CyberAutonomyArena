@@ -44,7 +44,7 @@ from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
 
 # The plugin's repo is already importable: the arena spawns this runner with cwd + PYTHONPATH set to it
-# (see the plugin's run() / _run_deception_script), so there is no repo-path key in the config.
+# (see the plugin's run()), so there is no repo-path key in the config.
 
 # The three defender runners are standalone scripts, not package modules, so the
 # plugins/ directory (which holds the shared perry_network builder) has to go on
