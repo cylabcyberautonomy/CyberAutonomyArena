@@ -70,11 +70,6 @@ def _env_security_params():
     """(plugin_name, sample_spec) for every registered env plugin — the registry is the source of truth."""
     return [(name, ENV_SAMPLE_SPECS.get(name)) for name in sorted(EnvironmentPlugin._registry)]
 
-FAKE_ENV = DeployedEnvironment(
-    topology_spec="/tmp/equifax_small.json",
-    ip="192.168.202.100",   # attacker (kali) IP in equifax_small
-    spec=ENV_STEM,
-)
 # The adversary-safe spec build_config consumes: objective + foothold identity only (no keys/bastion).
 FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective=ENV_STEM,
@@ -362,7 +357,7 @@ def test_defender_llm_soc_build_config_contract():
     flows via topology_spec: the runner builds its Perry network from the arena-injected defender_env_spec
     (env -> defender contract), so build_config carries NO topology_spec — the defender is env-agnostic."""
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
-    built = dfn.build_config("ci_exp", FAKE_ENV, None, PreparedDefender())
+    built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
     assert built["strategy"] == "FalcoLLM"
     assert "llm_model" in built
@@ -375,7 +370,7 @@ def test_defender_canary_build_config_contract():
     the arena-injected defender_env_spec / defender_setup_access, NOT from build_config (no ssh_key,
     no topology_spec — that coupling is gone)."""
     dfn = DefenderPlugin._registry["canary"].model_validate({"type": "canary"})
-    built = dfn.build_config("ci_exp", FAKE_ENV, None, PreparedDefender())
+    built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
     assert set(built["checks"]) <= {"ssh", "resolve", "telemetry", "canary_event"}
     assert "fail_closed" in built
@@ -386,7 +381,7 @@ def test_defender_velociraptor_build_config_contract():
     """Velociraptor now builds its monitored estate from the arena-injected defender_env_spec (in
     setup()), not a topology parse — so build_config carries NO topology_spec (backend-agnostic)."""
     dfn = DefenderPlugin._registry["velociraptor"].model_validate({"type": "velociraptor"})
-    built = dfn.build_config("ci_exp", FAKE_ENV, None, PreparedDefender())
+    built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
     assert "topology_spec" not in built  # migrated to the injected defender_env_spec
     assert "response_mode" in built

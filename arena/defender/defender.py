@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from pydantic_core import core_schema
 
 from ..config import ExperimentManagerConfig
-from ..environment import DeployedEnvironment
 from .plugins.base import DefenderPlugin
 from ..experiment_log import log, output_root
 from ..env_action_server import resolve_socket_path
@@ -50,7 +49,6 @@ async def run_defender(
     # run context off it, instead of a long list of loose args. The env-produced agent-facing spec and the
     # scoped SetupAccess are attached by the arena exactly like the attacker's _attacker_env_spec.
     experiment_name = experiment.experiment_name
-    environment = experiment.deployed_environment
     env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
     access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
     bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
@@ -60,7 +58,7 @@ async def run_defender(
     env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    await defender.setup(experiment_name, environment, cfg, bastion_ip,
+    await defender.setup(experiment_name, cfg, bastion_ip,
                          defender_env_spec=env_spec, defender_access=access)
     # PHASE A: produce the baton (this run's per-experiment box ES + ssh -L tunnel, and the box agent when
     # the run armed dynamic topology) BEFORE build_config — the defender analog of the attacker's
@@ -72,7 +70,7 @@ async def run_defender(
         defender_env_spec=env_spec, defender_access=access,
         needs_agent=env_action_socket is not None,
     )
-    built = defender.build_config(experiment_name, environment, env_spec, box_prepared)
+    built = defender.build_config(experiment_name, env_spec, box_prepared)
     type(defender).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
     # The agent-facing DefenderEnvSpec (host inventory, NO creds) is now a TYPED build_config arg the plugin
     # emits itself (DefenderPlugin._env_spec_key) — symmetric with the attacker's build_config(env_spec, ...).

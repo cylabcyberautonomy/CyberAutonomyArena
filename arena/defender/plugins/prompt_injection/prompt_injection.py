@@ -10,7 +10,6 @@ from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
-from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 
@@ -123,7 +122,6 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         env_spec,
         prepared: PreparedDefender,
     ) -> dict:
@@ -185,7 +183,6 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     async def teardown(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
         # Kill the harness-host->box ES ssh -L tunnel. (Decoy hosts AIAttackerDetection deploys are

@@ -32,7 +32,7 @@ class _FakeDefender(DefenderPlugin, config_type="_fake_defender_test"):
     def ui_schema(cls):
         return {"config_type": "_fake_defender_test", "label": "fake", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment, env_spec=None, prepared=None):
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def run(self, config_path, experiment_name, cfg):
@@ -172,7 +172,7 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
         _ORDER_CALLS.append("provision_box")  # Phase A: produce the baton BEFORE build_config
         return PreparedDefender(es_url="http://127.0.0.1:1")
 
-    def build_config(self, experiment_name, environment, env_spec=None, prepared=None):
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
         _ORDER_CALLS.append("build_config")
         # the Phase-A baton reaches build_config (not patched into the written config afterward)
         assert prepared is not None and prepared.es_url == "http://127.0.0.1:1"
@@ -195,7 +195,7 @@ class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender
     def ui_schema(cls):
         return {"config_type": "_prepare_fails_defender_test", "label": "pfail", "fields": [], "cartesian_product": False}
 
-    def build_config(self, experiment_name, environment, env_spec=None, prepared=None):
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
         return {"experiment_name": experiment_name}
 
     async def prepare(self, config_path, experiment_name, cfg):

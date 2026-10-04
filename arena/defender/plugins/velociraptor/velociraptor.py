@@ -24,7 +24,6 @@ from typing import Literal, Optional
 from pydantic import PrivateAttr
 
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
@@ -74,7 +73,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     async def setup(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
         bastion_ip: Optional[str] = None,
         defender_env_spec=None,
@@ -145,7 +143,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         env_spec=None,
         prepared=None,  # Phase-A baton; velociraptor has no box ES, so it is unused
     ) -> dict:
@@ -189,7 +186,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     async def teardown(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
         # Server+clients live on VMs that MHBench destroys, so this is best-effort:

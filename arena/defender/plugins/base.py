@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
 from ...experiment_log import output_root
-from ...environment import DeployedEnvironment
 from ...ui_schema import PluginUISchema
 
 
@@ -125,7 +124,6 @@ class DefenderPlugin(BaseModel):
     async def setup(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
         bastion_ip: Optional[str] = None,
         defender_env_spec=None,
@@ -172,7 +170,6 @@ class DefenderPlugin(BaseModel):
     async def teardown(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
         """Best-effort cleanup of harness-side resources this defender created that the
@@ -285,7 +282,6 @@ class DefenderPlugin(BaseModel):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         env_spec,
         prepared: "PreparedDefender",
     ) -> dict: ...

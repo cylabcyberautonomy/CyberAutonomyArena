@@ -614,7 +614,7 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
     # are backend-agnostic.)
     if experiment.defender:
         try:
-            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+            await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             get_logger(experiment.experiment_name).exception("Defender teardown failed for '%s'", experiment.experiment_name)
 
@@ -727,7 +727,7 @@ async def _cancel_and_remove(name: str) -> None:
             logger.exception("Failed to stop C2 for '%s'", name)
     if experiment.defender:
         try:  # see the matching call in the normal-finish path above for why this must run first
-            await experiment.defender.teardown(experiment.experiment_name, experiment.deployed_environment, cfg)
+            await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             logger.exception("Defender teardown failed for '%s'", name)
     try:

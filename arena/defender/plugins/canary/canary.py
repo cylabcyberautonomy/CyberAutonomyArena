@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin
@@ -82,7 +81,6 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         env_spec=None,
         prepared=None,  # Phase-A baton; canary has no box telemetry, so it is unused
     ) -> dict:

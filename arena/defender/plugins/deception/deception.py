@@ -10,7 +10,6 @@ from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
-from ....environment import DeployedEnvironment
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 
@@ -100,7 +99,6 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         env_spec,
         prepared: PreparedDefender,
     ) -> dict:
@@ -162,7 +160,6 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     async def teardown(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
         cfg: ExperimentManagerConfig,
     ) -> None:
         # Kill the harness-host->box ES ssh -L tunnel. (Stray decoy VMs this plugin's strategies deploy
