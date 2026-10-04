@@ -78,7 +78,7 @@ class AttackerPlugin(BaseModel):
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
-            AttackerPlugin._registry[config_type] = cls
+            cls._registry[config_type] = cls
 
     # ========================================================================
     # PLUGIN SURFACE — implement / override these. (Required: build_config, ui_schema, and run() or start().)

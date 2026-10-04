@@ -243,7 +243,7 @@ def test_run_defender_runs_prepare_before_run(tmp_path):
     d, exp, cfg = _OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)
     async def _go():
         prepared = await d.run_setup(exp, cfg)   # SETUP phase: setup + provision_box -> baton
-        return await run_defender(d, exp, cfg)   # RUN phase: build_config(baton) -> prepare -> run
+        return await run_defender(d, exp, cfg, prepared)   # RUN phase: build_config(baton) -> prepare -> run
     proc = asyncio.run(_go())
     # the unified lifecycle: setup-phase baton (provision_box) -> build_config(baton) -> arming (prepare)
     # -> run, mirroring the attacker's _drive_attacker_setup()->run_attacker(..., prepared).
@@ -258,10 +258,35 @@ def test_run_defender_aborts_when_prepare_fails(tmp_path):
     d, exp, cfg = _PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)
     async def _go():
         prepared = await d.run_setup(exp, cfg)
-        return await run_defender(d, exp, cfg)
+        return await run_defender(d, exp, cfg, prepared)
     with pytest.raises(RuntimeError, match="decoy deploy failed"):
         asyncio.run(_go())
     assert "run-should-not-run" not in _ORDER_CALLS
+
+
+# --------------------------------------------------------------------------- the stop path (run_stop)
+
+def test_run_stop_emits_stopping_then_stopped(tmp_path):
+    """DefenderPlugin.run_stop drives STOPPING -> STOPPED around stop(), mirroring AttackerPlugin.run_stop.
+    stop() SIGTERMs experiment.defender_pid; None here so it is a no-op — no real process needed."""
+    trace = []
+    lc = DefenderLifecycle(on_emit=lambda sig, err: trace.append(sig))
+    exp = SimpleNamespace(experiment_name="stp", _defender_lifecycle=lc, defender_pid=None)
+    asyncio.run(_FakeDefender().run_stop(exp, _run_cfg(tmp_path)))
+    assert trace == [DefenderSignal.STOPPING, DefenderSignal.STOPPED]
+
+
+def test_run_stop_is_guarded_after_failed(tmp_path):
+    """If the defender already reached terminal FAILED (arming crashed), run_stop must NOT emit
+    STOPPING/STOPPED over it — the arena calls run_stop from the failure path too (main.py)."""
+    trace = []
+    lc = DefenderLifecycle(on_emit=lambda sig, err: trace.append(sig))
+    exp = SimpleNamespace(experiment_name="stpf", _defender_lifecycle=lc, defender_pid=None)
+    async def _go():
+        await lc.emit(DefenderSignal.FAILED, "boom")
+        await _FakeDefender().run_stop(exp, _run_cfg(tmp_path))
+    asyncio.run(_go())
+    assert trace == [DefenderSignal.FAILED]  # no STOPPING/STOPPED added over the terminal FAILED
 
 
 if __name__ == "__main__":

@@ -42,14 +42,16 @@ async def run_defender(
     defender: DefenderConfig,
     experiment,
     cfg: ExperimentManagerConfig,
+    prepared,
 ) -> asyncio.subprocess.Process:
-    # RUN phase — just launch, the defender analog of run_attacker. DefenderPlugin.run_setup() already did
-    # setup + provision_box + build_config + write + prepare(arm), so the defender is fully armed and its
-    # config is on disk; this only spawns the reactive loop. READY/RUNNING are emitted by the arena after
+    # RUN phase — just launch, the defender analog of run_attacker (and the same shape: compute the config
+    # path, then delegate to the plugin's run_start wrapper). DefenderPlugin.run_setup() already did setup +
+    # provision_box + build_config + write + prepare(arm), so the defender is fully armed and its config is
+    # on disk; this only spawns the reactive loop. READY/RUNNING are emitted by the arena after
     # wait_until_ready (the readiness marker the runner writes once the loop is armed).
     experiment_name = experiment.experiment_name
     config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
     log(experiment_name, f"Starting defender ({defender.type}) run loop, config: {config_path}")
-    process = await defender.run(config_path, experiment_name, cfg)
+    process = await defender.run_start(experiment, prepared, config_path, cfg)
     log(experiment_name, f"Defender process started (pid={process.pid})")
     return process

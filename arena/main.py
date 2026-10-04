@@ -21,20 +21,16 @@ from .defender.lifecycle import (
 )
 
 
-async def _stop_defender_process(experiment, process) -> None:
-    """Terminate the defender subprocess and record the STOPPING/STOPPED lifecycle signals (unless the
-    defender already reached a terminal FAILED). Used everywhere the arena tears the defender down, so
-    the defender's lifecycle mirrors the attacker's regardless of which path stops it."""
-    lc = getattr(experiment, "_defender_lifecycle", None)
-    if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
-        await lc.emit(DefenderSignal.STOPPING)
+async def _stop_defender_process(experiment, process, cfg) -> None:
+    """Drive the defender plugin's run_stop (STOPPING/STOPPED + SIGTERM) and reap the subprocess. The
+    lifecycle emission + signalling now live on the plugin (DefenderPlugin.run_stop/stop), symmetric with
+    AttackerPlugin.run_stop; only the reap stays here because the arena holds the Process object (the
+    attacker's reap is likewise arena-side). Called from every path that tears the defender down."""
+    await experiment.defender.run_stop(experiment, cfg)
     try:
-        process.terminate()
         await process.wait()
     except Exception:
         pass
-    if lc is not None and lc.status != DefenderSignal.FAILED:
-        await lc.emit(DefenderSignal.STOPPED)
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
@@ -939,8 +935,9 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
                 # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
                 # run_defender then only launches the reactive loop (the defender analog of run_attacker).
-                await experiment.defender.run_setup(experiment, cfg)
-                defender_process = await run_defender(experiment.defender, experiment, cfg)
+                _prepared = await experiment.defender.run_setup(experiment, cfg)
+                defender_process = await run_defender(experiment.defender, experiment, cfg, _prepared)
+                experiment.defender_pid = defender_process.pid
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:
@@ -977,7 +974,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             except Exception as e:
                 exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
                 await defender_lc.emit(DefenderSignal.FAILED, str(e))
-                await _stop_defender_process(experiment, defender_process)
+                await _stop_defender_process(experiment, defender_process, cfg)
                 await _handle_failure(experiment, f"Defender failed to arm — {e}")
                 return
 
@@ -993,7 +990,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
-            await _stop_defender_process(experiment, defender_process)
+            await _stop_defender_process(experiment, defender_process, cfg)
         await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
@@ -1048,7 +1045,7 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)
         if defender_process:
             try:
-                await _stop_defender_process(experiment, defender_process)
+                await _stop_defender_process(experiment, defender_process, cfg)
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)

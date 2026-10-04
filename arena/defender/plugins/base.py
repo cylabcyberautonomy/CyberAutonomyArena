@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import signal
 from abc import abstractmethod
 from pathlib import Path
 from typing import ClassVar, Optional
@@ -83,7 +85,7 @@ class DefenderPlugin(BaseModel):
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
-            DefenderPlugin._registry[config_type] = cls
+            cls._registry[config_type] = cls
 
     # ========================================================================
     # PLUGIN SURFACE — implement / override these. (Required: build_config, ui_schema, run().)
@@ -108,6 +110,28 @@ class DefenderPlugin(BaseModel):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process: ...
+
+    async def start(
+        self,
+        prepared: "PreparedDefender",
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        access=None,
+    ) -> asyncio.subprocess.Process:
+        """OPTIONAL (default: call run()). Launch the defender run loop. Mirrors AttackerPlugin.start();
+        the run_start wrapper calls this. `prepared`/`access` are accepted for symmetry (a box-resident
+        defender override uses access to launch the loop over SSH on the box); the default ignores them."""
+        return await self.run(config_path, experiment_name, cfg)
+
+    async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
+        """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop); a
+        box-resident defender override kills its remote process. `access` is accepted for symmetry."""
+        if getattr(experiment, "defender_pid", None):
+            try:
+                os.kill(experiment.defender_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     async def setup(
         self,
@@ -309,6 +333,29 @@ class DefenderPlugin(BaseModel):
         await self.prepare(config_path, experiment_name, cfg)
         log(experiment_name, f"Defender armed ({self.type})")
         return prepared  # the provision_box box baton, mirroring the attacker's run_setup returning its baton
+
+    async def run_start(self, experiment, prepared: "PreparedDefender", config_path: Path,
+                        cfg: ExperimentManagerConfig) -> "asyncio.subprocess.Process":
+        """Launch the defender run loop and return the process — the RUN phase, mirroring
+        AttackerPlugin.run_start (the thin wrapper run_defender calls). Unlike the attacker it does NOT
+        emit RUNNING here: a defender is READY/RUNNING only once its runner has armed (the readiness
+        marker, see wait_until_ready), which the arena detects after this returns. (That asymmetry
+        collapses in the box model — see docs/agent-symmetry.md.)"""
+        return await self.start(prepared, config_path, experiment.experiment_name, cfg)
+
+    async def run_stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
+        """Emit STOPPING/STOPPED around stop() — mirrors AttackerPlugin.run_stop. Guarded against a prior
+        terminal FAILED and against double-stop, because the arena calls it from several paths (arm
+        failure, attacker-start failure, normal attack end); the arena reaps the process (process.wait)
+        after this returns."""
+        lc = self._lifecycle(experiment)
+        if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
+            await lc.emit(DefenderSignal.STOPPING)
+        try:
+            await self.stop(experiment, cfg)
+        finally:
+            if lc is not None and lc.status != DefenderSignal.FAILED:
+                await lc.emit(DefenderSignal.STOPPED)
 
     @classmethod
     def validate_built_config(cls, built: dict) -> None:
