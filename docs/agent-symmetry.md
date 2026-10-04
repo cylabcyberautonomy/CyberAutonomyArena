@@ -169,14 +169,20 @@ Three facts from a peer live-debugging prompt_injection/deception that reshape t
    — which is exactly what slice 4's token'd TCP channel is for. The keystone is the right shape; it is not
    optional for active-response defenders, it is the only way their cloud ops work from the box.
 
-2. **The box is Python 3.8; Perry needs 3.10+ → the full engine ships as a CONTAINER, not a venv.** This is
-   why the current box agent is *thin*. So `_launch_on_box` has two modes: a stdlib-only runner (canary)
-   runs directly under the box's `python3`; a Perry-based engine (llm_soc/deception/prompt_injection) must
-   ship as a **Docker image** and run in a container on the box — the same trick the attacker uses (Incalmo
-   builds the C2 image on the harness, ships it to the foothold, runs it there, and the strategy brain
-   drives it over an `ssh -L` tunnel; see `incalmo_strategy/c2.py`). Mirror that: build the engine image on
-   the harness, ship + run on the box, drive/collect over the scoped SSH. The earlier "scp the runner"
-   sketch only holds for the stdlib canary.
+2. **The box is Python 3.8; Perry needs 3.10+ → the full engine needs its own runtime on the box.** This is
+   why the current box agent is *thin*. `_launch_on_box` has modes by runtime need: a stdlib-only runner
+   (canary) runs directly under the box's `python3`; a Perry-based engine (llm_soc/deception/prompt_injection)
+   needs a newer interpreter. BOTH attacker archetypes show how to get one onto an in-env box, so copy
+   whichever fits:
+     - **Docker image** (Incalmo `c2.py`): build on the harness, install docker live via apt, ship with
+       `docker save | ssh 'docker load'`, run the container on the box.
+     - **Self-installed `uv` venv** (Terminus `terminus.py`): `uv`-install a fresh interpreter + the engine
+       into a venv on the box over SSH (needs the box's PyPI/astral egress, which it has) — **no Docker**.
+   NOTE (correction): Incalmo is NOT "harness-only" — its C2 server runs ON the foothold (container);
+   only its planner stays on the harness, over an `ssh -L` tunnel. Terminus runs fully on the foothold
+   (brain + shell, via a uv venv). So both archetypes put code in-env; they differ in how much (Incalmo =
+   infra on-box + brain on-harness = mirrors `executes_from_box`; Terminus = whole agent on-box = mirrors
+   `runs_on_box`). The earlier "scp the runner" sketch only holds for the stdlib canary.
 
 3. **Build on the env-side decoy-key fix (`e2046c2` on arena-integration), don't re-implement.** A mid-run
    `add_host` decoy carries only the broad mgmt key; the box uses the SCOPED defender key, so the env now
