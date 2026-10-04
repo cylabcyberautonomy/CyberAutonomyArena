@@ -10,7 +10,7 @@ what the Perry actuators do today via `openstack.connect()`):
 
   * no god key — only the environment holds the management/cloud credential; the defender holds its
     own scoped key and an HTTP endpoint. A host the env creates for the defender comes back with a
-    DEFENDER-SCOPED SetupAccess, nothing broader (see docs/security-model.md).
+    DEFENDER-SCOPED DefenderSetupAccess, nothing broader (see docs/security-model.md).
   * backend neutrality — the defender names WHAT it wants (a host, a rule); the env decides HOW its
     backend (OpenStack / GCP) makes it. The same event works on both.
   * admission — VMs the defender may add are pre-reserved at admission from `defender_vm_budget()`;
@@ -21,7 +21,7 @@ The flow: the defender's RemoteEnvOrchestrator (Defense repo) serialises each ca
 one EnvActionRequest and POSTs it to the arena; the arena validates + accounts + dispatches to
 `EnvironmentPlugin.handle_env_request`; the plugin actuates and returns an EnvActionResult.
 
-Provider-agnostic DTOs: the env layer produces/consumes them; the SetupAccess carried back is the same
+Provider-agnostic DTOs: the env layer produces/consumes them; the DefenderSetupAccess carried back is the same
 shared type the attacker/defender setup already uses (attacker/env_spec.py).
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from ..attacker.env_spec import SetupAccess  # the shared setup-access DTO (no arena import cycle)
+from ..defender.env_spec import DefenderSetupAccess  # defender-scoped setup access (ADD_HOST result)
 
 
 class EnvActionKind(str, Enum):
@@ -65,7 +65,7 @@ class EnvActionRequest(BaseModel):
 class EnvActionResult(BaseModel):
     """The environment's reply to one EnvActionRequest.
 
-    For ADD_HOST: `name`/`ip` identify the new VM and `access` is a DEFENDER-SCOPED SetupAccess (key +
+    For ADD_HOST: `name`/`ip` identify the new VM and `access` is a DEFENDER-SCOPED DefenderSetupAccess (key +
     routing) so the defender runs its OWN setup over it — sensor install, vulnerability, registration.
     This is the no-god-key split made concrete: the env PROVISIONS (holds the cloud cred), the defender
     CONFIGURES (holds only its scoped key). For REMOVE_HOST / REBUILD_HOST: only ok/error matter."""
@@ -73,7 +73,7 @@ class EnvActionResult(BaseModel):
     ok: bool = True
     name: Optional[str] = None
     ip: Optional[str] = None
-    access: Optional[SetupAccess] = None
+    access: Optional[DefenderSetupAccess] = None
     error: Optional[str] = None
 
 

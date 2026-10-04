@@ -123,7 +123,7 @@ if __name__ == "__main__":
 async def test_run_setup_threads_scoped_access_as_a_parameter():
     """Unified with the defender: the arena passes the scoped foothold SetupAccess to run_setup as a
     PARAMETER (not via an experiment._attacker_access attribute), and it reaches setup()."""
-    from arena.attacker.env_spec import SetupAccess
+    from arena.attacker.env_spec import AttackerSetupAccess
 
     seen = {}
     class _Probe(AttackerPlugin, config_type="_probe_access_param"):
@@ -132,7 +132,7 @@ async def test_run_setup_threads_scoped_access_as_a_parameter():
             seen["access"] = access
             return PreparedAttacker()
 
-    acc = [SetupAccess(name="kali", host="10.0.0.9", user="root", ssh_key="/scoped/k")]
+    acc = [AttackerSetupAccess(name="kali", host="10.0.0.9", user="root", ssh_key="/scoped/k")]
     await _Probe(type="_probe_access_param").run_setup(_Exp(AttackerLifecycle()), cfg=None, bastion_ip=None, access=acc)
     assert seen["access"] is acc
 

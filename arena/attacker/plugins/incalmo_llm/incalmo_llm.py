@@ -25,10 +25,10 @@ from ..base import AttackerPlugin, PreparedAttacker
 
 
 def _require_access(access):
-    """The HARNESS-ONLY SetupAccess list the arena passes to run_setup (how to reach the footholds to
+    """The HARNESS-ONLY AttackerSetupAccess list the arena passes to run_setup (how to reach the footholds to
     prep them). Never the adversary-safe AttackerEnvSpec — prep needs keys + routing."""
     if not access:
-        raise RuntimeError("no SetupAccess passed to the attacker — the arena must pass it to run_setup()")
+        raise RuntimeError("no AttackerSetupAccess passed to the attacker — the arena must pass it to run_setup()")
     return access
 
 # Planning/execution-LLM suggestions shown in the dashboard dropdowns. These are *suggestions
@@ -191,7 +191,7 @@ class IncalmoLLMAttacker(AttackerPlugin, config_type="incalmo_llm"):
         # beacons in. Transactional: tear down a partial C2 on failure.
         foothold_access = self.primary_access(access) if access else None
         if foothold_access is None:
-            raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no SetupAccess")
+            raise RuntimeError("the Incalmo C2 runs on the attacker foothold, but setup() got no AttackerSetupAccess")
         _sentinel, remote_url, local_url = await self.launch_c2c(
             experiment.experiment_name, cfg, bastion_ip, foothold_access=foothold_access)
         try:
@@ -207,7 +207,7 @@ class IncalmoLLMAttacker(AttackerPlugin, config_type="incalmo_llm"):
 
     async def prepare_foothold(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, remote_url, access=None):
         # The attacker preps its OWN box(es): land the sandcat C2 agent over the harness-only
-        # SetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
+        # AttackerSetupAccess (key + routing) the arena passed in — no MHBench cli, no environment.deployer.
         await foothold.land_sandcat(_require_access(access), remote_url, cfg, experiment.experiment_name)
         # Only this (LLM-driven) attacker can ever reach LateralMoveToHost's Metasploit path (gated
         # on context.llm_interface being set) - IncalmoStrategyAttacker never does. msfrpcd has to

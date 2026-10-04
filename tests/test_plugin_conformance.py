@@ -56,7 +56,7 @@ from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
 from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.environment import build_environment
-from arena.attacker.env_spec import AttackerEnvSpec, AttackerFoothold
+from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
 
 _ARENA_ROOT = Path(__file__).resolve().parent.parent / "arena"
 
@@ -70,7 +70,7 @@ def _real_plugins(registry: dict) -> list[str]:
 # A canonical adversary-safe spec + deployed env that build_config consumes (no cloud needed).
 _FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective="conformance",
-    footholds=[AttackerFoothold(name="kali", host="192.168.202.100", user="root")],
+    box=AttackerBox(name="kali", ip="192.168.202.100", user="root"),
 )
 
 # A credential/routing leak in an agent-facing config is exactly what the adversary-safe vs harness-only

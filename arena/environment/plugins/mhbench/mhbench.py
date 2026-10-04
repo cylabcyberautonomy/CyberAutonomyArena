@@ -133,7 +133,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     def defender_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         from .deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
-        from ....attacker.env_spec import SetupAccess
+        from ....defender.env_spec import DefenderSetupAccess
         cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
         # Both hops use the scoped defender key: final hop = shell on box/victims, bastion hop = tunnel
         # with the same key (forward-only on the bastion). No management key in SetupAccess (a plugin may
@@ -148,7 +148,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         has_real_box = bool(topo and Path(topo).exists() and _defender_box_host(topo))
         if not has_real_box and bastion_ip:
             box = self.defender_box(deployed, cfg)
-            access.append(SetupAccess(name=box.name, host=bastion_ip, user="root",
+            access.append(DefenderSetupAccess(name=box.name, host=bastion_ip, user="root",
                                       ssh_key=cred, ssh_common_args=""))
         return access
 

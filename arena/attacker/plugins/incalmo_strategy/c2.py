@@ -1,14 +1,14 @@
 """Run the Incalmo C2 server on the attacker's foothold.
 
 The C2 runs on the foothold the environment hands the attacker (the box it already operates from),
-reached only through the env-provided SetupAccess — its scoped attacker key and opaque bastion/relay
+reached only through the env-provided AttackerSetupAccess — its scoped attacker key and opaque bastion/relay
 routing. The attacker needs no knowledge of the backend, the harness host, or the topology:
   - setup ships the incalmo/c2c image + the Incalmo tree to the foothold and runs the container
     there, bound to :8888 on the foothold's own in-env address;
   - victims / sandcat agents beacon to that in-env address (the environment opens victim -> foothold
     ingress at deploy time, so no port is declared here);
   - the attacker LLM (on the harness host, which has no in-env address) reaches the C2 through an
-    `ssh -L` tunnel opened over the same SetupAccess routing (local 127.0.0.1:<port> -> foothold:8888).
+    `ssh -L` tunnel opened over the same AttackerSetupAccess routing (local 127.0.0.1:<port> -> foothold:8888).
 
 Running the C2 on the foothold — rather than on a host the attacker shares with harness/telemetry
 services — keeps all attacker infrastructure on one in-env IP, so a defender can block the whole C2
@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ...env_spec import SetupAccess
+from ...env_spec import AttackerSetupAccess
 from ....config import ExperimentManagerConfig
 from ....experiment_log import attacker_log as log, init_attacker_logger as init_logger, output_root
 
@@ -66,9 +66,9 @@ def _ctl_path(experiment_name: str) -> str:
     return str(_STATE_DIR / f"cm-{name}")
 
 
-def _ssh_to_foothold(access: SetupAccess, ctl: str | None = None) -> list[str]:
+def _ssh_to_foothold(access: AttackerSetupAccess, ctl: str | None = None) -> list[str]:
     """ssh argv reaching the foothold (foothold) as the env-granted principal, using the SCOPED key +
-    env-owned routing carried by the SetupAccess. We never read a management key off disk or build our
+    env-owned routing carried by the AttackerSetupAccess. We never read a management key off disk or build our
     own ProxyCommand: `access.ssh_key` is the foothold-scoped key and `access.ssh_common_args` carries
     the env's bastion/relay routing (a ProxyCommand with a forward-only jump credential, and its own
     /dev/null known_hosts handling on the jump — so recycled-FIP stale bastion keys can't reject us).
@@ -98,7 +98,7 @@ def _ssh_to_foothold(access: SetupAccess, ctl: str | None = None) -> list[str]:
     return args
 
 
-def _close_master(access: SetupAccess, ctl: str) -> None:
+def _close_master(access: AttackerSetupAccess, ctl: str) -> None:
     """Tear down the shared master connection (best-effort) and remove its socket."""
     try:
         subprocess.run(_ssh_to_foothold(access, ctl) + ["-O", "exit"],
@@ -134,9 +134,9 @@ def _free_local_port() -> int:
         s.close()
 
 
-def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | None = None, incalmo_dir=None) -> tuple[str, str, str]:
+def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip: str | None = None, incalmo_dir=None) -> tuple[str, str, str]:
     """Run the C2 on the foothold and open a tunnel to it for the attacker LLM. Reaches the foothold
-    only via the env-provided SetupAccess (scoped key + bastion routing) — never a management key off
+    only via the env-provided AttackerSetupAccess (scoped key + bastion routing) — never a management key off
     disk. `bastion_ip` is accepted for log messages only; the routing is opaque in access.ssh_common_args.
     Returns (sentinel, remote_url, local_url):
       sentinel  = "foothold-c2:<exp>"       (legacy handle; teardown is keyed by experiment_name)
@@ -144,7 +144,7 @@ def setup_c2(experiment_name: str, cfg, access: SetupAccess, bastion_ip: str | N
       local_url = http://127.0.0.1:<port>   (harness host: readiness polls + attacker LLM, via ssh -L)
     """
     if access is None or not access.host:
-        raise RuntimeError(f"[foothold-c2] need a foothold SetupAccess with a host (got {access!r})")
+        raise RuntimeError(f"[foothold-c2] need a foothold AttackerSetupAccess with a host (got {access!r})")
     foothold_ip = access.host
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     ctl = _ctl_path(experiment_name)
@@ -333,13 +333,13 @@ def teardown_c2(experiment_name: str, cfg=None) -> None:
     pid = state.get("tunnel_pid")
     if isinstance(pid, int):
         _kill_pid(pid)
-    # Reach foothold with the SAME scoped SetupAccess setup persisted (key + routing) — no management-key
+    # Reach foothold with the SAME scoped AttackerSetupAccess setup persisted (key + routing) — no management-key
     # disk read. Old statefiles predating this field can't rebuild a scoped reach; skip the remote
     # docker rm then (best-effort — the tunnel pid was already killed above, and the VMs get torn down).
     acc = state.get("access")
     if acc:
         try:
-            access = SetupAccess.model_validate(acc)
+            access = AttackerSetupAccess.model_validate(acc)
             ssh = _ssh_to_foothold(access)
             subprocess.run(ssh + ["docker rm -f c2 >/dev/null 2>&1 || true"],
                            timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -388,7 +388,7 @@ async def start_c2c_server(
     """Bring up the Incalmo C2 on the attacker's foothold and return once it is serving.
 
     The C2 always runs on the foothold the environment provides (reached via the harness-only
-    SetupAccess); the attacker holds no backend/topology knowledge.
+    AttackerSetupAccess); the attacker holds no backend/topology knowledge.
 
     Returns (sentinel, remote_url, local_url):
       sentinel   — legacy handle (teardown is keyed by experiment_name, not this).
@@ -398,7 +398,7 @@ async def start_c2c_server(
     init_logger(experiment_name, output_root(experiment_name, cfg))
     if foothold_access is None:
         raise RuntimeError(
-            "the Incalmo C2 runs on the attacker foothold, but no foothold SetupAccess "
+            "the Incalmo C2 runs on the attacker foothold, but no foothold AttackerSetupAccess "
             "(scoped key + routing) was passed to start_c2c_server()")
     loop = asyncio.get_event_loop()
     sentinel, remote_url, local_url = await loop.run_in_executor(

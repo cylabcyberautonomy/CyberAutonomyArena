@@ -42,7 +42,9 @@ def build_network_from_spec(spec: Optional[dict]):
     for sd in spec["subnets"]:
         hosts = []
         for h in sd.get("hosts", []):
-            hosts.append(Host(name=h["name"], ip=h.get("ip"), users=h.get("users") or []))
+            # DefenderHost.users serializes as [{"name": ...}, ...]; Perry's Host wants plain account names.
+            users = [u["name"] if isinstance(u, dict) else u for u in (h.get("users") or [])]
+            hosts.append(Host(name=h["name"], ip=h.get("ip"), users=users))
             if h.get("telemetry") and h.get("ip"):
                 telemetry_hosts.append(h["ip"])
         subnets.append(Subnet(

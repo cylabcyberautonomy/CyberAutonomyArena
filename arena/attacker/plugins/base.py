@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from pydantic import BaseModel
 
 from ...config import ExperimentManagerConfig
-from ..env_spec import AttackerEnvSpec, SetupAccess
+from ..env_spec import AttackerEnvSpec, AttackerSetupAccess
 from ..lifecycle import AttackerSignal
 from ...experiment_log import output_root
 from ...ui_schema import PluginUISchema
@@ -113,10 +113,10 @@ class AttackerPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
     async def setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, bastion_ip: Optional[str],
-                    access: Optional[list[SetupAccess]] = None) -> PreparedAttacker:
+                    access: Optional[list[AttackerSetupAccess]] = None) -> PreparedAttacker:
         """OPTIONAL. Prepare the foothold and block until the attacker is ready to run. Default: nothing to do.
 
-        `access` is the scoped foothold SetupAccess list the arena passes to run_setup(). run_setup()
+        `access` is the scoped foothold AttackerSetupAccess list the arena passes to run_setup(). run_setup()
         persists it automatically, so start()/stop()/collect_logs() receive the primary entry without
         the plugin touching disk. Use `self.primary_access(access)` to reach the foothold here.
 
@@ -130,17 +130,17 @@ class AttackerPlugin(BaseModel):
         config_path: Path,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
-        access: Optional[SetupAccess] = None,
+        access: Optional[AttackerSetupAccess] = None,
     ) -> asyncio.subprocess.Process:
         """OPTIONAL. Launch the attacker process (exit code = verdict). Channel readiness was established in
-        setup(). `access` is the scoped foothold SetupAccess, loaded and passed by run_start(). Default:
+        setup(). `access` is the scoped foothold AttackerSetupAccess, loaded and passed by run_start(). Default:
         call run()."""
         return await self.run(prepared, config_path, experiment_name, cfg)
 
     async def stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig,
-                   access: Optional[SetupAccess] = None) -> None:
+                   access: Optional[AttackerSetupAccess] = None) -> None:
         """OPTIONAL. Terminate the attacker process(es). Local pid here; override to also kill remote procs.
-        `access` is the scoped foothold SetupAccess, loaded and passed by run_stop()."""
+        `access` is the scoped foothold AttackerSetupAccess, loaded and passed by run_stop()."""
         if experiment.pid:
             try:
                 os.kill(experiment.pid, signal.SIGTERM)
@@ -156,9 +156,9 @@ class AttackerPlugin(BaseModel):
         return None
 
     async def collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path,
-                           access: Optional[SetupAccess] = None) -> None:
+                           access: Optional[AttackerSetupAccess] = None) -> None:
         """OPTIONAL. Pull attacker-specific logs into dest. Default no-op — logs already local.
-        `access` is the scoped foothold SetupAccess, loaded and passed by run_collect_logs()."""
+        `access` is the scoped foothold AttackerSetupAccess, loaded and passed by run_collect_logs()."""
 
     @classmethod
     def sweep_stale_state(cls, cfg: ExperimentManagerConfig) -> None:
@@ -198,15 +198,15 @@ class AttackerPlugin(BaseModel):
                 f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
 
     @staticmethod
-    def primary_access(access: Optional[list[SetupAccess]]) -> SetupAccess:
-        """Helper (call, don't override): the foothold the attacker operates from — the first SetupAccess
+    def primary_access(access: Optional[list[AttackerSetupAccess]]) -> AttackerSetupAccess:
+        """Helper (call, don't override): the foothold the attacker operates from — the first AttackerSetupAccess
         the arena passed to run_setup()."""
         if not access:
-            raise RuntimeError("no SetupAccess passed to the attacker — the arena must pass it to run_setup()")
+            raise RuntimeError("no AttackerSetupAccess passed to the attacker — the arena must pass it to run_setup()")
         return access[0]
 
     # ------------------------------------------------------------------ foothold access recovery
-    # setup() receives the scoped `access` (a SetupAccess list) as a parameter, but start()/stop()/
+    # setup() receives the scoped `access` (a AttackerSetupAccess list) as a parameter, but start()/stop()/
     # collect_logs() run later, in contexts where it isn't in scope — a failure path, or a clean-slate
     # stop after an arena restart that reloaded the experiment from disk. So run_setup() persists the
     # primary access, and the run_start/run_stop/run_collect_logs wrappers load it back and pass it in.
@@ -218,18 +218,18 @@ class AttackerPlugin(BaseModel):
         return output_root(experiment_name, cfg) / experiment_name / "attacker" / cls._ACCESS_FILE
 
     def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig,
-                        access: Optional[list[SetupAccess]]) -> None:
+                        access: Optional[list[AttackerSetupAccess]]) -> None:
         """Internal (run_setup): write the primary foothold access so the run_* wrappers can recover it."""
         fa = self.primary_access(access)
         path = self._access_path(experiment_name, cfg)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(fa.model_dump()))
 
-    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Optional[SetupAccess]:
+    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Optional[AttackerSetupAccess]:
         """Internal (run_* wrappers): recover the persisted foothold access, or None if none was
         persisted (an attacker with no foothold) or it can't be read."""
         try:
-            return SetupAccess.model_validate(json.loads(self._access_path(experiment_name, cfg).read_text()))
+            return AttackerSetupAccess.model_validate(json.loads(self._access_path(experiment_name, cfg).read_text()))
         except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
             return None
 
@@ -243,7 +243,7 @@ class AttackerPlugin(BaseModel):
         return getattr(experiment, "_attacker_lifecycle", None)
 
     async def run_setup(self, experiment: "Experiment", cfg: ExperimentManagerConfig, bastion_ip: Optional[str],
-                        access: Optional[list[SetupAccess]] = None) -> "PreparedAttacker":
+                        access: Optional[list[AttackerSetupAccess]] = None) -> "PreparedAttacker":
         lc = self._lifecycle(experiment)
         if lc is not None:
             await lc.emit(AttackerSignal.SETUP_STARTED)
