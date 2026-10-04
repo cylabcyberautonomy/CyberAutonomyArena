@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from ...config import ExperimentManagerConfig
 from ...experiment_log import log, output_root
 from ...ui_schema import PluginUISchema
+from ..env_spec import DefenderSetupAccess
 from ..lifecycle import DefenderSignal
 from ...env_action_server import resolve_socket_path
 
@@ -82,6 +83,15 @@ class DefenderPlugin(BaseModel):
     # orchestrator any more). Checks-only/self-contained defenders (canary, velociraptor) leave it False.
     executes_from_box: ClassVar[bool] = False
 
+    # SLICE 3 SCAFFOLD (opt-in, default False — see docs/agent-symmetry.md). When True the defender is
+    # driven like the attacker: its scoped access is THREADED THROUGH run_start/run_stop/run_collect_logs
+    # at launch (loaded from the persisted SetupAccess by the wrappers) instead of baked into the runner
+    # config, and the runner executes from the box. Default False keeps today's behavior exactly (harness
+    # run loop + creds injected into the config). The box launch (_launch_on_box) and the readiness wait
+    # (_wait_box_ready) are stubs until live-validated; no shipped defender sets this yet. (This axis
+    # subsumes executes_from_box, which slice 4 folds in once the control-plane channel lands.)
+    runs_on_box: ClassVar[bool] = False
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -120,18 +130,26 @@ class DefenderPlugin(BaseModel):
         access=None,
     ) -> asyncio.subprocess.Process:
         """OPTIONAL (default: call run()). Launch the defender run loop. Mirrors AttackerPlugin.start();
-        the run_start wrapper calls this. `prepared`/`access` are accepted for symmetry (a box-resident
-        defender override uses access to launch the loop over SSH on the box); the default ignores them."""
+        the run_start wrapper calls this. `prepared`/`access` are accepted for symmetry. When runs_on_box
+        (slice 3) the loop is launched FROM THE BOX over SSH via `access` (_launch_on_box); otherwise it
+        runs as a local harness subprocess and `prepared`/`access` are ignored."""
+        if self.runs_on_box:
+            return await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
         return await self.run(config_path, experiment_name, cfg)
 
     async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
         """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop); a
-        box-resident defender override kills its remote process. `access` is accepted for symmetry."""
+        box-resident defender (runs_on_box) overrides this to kill its remote process via `access`."""
         if getattr(experiment, "defender_pid", None):
             try:
                 os.kill(experiment.defender_pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
+        """OPTIONAL. Pull defender-side logs into dest. Default no-op — the harness-run defender's logs are
+        already local. A box-resident defender (runs_on_box) overrides this to pull its box logs via
+        `access`, mirroring AttackerPlugin.collect_logs."""
 
     async def setup(
         self,
@@ -276,6 +294,10 @@ class DefenderPlugin(BaseModel):
         env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
         access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
         bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
+        # SLICE 3 SCAFFOLD: when runs_on_box, persist the scoped access so run_start/run_stop/collect can
+        # thread it at launch (mirroring the attacker) instead of it being injected into the config below.
+        if self.runs_on_box and access and cfg is not None:
+            self._persist_access(experiment_name, cfg, access)
         # The dynamic topology-mutation window (+ box agent) is armed only for an executes_from_box defender —
         # the arena sets experiment._env_dynamic and opens the window before this runs.
         env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
@@ -306,6 +328,9 @@ class DefenderPlugin(BaseModel):
         # INJECT the credential-bearing SetupAccess + routing (kept OUT of build_config's output by the leak
         # guard). Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts
         # on victims directly, it asks the box agent (which alone holds victim access) and the env.
+        # SLICE 3 TODO: a runs_on_box defender does NOT need creds in the config (it gets them via the
+        # access threaded through run_start/run_stop from the persisted SetupAccess above); skip this
+        # injection for it once box launch is live. Left in for now — harmless, and runs_on_box ships nowhere.
         _access = list(access or [])
         if getattr(type(self), "executes_from_box", False) and env_spec is not None:
             _box = getattr(env_spec, "box", None)
@@ -341,7 +366,8 @@ class DefenderPlugin(BaseModel):
         emit RUNNING here: a defender is READY/RUNNING only once its runner has armed (the readiness
         marker, see wait_until_ready), which the arena detects after this returns. (That asymmetry
         collapses in the box model — see docs/agent-symmetry.md.)"""
-        return await self.start(prepared, config_path, experiment.experiment_name, cfg)
+        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
+        return await self.start(prepared, config_path, experiment.experiment_name, cfg, access=access)
 
     async def run_stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
         """Emit STOPPING/STOPPED around stop() — mirrors AttackerPlugin.run_stop. Guarded against a prior
@@ -351,11 +377,81 @@ class DefenderPlugin(BaseModel):
         lc = self._lifecycle(experiment)
         if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
             await lc.emit(DefenderSignal.STOPPING)
+        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
         try:
-            await self.stop(experiment, cfg)
+            await self.stop(experiment, cfg, access=access)
         finally:
             if lc is not None and lc.status != DefenderSignal.FAILED:
                 await lc.emit(DefenderSignal.STOPPED)
+
+    async def run_collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
+        """Load the persisted scoped access (when runs_on_box) and hand it to collect_logs() — mirrors
+        AttackerPlugin.run_collect_logs. For a harness-run defender access is None and logs are local."""
+        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
+        await self.collect_logs(experiment, cfg, dest, access=access)
+
+    # ------------------------------------------------------------------ scoped access (box path)
+    # Mirrors AttackerPlugin's foothold-access recovery. setup()/run_setup receive the scoped
+    # DefenderSetupAccess list from the arena (experiment._defender_access), but run_start/run_stop/
+    # run_collect_logs run later (a failure path, or a clean-slate stop after a restart) where it isn't in
+    # scope — so run_setup persists it and the wrappers load it back. ONLY used when runs_on_box; today the
+    # creds instead travel in the runner config (injected by run_setup). The attacker persists ONE entry
+    # (its single foothold); the defender persists the WHOLE list (it reaches the box AND victims).
+    _ACCESS_FILE: ClassVar[str] = "setup_access.json"
+
+    @staticmethod
+    def primary_access(access) -> "DefenderSetupAccess":
+        """The box entry the defender's runner operates from (mirrors AttackerPlugin.primary_access).
+        TODO (slice 3): select the box entry by env_spec.box.ip rather than [0], since the defender's
+        access list also carries victim entries; [0] is a placeholder for the scaffold."""
+        if not access:
+            raise RuntimeError("no DefenderSetupAccess passed to the defender — the arena must pass it to run_setup()")
+        return access[0]
+
+    @classmethod
+    def _access_path(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        return output_root(experiment_name, cfg) / experiment_name / "defender" / cls._ACCESS_FILE
+
+    def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig, access) -> None:
+        """Internal (run_setup, runs_on_box only): write the scoped access list so the run_* wrappers can
+        recover it. Persists the whole list (box + victims), unlike the attacker's single primary."""
+        path = self._access_path(experiment_name, cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([a.model_dump() for a in (access or [])]))
+
+    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig):
+        """Internal (run_* wrappers): recover the persisted scoped access list, or None if none was
+        persisted or it can't be read (mirrors AttackerPlugin._load_access)."""
+        try:
+            raw = json.loads(self._access_path(experiment_name, cfg).read_text())
+            return [DefenderSetupAccess.model_validate(a) for a in raw]
+        except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
+            return None
+
+    # ------------------------------------------------------------------ SLICE 3 SCAFFOLD: box execution
+    # Opt-in via runs_on_box; stubs until live-validated (no shipped defender sets runs_on_box yet). These
+    # make the defender's long-running process symmetric with the attacker's: setup()/run_start launch it
+    # into the env via scoped access and block until it reports ready, so prepare()/the readiness marker
+    # collapse into the setup wait (the direct mirror of the attacker's C2 bring-up + wait_c2c_agent).
+    async def _launch_on_box(self, prepared: "PreparedDefender", config_path: Path, experiment_name: str,
+                             cfg: ExperimentManagerConfig, access) -> "asyncio.subprocess.Process":
+        """Launch the defender runner FROM THE BOX, reaching it over SSH with the box DefenderSetupAccess,
+        and return a process handle — mirroring how the attacker's setup() brings its C2/agent up on the
+        foothold (plugins/incalmo_strategy). Steps (TODO — live-validated in slice 3):
+          1. box = self.primary_access(access)            # the box entry (match env_spec.box.ip)
+          2. ship the runner + its config to the box (scp over box.ssh_base()), or run it in place
+          3. start it via box.ssh_base() and wrap that ssh in an asyncio subprocess to return
+        Credentials ride in `access` (threaded at launch), NOT in the runner config."""
+        raise NotImplementedError(
+            "box execution (runs_on_box=True) is scaffolded, not yet implemented — see docs/agent-symmetry.md slice 3")
+
+    async def _wait_box_ready(self, experiment, cfg: ExperimentManagerConfig, process, access) -> float:
+        """Block until the box runner reports armed, polling the box over SSH (`access`) — the box analog
+        of wait_until_ready's local-marker poll and the direct mirror of the attacker's wait_c2c_agent
+        (poll the C2 until an agent beacons). When runs_on_box lands, run_setup blocks on THIS instead of
+        the arena polling a local marker, so prepare()/wait_until_ready collapse into the setup wait. TODO."""
+        raise NotImplementedError(
+            "box readiness wait is scaffolded, not yet implemented — see docs/agent-symmetry.md slice 3")
 
     @classmethod
     def validate_built_config(cls, built: dict) -> None:

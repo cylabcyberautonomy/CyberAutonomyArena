@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 
 from arena.defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, DefenderLifecycleError, signal_recorder,
 )
+from arena.defender.env_spec import DefenderSetupAccess
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
 from arena.defender.defender import run_defender
 from arena.experiment.models import Experiment, ExperimentStatus
@@ -287,6 +288,70 @@ def test_run_stop_is_guarded_after_failed(tmp_path):
         await _FakeDefender().run_stop(exp, _run_cfg(tmp_path))
     asyncio.run(_go())
     assert trace == [DefenderSignal.FAILED]  # no STOPPING/STOPPED added over the terminal FAILED
+
+
+# --------------------------------------------------------------------------- slice 3 scaffold (runs_on_box)
+
+class _BoxDefender(DefenderPlugin, config_type="_box_defender_test"):
+    """runs_on_box scaffold fake: start() must route to _launch_on_box (not run()), which here returns a
+    sentinel instead of actually SSHing to the box. '_'-prefixed name => skipped by the conformance suite."""
+    type: str = "_box_defender_test"
+    runs_on_box: ClassVar[bool] = True
+
+    @classmethod
+    def ui_schema(cls):
+        return {"config_type": "_box_defender_test", "label": "box", "fields": [], "cartesian_product": False}
+
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
+        return {"experiment_name": experiment_name}
+
+    async def run(self, config_path, experiment_name, cfg):
+        raise AssertionError("run() must not be called when runs_on_box=True")
+
+    async def _launch_on_box(self, prepared, config_path, experiment_name, cfg, access):
+        return SimpleNamespace(pid=777, access=access)
+
+
+def test_runs_on_box_defaults_false_and_uses_run(tmp_path):
+    """Default (runs_on_box=False) is unchanged: start() launches the local harness loop via run()."""
+    assert _FakeDefender.runs_on_box is False
+    proc = asyncio.run(_FakeDefender().start(PreparedDefender(), tmp_path / "c.json", "p", _run_cfg(tmp_path)))
+    assert proc.returncode is None  # _FakeDefender.run()'s SimpleNamespace, i.e. run() was used
+
+
+def test_runs_on_box_start_routes_to_launch_on_box(tmp_path):
+    """Scaffold routing: runs_on_box=True => start() delegates to _launch_on_box, never run()."""
+    proc = asyncio.run(_BoxDefender().start(PreparedDefender(), tmp_path / "c.json", "p", _run_cfg(tmp_path)))
+    assert proc.pid == 777
+
+
+def test_box_access_persist_load_roundtrip(tmp_path):
+    """When runs_on_box, run_setup persists the scoped access LIST and the run_* wrappers load it back
+    (mirrors the attacker's foothold-access recovery, but as a list: box + victims)."""
+    cfg = _run_cfg(tmp_path)
+    acc = [DefenderSetupAccess(user="u", host="10.0.0.9", ssh_key="/k"),
+           DefenderSetupAccess(user="u", host="10.0.0.10")]
+    d = _BoxDefender()
+    d._persist_access("boxexp", cfg, acc)
+    back = d._load_access("boxexp", cfg)
+    assert back is not None and [a.host for a in back] == ["10.0.0.9", "10.0.0.10"]
+
+
+def test_unstarted_box_launch_is_not_implemented(tmp_path):
+    """The box launch itself is a scaffold stub — a real runs_on_box defender that doesn't override it
+    gets a clear NotImplementedError pointing at the slice-3 work, not a silent no-op."""
+    class _Bare(DefenderPlugin, config_type="_bare_box_defender_test"):
+        type: str = "_bare_box_defender_test"
+        runs_on_box: ClassVar[bool] = True
+        @classmethod
+        def ui_schema(cls):
+            return {"config_type": "_bare_box_defender_test", "label": "bare", "fields": [], "cartesian_product": False}
+        def build_config(self, experiment_name, env_spec=None, prepared=None):
+            return {"experiment_name": experiment_name}
+        async def run(self, config_path, experiment_name, cfg):
+            return SimpleNamespace(returncode=None)
+    with pytest.raises(NotImplementedError, match="slice 3"):
+        asyncio.run(_Bare().start(PreparedDefender(), tmp_path / "c.json", "p", _run_cfg(tmp_path)))
 
 
 if __name__ == "__main__":

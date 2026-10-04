@@ -87,11 +87,24 @@ These live behind clearly-labelled "DEFENDER CAPABILITY" banners so the twin str
      `sweep_stale_state`/`example_prepared` surface mirrors; aligning `setup`/`run_setup` to the attacker's
      `(experiment, cfg, bastion_ip, access)` convention — this one is folded into slice 3, since `setup()`
      changes substantially when it starts launching the box process.
-3. **Defender on the box.** `setup()` launches the defender process **on the box** over SSH and blocks
-   until it reports ready — the readiness marker becomes the in-`setup()` poll (the defender's
-   `wait_c2c_agent`). Telemetry becomes box-local; victim actions use the box's scoped key directly; the
-   config no longer carries injected creds. `prepare()`/`wait_until_ready` collapse into `setup()`.
-   Includes the `setup`/`run_setup` signature alignment deferred from slice 2.
+3. **Defender on the box. — SCAFFOLDED (opt-in `runs_on_box`, default False; 103 tests green).**
+   `setup()`/`run_start` launch the defender process **on the box** over SSH and block until it reports
+   ready — the readiness marker becomes the in-`setup()` poll (the defender's `wait_c2c_agent`). Telemetry
+   becomes box-local; victim actions use the box's scoped key threaded at launch (not injected into the
+   config); `prepare()`/`wait_until_ready` collapse into `setup()`.
+   - Scaffolded (inert until a plugin sets `runs_on_box=True`): the `runs_on_box` capability flag; `start()`
+     routes to `_launch_on_box` when set; scoped-access recovery (`primary_access` + `_persist_access`/
+     `_load_access`, persisting the *list* — box + victims) threaded through `run_start`/`run_stop`/
+     `run_collect_logs`; `run_setup` persists the access when `runs_on_box`; `collect_logs`/`run_collect_logs`
+     mirrors added. Tests cover the routing, the default-unchanged path, the access round-trip, and the stub.
+   - Stubs to fill in with live validation: `_launch_on_box` (ship + SSH-launch the runner on the box, like
+     the attacker's C2 bring-up) and `_wait_box_ready` (poll the box for armed — the mirror of
+     `wait_c2c_agent`). Also the `setup`/`run_setup` signature alignment deferred from slice 2, and dropping
+     the config cred-injection for `runs_on_box` defenders (TODO marked at the injection site).
+   - **Nuance (honest):** the Incalmo attacker's *planner* actually runs on the harness and reaches victims
+     via its C2 — so the credential symmetry is really "scoped access **threaded at launch** vs **injected
+     into a persistent config**," which this scaffold delivers; the box is where in-env execution, box-local
+     telemetry, and control-plane isolation (slice 4) naturally live.
 4. **Control-plane as a capability.** A box-resident defender that needs restore/BlockIP/decoy reaches
    the environment over a **token'd TCP** channel (the box-agent pattern), not the harness UDS.
 
