@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
+from ....env_action_server import resolve_socket_path
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
@@ -24,6 +26,8 @@ class PreparedPromptInjection(PreparedDefender):
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
+    # The env-action door this plugin picked (harness-run -> the always-on UDS socket); build_config bakes it.
+    env_action_socket: Optional[str] = None
 
 
 class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injection"):
@@ -149,53 +153,42 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built
 
-    async def provision_box(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        bastion_ip: Optional[str] = None,
-        defender_env_spec=None,
-        defender_access=None,
-        needs_agent: bool = False,
-    ) -> PreparedDefender:
-        # PHASE A (runs BEFORE build_config): stand up this run's OWN per-experiment ES on the defender box
-        # + the ssh -L tunnel, and — when this run armed dynamic topology (needs_agent) — deploy + start the
-        # box agent so the decoy deploy (Phase B) can route host actions to it. Both take the env-produced
-        # box inventory + access (NOT a written config) and RETURN their values; build_config() bakes them
-        # into the runner config via the baton. Blocking SSH work, so off the event loop.
-        box_cfg = {
-            "defender_env_spec": defender_env_spec.model_dump() if defender_env_spec is not None else {},
-            "defender_setup_access": [a.model_dump() for a in (defender_access or [])],
-        }
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> PreparedDefender:
+        """ARM the defender and BLOCK until armed — mirror of AttackerPlugin.setup(). Stand up this run's box
+        ES + box agent, write the runner config, then run the strategy's EXTERNAL arming (deploy
+        payload-named decoys / plant honey-creds) to completion via a 'prepare' pass of runner.py — which now
+        fully runs Strategy.initialize() for every strategy, so setup() returning IS armed (no in-loop arming
+        / readiness marker). Returns the baton build_config() bakes. See deception.py for the shared shape."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec
+        # Box ES + box agent (the harness-run box-agent model deploys its OWN agent here). Blocking SSH, off
+        # the event loop.
+        box_cfg = {"defender_env_spec": env_spec.model_dump() if env_spec is not None else {},
+                   "defender_setup_access": [a.model_dump() for a in (access or [])]}
         loop = asyncio.get_event_loop()
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
-        baton = dict(es)
-        if needs_agent:
-            box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
-            agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
-            baton.update(agent)
-        return PreparedPromptInjection(**baton)
-
-    async def prepare(
-        self,
-        config_path: Path,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-    ) -> PreparedDefender:
-        # PHASE B (after build_config + config write): EXTERNAL arming — run the strategy's prepare phase in
-        # the deception venv to completion. The static StaticLayered* channels (Perry Strategy.ARMS_IN_SETUP)
-        # DEPLOY their decoys + plant prompt-injection payloads now; AIAttackerDetection is reactive and arms
-        # inside its loop, so for it this is a no-op. It reads the written config (es_url / box_agent_* already
-        # baked in by build_config from the Phase-A baton). Blocks and RAISES on deploy failure, before the
-        # attacker starts. (Box ES + box agent standup moved to provision_box, Phase A.)
+        box_cfg.update(es)
+        agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
+        prepared = PreparedPromptInjection(
+            env_action_socket=(resolve_socket_path(cfg) if self.uses_env_actions else None),
+            **{**es, **agent})
+        # Write the runner config so the arming 'prepare' pass can read it (run_setup re-writes it for the run
+        # loop); build_config bakes the baton, then inject the credential-bearing access + routing.
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, prepared)
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        built["defender_setup_access"] = [a.model_dump() for a in (access or [])]
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        config_path.write_text(json.dumps(built, indent=2))
+        # EXTERNAL arming: run the strategy's prepare pass (deploy decoys / plant payloads), blocking.
         log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
-        marker = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_prepared.json"
-        marker.unlink(missing_ok=True)  # drop any stale baton from a prior run of this name
-        repo_dir, python = self._code_dir(cfg), self._code_python(cfg)
-        # Launch runner.py in the Perry venv in "prepare" mode (its packages import via PYTHONPATH=repo), and
-        # WAIT: a failure (non-zero exit or no baton) raises below, so an undefended env never reaches the
-        # attacker. (Same inline spawn as run(), just mode="prepare" + awaited.)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_dir, python = self._code_dir(cfg), self._code_python(cfg)
         pythonpath = os.pathsep.join(p for p in (str(repo_dir), os.environ.get("PYTHONPATH", "")) if p)
         proc = await asyncio.create_subprocess_exec(
             str(python), str(Path(__file__).parent / "runner.py"), str(config_path), "prepare",
@@ -204,10 +197,8 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         )
         rc = await proc.wait()
         if rc != 0:
-            raise RuntimeError(f"Defender prepare (external arming) exited {rc} - see {log_path}")
-        if not marker.exists():
-            raise RuntimeError(f"Defender prepare exited 0 but wrote no baton at {marker} - see {log_path}")
-        return PreparedDefender.model_validate_json(marker.read_text())
+            raise RuntimeError(f"Defender arming (prepare pass) exited {rc} - see {log_path}")
+        return prepared
 
 
     async def teardown(

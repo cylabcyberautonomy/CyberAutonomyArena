@@ -189,6 +189,25 @@ class DefenderPlugin(BaseModel):
         (tests/test_plugin_conformance.py) can build its config without setup()."""
         return PreparedDefender()
 
+    # Defender-only surface hooks (no attacker twin — like the attacker's sweep_stale_state has no defender
+    # twin): the environment opens box ports for telemetry/forwarding, and a decoy defender reserves VMs.
+    def box_ingress(self) -> dict[str, list[int]]:
+        """OPTIONAL. The box-ingress this defender needs the ENVIRONMENT to open, by kind:
+            "telemetry": [9200]  -> the env relay routes sensor telemetry to the box ES on these ports.
+            "forward":   [8000]  -> a victim->mgmt->box raw-TCP passthrough on these ports (EDR clients).
+        The harness reads this at arm and opens EXACTLY these. A defender that needs nothing returns {}
+        (default) and opens zero box ports. Config-aware (e.g. a diagnostic-only canary opens nothing)."""
+        return {}
+
+    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
+        """OPTIONAL. The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
+        specs — the shape EnvironmentPlugin.capacity() returns, so the arena reserves `topology + this budget`
+        at admission and every mid-run add_host draws from the already-held pool. OPT-IN: a defender that
+        never changes topology (canary, a passive SOC) returns [] (default); only a decoy/deception strategy
+        overrides it. Pairing a non-empty budget with an environment that can't do dynamic topology is a
+        contract violation the arena catches at deploy time."""
+        return []
+
     # ========================================================================
     # FRAMEWORK — the arena calls these; do NOT override. (See the class docstring.)
     # ========================================================================

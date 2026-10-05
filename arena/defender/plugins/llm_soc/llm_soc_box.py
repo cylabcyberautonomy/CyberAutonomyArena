@@ -56,14 +56,13 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
     # scoped creds at launch; its start()/stop() open and close the ssh -R env-action tunnel.
     #   uses_env_actions=True  -> the arena arms the token'd TCP env-action SERVER + the SERVING window + the
     #                             per-experiment token/port (NOT the tunnel — the plugin opens that itself).
-    #   executes_from_box=False -> this is NOT the harness-run box-agent/UDS controller; it runs IN-env and
-    #                             reaches the env ONLY over the plugin's ssh -R tunnel, and reaches victims
-    #                             itself with the box-threaded keys (so it keeps the FULL victim access).
+    #                             It runs IN-env and reaches the env ONLY over its own ssh -R tunnel, reaching
+    #                             victims itself with the box-threaded keys (the base is agnostic to this —
+    #                             executes_from_box is gone; the plugin picks its own door in setup()).
     #   box_python="3.12"      -> _box_run_command provisions a uv standalone CPython-3.12 venv (box is py3.8).
     #   box_ships_engine=True  -> _launch_on_box rsyncs the Perry repo (box_engine_src) and runs the runner
     #                             with cwd/PYTHONPATH = the shipped engine (box_pip_spec is unused in this mode).
     uses_env_actions: ClassVar[bool] = True
-    executes_from_box: ClassVar[bool] = False
     box_python: ClassVar[Optional[str]] = "3.12"
     box_ships_engine: ClassVar[bool] = True
     _BOX_DIR: ClassVar[str] = "/opt/arena-defender"  # where the runner + config + uv venv + engine live on the box

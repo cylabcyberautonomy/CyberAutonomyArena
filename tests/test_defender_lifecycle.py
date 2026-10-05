@@ -58,72 +58,22 @@ def _write_marker(experiment_name: str, cfg) -> Path:
     return marker
 
 
-# --------------------------------------------------------------------------- the readiness gate
-
-def test_wait_until_ready_returns_when_marker_present(tmp_path):
-    """The happy path: the runner has written the marker, so the gate returns the arming duration."""
-    cfg = _cfg(tmp_path)
-    _write_marker("def_ready", cfg)
-    process = SimpleNamespace(returncode=None)  # still running
-    waited = asyncio.run(_FakeDefender.wait_until_ready("def_ready", cfg, process))
-    assert waited >= 0.0
-
-
-def test_wait_until_ready_raises_if_process_dies_before_arming(tmp_path):
-    """A defender that crashes during initialize() must FAIL the experiment — never hand an undefended
-    environment to the attacker. No marker + a dead process => RuntimeError naming the exit code."""
-    cfg = _cfg(tmp_path)
-    process = SimpleNamespace(returncode=1)  # exited, no marker written
-    with pytest.raises(RuntimeError, match="code 1"):
-        asyncio.run(_FakeDefender.wait_until_ready("def_crash", cfg, process))
-
-
-def test_wait_until_ready_times_out(tmp_path, monkeypatch):
-    """Arming that never completes (no marker, process alive) must raise TimeoutError past the deadline.
-    asyncio.sleep is stubbed so the 2s poll doesn't make the test slow."""
-    cfg = _cfg(tmp_path, timeout=0.05)
-    process = SimpleNamespace(returncode=None)
-
-    real_sleep = asyncio.sleep
-    async def _fast_sleep(_delay):
-        await real_sleep(0)  # yield without waiting the real poll interval
-    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
-
-    with pytest.raises(TimeoutError, match="did not finish arming"):
-        asyncio.run(_FakeDefender.wait_until_ready("def_timeout", cfg, process))
-
-
-def test_clear_ready_marker_removes_stale(tmp_path):
-    """Re-running with overwrite reuses the output dir; a stale marker would make the gate pass instantly.
-    clear_ready_marker removes it and is safe to call when none exists (missing_ok)."""
-    cfg = _cfg(tmp_path)
-    marker = _write_marker("def_stale", cfg)
-    assert marker.exists()
-    _FakeDefender.clear_ready_marker("def_stale", cfg)
-    assert not marker.exists()
-    _FakeDefender.clear_ready_marker("def_stale", cfg)  # idempotent, no raise
-
-
 # --------------------------------------------------------------------------- the full handshake
 
-def test_full_defender_handshake_with_readiness_gate(tmp_path):
-    """Drive the arena's defender sequence end to end against the fake, integrating the readiness gate:
-    SETUP_STARTED -> wait_until_ready (a concurrent 'runner' writes the marker) -> READY -> RUNNING ->
-    STOPPING -> STOPPED. Assert the recorded history + that the persister stamped status/timestamps."""
+def test_full_defender_handshake(tmp_path):
+    """Drive the arena's defender sequence end to end against the fake — NO readiness gate (it's deleted):
+    SETUP_STARTED -> READY (run_setup emits it once setup() has ARMED) -> RUNNING (run_start) -> STOPPING ->
+    STOPPED. Identical in shape to the attacker; setup() returning IS armed, so there is no marker/
+    wait_until_ready. Assert the recorded history + that the persister stamped status/timestamps."""
     cfg = _cfg(tmp_path)
     exp = Experiment("def_handshake", ExperimentStatus.QUEUED,
                      {"environment_plugin": "mhbench", "environment_spec": "equifax_small"}, defender=None)
     lc = DefenderLifecycle(on_emit=signal_recorder(exp))
-    process = SimpleNamespace(returncode=None)
 
     async def drive():
-        _FakeDefender.clear_ready_marker("def_handshake", cfg)
         await lc.send(DefenderCommand.START_SETUP)
         await lc.emit(DefenderSignal.SETUP_STARTED)
-        # the runner arms and writes the marker the arena is gating on; the gate then returns
-        _write_marker("def_handshake", cfg)
-        await _FakeDefender.wait_until_ready("def_handshake", cfg, process)
-        await lc.emit(DefenderSignal.READY)
+        await lc.emit(DefenderSignal.READY)        # setup() armed; run_setup emits READY (no marker)
         await lc.send(DefenderCommand.START)
         await lc.emit(DefenderSignal.RUNNING)
         await lc.send(DefenderCommand.STOP)
@@ -168,27 +118,23 @@ _ORDER_CALLS: list[str] = []
 
 
 class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
-    """Records the order the arena drives prepare() vs run(), and returns an 'armed in setup' baton."""
+    """Records the order run_setup drives setup() vs build_config() vs run(), and returns an 'armed in
+    setup' baton — the mirror of the attacker (setup -> build_config -> run)."""
     type: str = "_order_defender_test"
 
     @classmethod
     def ui_schema(cls):
         return {"config_type": "_order_defender_test", "label": "order", "fields": [], "cartesian_product": False}
 
-    async def provision_box(self, experiment_name, cfg, bastion_ip=None,
-                            defender_env_spec=None, defender_access=None, needs_agent=False):
-        _ORDER_CALLS.append("provision_box")  # Phase A: produce the baton BEFORE build_config
+    async def setup(self, experiment, cfg, bastion_ip=None, access=None):
+        _ORDER_CALLS.append("setup")  # ARM (blocks until armed), then produce the baton build_config bakes
         return _PreparedBoxBaton(es_url="http://127.0.0.1:1")
 
     def build_config(self, experiment_name, env_spec=None, prepared=None):
         _ORDER_CALLS.append("build_config")
-        # the Phase-A baton reaches build_config (not patched into the written config afterward)
+        # the setup() baton reaches build_config (then run_setup injects creds/routing afterward)
         assert prepared is not None and prepared.es_url == "http://127.0.0.1:1"
         return {"experiment_name": experiment_name}
-
-    async def prepare(self, config_path, experiment_name, cfg):
-        _ORDER_CALLS.append("prepare")
-        return PreparedDefender()
 
     async def run(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("run")
@@ -196,18 +142,18 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
 
 
 class _PrepareFailsDefender(DefenderPlugin, config_type="_prepare_fails_defender_test"):
-    """prepare() (external arming) fails -> run_defender must raise and NEVER reach run()."""
+    """setup() (ARMING — decoy/cred deploy) fails -> run_setup must raise and NEVER reach run()."""
     type: str = "_prepare_fails_defender_test"
 
     @classmethod
     def ui_schema(cls):
         return {"config_type": "_prepare_fails_defender_test", "label": "pfail", "fields": [], "cartesian_product": False}
 
+    async def setup(self, experiment, cfg, bastion_ip=None, access=None):
+        raise RuntimeError("decoy deploy failed")
+
     def build_config(self, experiment_name, env_spec=None, prepared=None):
         return {"experiment_name": experiment_name}
-
-    async def prepare(self, config_path, experiment_name, cfg):
-        raise RuntimeError("decoy deploy failed")
 
     async def run(self, config_path, experiment_name, cfg):
         _ORDER_CALLS.append("run-should-not-run")
@@ -228,12 +174,12 @@ def _run_exp(experiment_name: str):
                            _defender_env_spec=None, _defender_access=None, _bastion_ip=None)
 
 
-def test_base_prepare_is_noop_baton(tmp_path):
-    """A defender with no external arming (the base default) returns an empty baton: its arming, if any,
-    happens in the loop and still uses the readiness marker."""
-    prepared = asyncio.run(_FakeDefender().prepare(tmp_path / "c.json", "p", _cfg(tmp_path)))
+def test_base_setup_is_noop_baton(tmp_path):
+    """The base setup() default ARMS nothing and returns an empty opaque baton — mirror of
+    AttackerPlugin.setup's default. A defender with box state subclasses PreparedDefender on its own."""
+    prepared = asyncio.run(DefenderPlugin.setup(_FakeDefender(), _run_exp("p"), _cfg(tmp_path)))
     assert isinstance(prepared, PreparedDefender)
-    assert prepared.model_dump() == {}  # empty opaque baton (fields live on each plugin's subclass now)
+    assert prepared.model_dump() == {}
 
 
 def test_prepared_defender_baton_roundtrips():
@@ -244,24 +190,23 @@ def test_prepared_defender_baton_roundtrips():
     assert back.es_url == "http://127.0.0.1:9200" and back.falco_index == "falco"
 
 
-def test_run_defender_runs_prepare_before_run(tmp_path):
-    """The external-arming contract: run_defender calls prepare() (deploy decoys / plant creds to
-    completion) BEFORE run() launches the loop — the defender analog of the attacker's setup()->start()."""
+def test_run_setup_arms_via_setup_then_writes_config(tmp_path):
+    """The mirror order: run_setup() runs setup() (ARM, blocking) BEFORE build_config(), then writes the
+    config — the defender analog of the attacker's run_setup (setup -> build_config -> write). run_start then
+    only launches the loop. No separate prepare()/provision_box, no readiness marker."""
     _ORDER_CALLS.clear()
     d, exp, cfg = _OrderDefender(), _run_exp("ord"), _run_cfg(tmp_path)
     async def _go():
-        prepared = await d.run_setup(exp, cfg)   # SETUP phase: setup + provision_box -> baton
-        return await run_defender(d, exp, cfg, prepared)   # RUN phase: build_config(baton) -> prepare -> run
+        prepared = await d.run_setup(exp, cfg)             # SETUP phase: setup() arms -> build_config -> write
+        return await run_defender(d, exp, cfg, prepared)   # RUN phase: run() launches the loop
     proc = asyncio.run(_go())
-    # the unified lifecycle: setup-phase baton (provision_box) -> build_config(baton) -> arming (prepare)
-    # -> run, mirroring the attacker's _drive_attacker_setup()->run_attacker(..., prepared).
-    assert _ORDER_CALLS == ["provision_box", "build_config", "prepare", "run"]
+    assert _ORDER_CALLS == ["setup", "build_config", "run"]
     assert proc.pid == 4321
 
 
-def test_run_defender_aborts_when_prepare_fails(tmp_path):
-    """Prepare (external arming) failing must fail the experiment and NEVER launch the run loop — an
-    undefended environment is never handed to the attacker (why prepare() blocks and raises)."""
+def test_run_setup_aborts_when_setup_arming_fails(tmp_path):
+    """setup() (ARMING — decoy/cred deploy) failing must fail the experiment and NEVER launch the run loop:
+    an undefended environment is never handed to the attacker (why setup() blocks and raises)."""
     _ORDER_CALLS.clear()
     d, exp, cfg = _PrepareFailsDefender(), _run_exp("ordfail"), _run_cfg(tmp_path)
     async def _go():
@@ -377,80 +322,31 @@ def test_llm_soc_box_run_command_ships_engine():
 
 
 def test_llm_soc_box_keying_flags():
-    """llm_soc_box is a BOX-RESIDENT env-action defender: uses_env_actions True (arena arms the token'd TCP
-    channel; the plugin opens its own ssh -R tunnel), executes_from_box False (it is NOT the harness-run
-    box-agent/UDS controller — so _write_runner_config keeps its FULL victim access)."""
+    """llm_soc_box is a box-resident env-action defender: uses_env_actions True (it issues RestoreServer
+    env-actions, reaching the env over its own ssh -R tunnel). executes_from_box is GONE — the base no longer
+    keys on where a defender runs; the plugin picks its own env door in setup()."""
     from arena.defender.plugins.llm_soc.llm_soc_box import LLMSOCBoxDefenderPlugin
     assert LLMSOCBoxDefenderPlugin.uses_env_actions is True
-    assert LLMSOCBoxDefenderPlugin.executes_from_box is False
+    assert not hasattr(LLMSOCBoxDefenderPlugin, "executes_from_box")
 
 
-def test_defender_plugin_keying_matrix():
-    """The two SEPARATE keying axes on the real plugins (coordinator's correction):
-      executes_from_box = uses the harness-run BOX AGENT (host actions) -> needs_agent/UDS.
-      uses_env_actions  = issues env-actions -> needs the SERVING WINDOW + an env channel.
-    deception/prompt_injection/llm_soc are harness-run decoy/active defenders: BOTH (box agent for host
-    actions AND the env channel for RebuildHost/decoy). llm_soc_box is box-resident: env actions only.
-    canary: neither."""
+def test_uses_env_actions_matrix():
+    """uses_env_actions on the real plugins — the ONE env-action keying flag the base reads now
+    (executes_from_box is gone). deception/prompt_injection/llm_soc/llm_soc_box issue env actions (serving
+    window + channel); canary does not. No plugin declares executes_from_box any more."""
     from arena.defender.plugins.deception.deception import DeceptionDefenderPlugin
     from arena.defender.plugins.prompt_injection.prompt_injection import PromptInjectionDefenderPlugin
     from arena.defender.plugins.llm_soc.llm_soc import LLMSOCDefenderPlugin
     from arena.defender.plugins.llm_soc.llm_soc_box import LLMSOCBoxDefenderPlugin
     from arena.defender.plugins.canary.canary import CanaryDefenderPlugin
-    assert (DeceptionDefenderPlugin.executes_from_box, DeceptionDefenderPlugin.uses_env_actions) == (True, True)
-    assert (PromptInjectionDefenderPlugin.executes_from_box, PromptInjectionDefenderPlugin.uses_env_actions) == (True, True)
-    assert (LLMSOCDefenderPlugin.executes_from_box, LLMSOCDefenderPlugin.uses_env_actions) == (True, True)
-    assert (LLMSOCBoxDefenderPlugin.executes_from_box, LLMSOCBoxDefenderPlugin.uses_env_actions) == (False, True)
-    assert (CanaryDefenderPlugin.executes_from_box, CanaryDefenderPlugin.uses_env_actions) == (False, False)
-
-
-class _AgentDefender(DefenderPlugin, config_type="_agent_defender_test"):
-    """executes_from_box fake (the harness-run box-agent model): setup() must derive a UDS env_action_socket
-    + needs_agent, NOT the TCP box_channel. '_'-prefixed => conformance skips."""
-    type: str = "_agent_defender_test"
-    executes_from_box: ClassVar[bool] = True
-
-    @classmethod
-    def ui_schema(cls):
-        return {"config_type": "_agent_defender_test", "label": "agent", "fields": [], "cartesian_product": False}
-
-    def build_config(self, experiment_name, env_spec=None, prepared=None):
-        return {"experiment_name": experiment_name}
-
-    async def run(self, config_path, experiment_name, cfg):
-        return SimpleNamespace(returncode=None)
-
-
-def _written_defender_config(experiment_name, cfg):
-    from arena.experiment_log import output_root
-    path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
-    import json as _json
-    return _json.loads(path.read_text())
-
-
-def test_executes_from_box_setup_arms_uds_not_tcp(tmp_path):
-    """An executes_from_box defender with the serving window open gets the tokenless UDS env_action_socket
-    baked into its runner config (the box-agent model) and NO TCP box_channel — keyed on executes_from_box,
-    NOT uses_env_actions."""
-    cfg = _run_cfg(tmp_path)
-    exp = SimpleNamespace(experiment_name="agentexp", deployed_environment=None, _defender_env_spec=None,
-                          _defender_access=None, _bastion_ip=None, _env_dynamic=True)
-    asyncio.run(_AgentDefender().setup(exp, cfg, bastion_ip=None, access=[]))
-    built = _written_defender_config("agentexp", cfg)
-    assert "env_action_socket" in built and "env_action_url" not in built
-
-
-def test_box_resident_setup_arms_tcp_not_uds(tmp_path):
-    """A box-resident defender (the arena set the TCP port+token) gets env_action_url+token baked in and NO
-    UDS socket — even though _env_dynamic is open. This is the uses_env_actions path; no box agent."""
-    cfg = _run_cfg(tmp_path)
-    exp = SimpleNamespace(experiment_name="boxexp2", deployed_environment=None, _defender_env_spec=None,
-                          _defender_access=None, _bastion_ip=None, _env_dynamic=True,
-                          _env_action_box_port=5555, _env_action_token="tok-xyz")
-    asyncio.run(_FakeDefender().setup(exp, cfg, bastion_ip=None, access=[]))
-    built = _written_defender_config("boxexp2", cfg)
-    assert built.get("env_action_url") == "http://127.0.0.1:5555" and built.get("env_action_token") == "tok-xyz"
-    assert "env_action_socket" not in built
+    assert DeceptionDefenderPlugin.uses_env_actions is True
+    assert PromptInjectionDefenderPlugin.uses_env_actions is True
+    assert LLMSOCDefenderPlugin.uses_env_actions is True
+    assert LLMSOCBoxDefenderPlugin.uses_env_actions is True
+    assert CanaryDefenderPlugin.uses_env_actions is False
+    for cls in (DeceptionDefenderPlugin, PromptInjectionDefenderPlugin, LLMSOCDefenderPlugin,
+                LLMSOCBoxDefenderPlugin, CanaryDefenderPlugin):
+        assert not hasattr(cls, "executes_from_box")
 
 
 def test_tty_ssh_inserts_tt():

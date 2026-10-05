@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
+from ....env_action_server import resolve_socket_path
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
@@ -65,6 +66,8 @@ class PreparedLLMSOC(PreparedDefender):
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
+    # The env-action door this plugin picked (harness-run -> the always-on UDS socket); build_config bakes it.
+    env_action_socket: Optional[str] = None
 
 
 class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
@@ -146,34 +149,25 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built
 
-    async def provision_box(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        bastion_ip: Optional[str] = None,
-        defender_env_spec=None,
-        defender_access=None,
-        needs_agent: bool = False,
-    ) -> PreparedDefender:
-        # PHASE A (runs BEFORE build_config): stand up this run's OWN per-experiment ES on the defender box
-        # + the ssh -L tunnel (prepare_box_es), and — when this run armed dynamic topology (needs_agent) —
-        # deploy + start the box agent. Both take the env-produced box inventory + access (NOT a written
-        # config, which doesn't exist yet) and RETURN their values; build_config() bakes them into the
-        # runner config via the baton. llm_soc's strategies (FalcoLLM / FalcoLLMC2Block) arm IN the loop —
-        # they deploy no decoys — so there is no Phase-B prepare() here; the base no-op covers it. Blocking
-        # SSH work, so off the event loop.
-        box_cfg = {
-            "defender_env_spec": defender_env_spec.model_dump() if defender_env_spec is not None else {},
-            "defender_setup_access": [a.model_dump() for a in (defender_access or [])],
-        }
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> PreparedDefender:
+        """ARM the defender and return the baton — mirror of AttackerPlugin.setup(). Stand up this run's box
+        ES + box agent. FalcoLLM / FalcoLLMC2Block deploy NO decoys: their 'arming' is standing up the box ES
+        (+ the agent, for C2Block's BlockIP) and subscribing to telemetry — the subscribe is instant, in the
+        run loop, with no placement — so setup() returning (box ES + agent up) IS armed; there is no blocking
+        prepare pass and never a readiness marker for them. Blocking SSH work, so off the event loop."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec
+        box_cfg = {"defender_env_spec": env_spec.model_dump() if env_spec is not None else {},
+                   "defender_setup_access": [a.model_dump() for a in (access or [])]}
         loop = asyncio.get_event_loop()
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
-        baton = dict(es)
-        if needs_agent:
-            box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
-            agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
-            baton.update(agent)
-        return PreparedLLMSOC(**baton)
+        box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
+        agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
+        # This plugin picks its OWN env-action door: harness-run -> the always-on UDS socket (on the baton).
+        return PreparedLLMSOC(
+            env_action_socket=(resolve_socket_path(cfg) if self.uses_env_actions else None),
+            **{**es, **agent})
 
     # -- box agent deploy (the defender's in-environment effector) ---------------------------------
     # Copied per dynamic-defender plugin (box_agent_install.sh co-located), like prepare_box_es. Ships the
