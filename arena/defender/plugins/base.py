@@ -89,6 +89,14 @@ class DefenderPlugin(BaseModel):
     # False = a detect-only defender (canary, a plain SOC) that mutates nothing and needs no channel.
     uses_env_actions: ClassVar[bool] = False
 
+    # Resolve this plugin's own external code checkout + interpreter (helpers you may CALL from run()/
+    # setup(); a self-contained defender with no code_dir_field never uses them).
+    def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_dir(self.code_dir_field)
+
+    def _code_python(self, cfg: ExperimentManagerConfig) -> Path:
+        return cfg.plugin_python(self.code_dir_field, self.code_python_field)
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -120,45 +128,6 @@ class DefenderPlugin(BaseModel):
         this by default; override start() instead — e.g. a box-resident defender launching over SSH — if you
         need the scoped access at launch. Mirrors AttackerPlugin.run()."""
         raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
-
-    async def start(
-        self,
-        prepared: "PreparedDefender",
-        config_path: Path,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        access=None,
-    ) -> asyncio.subprocess.Process:
-        """OPTIONAL (default: call run()). Launch the defender run loop. Mirrors AttackerPlugin.start();
-        the run_start wrapper calls this with the scoped `access`. The default runs run() as a local harness
-        subprocess and ignores `prepared`/`access`. A box-resident defender OVERRIDES this to launch its
-        runner ON THE BOX over SSH via `access` (and, if it issues env actions, to open its own ssh -R
-        tunnel first) — the box-launch machinery lives on that plugin, not here (see llm_soc_box / canary)."""
-        return await self.run(config_path, experiment_name, cfg)
-
-    async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
-        """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop) — for a
-        box-resident defender this is the local `ssh -tt` process, whose SIGTERM tears the remote runner
-        down with it; a plugin that needs a cleaner remote kill overrides this to use `access`."""
-        if getattr(experiment, "defender_pid", None):
-            try:
-                os.kill(experiment.defender_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
-        """OPTIONAL. Pull defender-side logs into dest. Default no-op — the harness-run defender's logs are
-        already local. A box-resident defender overrides this to pull its box logs via `access`, mirroring
-        AttackerPlugin.collect_logs."""
-
-    @classmethod
-    def example_prepared(cls) -> "PreparedDefender":
-        """OPTIONAL. A representative PreparedDefender for exercising build_config() OFFLINE — without
-        provision_box() or a cloud/box ES. Twin of AttackerPlugin.example_prepared: the default empty baton
-        suits defenders whose build_config() ignores `prepared`; a telemetry defender that reads es_url /
-        indices off its baton overrides this so the coupling is discoverable and conformance tests
-        (tests/test_plugin_conformance.py) can build its config without provision_box()."""
-        return PreparedDefender()
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig,
                     bastion_ip: Optional[str] = None, access=None) -> "PreparedDefender":
@@ -205,6 +174,125 @@ class DefenderPlugin(BaseModel):
         log(experiment_name, f"Defender armed ({self.type})")
         return prepared
 
+    async def start(
+        self,
+        prepared: "PreparedDefender",
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        access=None,
+    ) -> asyncio.subprocess.Process:
+        """OPTIONAL (default: call run()). Launch the defender run loop. Mirrors AttackerPlugin.start();
+        the run_start wrapper calls this with the scoped `access`. The default runs run() as a local harness
+        subprocess and ignores `prepared`/`access`. A box-resident defender OVERRIDES this to launch its
+        runner ON THE BOX over SSH via `access` (and, if it issues env actions, to open its own ssh -R
+        tunnel first) — the box-launch machinery lives on that plugin, not here (see llm_soc_box / canary)."""
+        return await self.run(config_path, experiment_name, cfg)
+
+    async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
+        """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop) — for a
+        box-resident defender this is the local `ssh -tt` process, whose SIGTERM tears the remote runner
+        down with it; a plugin that needs a cleaner remote kill overrides this to use `access`."""
+        if getattr(experiment, "defender_pid", None):
+            try:
+                os.kill(experiment.defender_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    async def teardown(
+        self,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+    ) -> None:
+        """Best-effort cleanup of harness-side resources this defender created that the
+        environment's own teardown doesn't already handle. Runs before the environment
+        teardown. Default no-op; the caller (main.py) already wraps this in try/except,
+        same best-effort treatment as log collection - a defender teardown failure must
+        not block reclaiming the environment's VMs.
+
+        NOTE: stray VMs a defender stood up outside the topology (decoys) are NOT the
+        defender's problem to reap - deleting a VM is backend-specific, and defenders are
+        backend-agnostic. The ENVIRONMENT sweeps those on its own networks as the first
+        step of its teardown (see MHBenchEnvironment._teardown_dynamic_hosts)."""
+        return None
+
+    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
+        """OPTIONAL. Pull defender-side logs into dest. Default no-op — the harness-run defender's logs are
+        already local. A box-resident defender overrides this to pull its box logs via `access`, mirroring
+        AttackerPlugin.collect_logs."""
+
+    @classmethod
+    def example_prepared(cls) -> "PreparedDefender":
+        """OPTIONAL. A representative PreparedDefender for exercising build_config() OFFLINE — without
+        provision_box() or a cloud/box ES. Twin of AttackerPlugin.example_prepared: the default empty baton
+        suits defenders whose build_config() ignores `prepared`; a telemetry defender that reads es_url /
+        indices off its baton overrides this so the coupling is discoverable and conformance tests
+        (tests/test_plugin_conformance.py) can build its config without provision_box()."""
+        return PreparedDefender()
+
+    async def provision_box(
+        self,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        bastion_ip: Optional[str] = None,
+        defender_env_spec=None,
+        defender_access=None,
+        needs_agent: bool = False,
+    ) -> "PreparedDefender":
+        """PHASE A — produce the baton BEFORE build_config (symmetric with the attacker's setup()→prepared).
+        A telemetry defender overrides this to stand up its per-experiment box ES (+ the box agent when
+        needs_agent) and return a PreparedDefender carrying es_url / falco_index / sysflow_index /
+        box_agent_* — which build_config() then bakes into the runner config. Taking env_spec/access as
+        args (not reading a written config) is what lets it run before build_config. Default: an empty
+        baton, for a defender with no box telemetry (canary / velociraptor)."""
+        return PreparedDefender()
+
+    async def prepare(
+        self,
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+    ) -> "PreparedDefender":
+        """EXTERNAL arming phase — the arena calls this AFTER build_config()/config-write and BEFORE
+        run(), and blocks on it. A deception defender overrides it to run its strategy's external arming
+        (deploy decoys / plant honey-creds) to completion, so the slow, failure-prone arming finishes —
+        and raises HERE if it fails — before the attacker starts. It returns a PreparedDefender; run() then
+        only launches the reactive loop.
+
+        Default: no-op (an empty baton), for defenders with no external arming (e.g. canary). Whether any
+        arming actually happens is the strategy's call (Perry's Strategy.ARMS_IN_SETUP): a strategy that
+        arms inside its loop makes this a no-op and keeps using the readiness marker."""
+        return PreparedDefender()
+
+    def box_ingress(self) -> dict[str, list[int]]:
+        """The defender-requested box-ingress this plugin needs the ENVIRONMENT to open, by kind:
+
+            "telemetry": [9200]  -> the env relay routes sensor telemetry to the box ES on these
+                                    ports (no new victim-facing firewall port opens).
+            "forward":   [8000]  -> a victim->mgmt->box raw-TCP passthrough + a victim->mgmt SG rule
+                                    on these ports (server-mediated EDR clients beacon in).
+
+        The harness reads this at defender arm and calls `request-ingress` with exactly these ports,
+        so the box's exposed surface matches precisely what the defender uses. A defender that needs
+        nothing returns {} (default) and opens ZERO box ports. Config-aware: e.g. a diagnostic-only
+        canary that runs no telemetry checks opens nothing."""
+        return {}
+
+    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
+        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
+        specs — the same shape EnvironmentPlugin.capacity() returns, so the arena simply appends them to
+        the topology's footprint at admission. The cluster then holds room for `topology + this budget`
+        BEFORE the experiment is admitted, so every mid-run add_host draws from an already-reserved pool
+        and can never block or oversubscribe; the arena rejects an add that would exceed the ceiling.
+
+        OPT-IN, like box_ingress(): a defender that never changes topology (canary, velociraptor, a
+        passive SOC) returns [] (default) and needs no other change — the whole dynamic-host path is
+        inert for it (topology + 0 reserved, no env↔defender dynamic contract). Only a defender that
+        actually requests hosts (a deception/decoy strategy) overrides this. Pairing a non-empty budget
+        with an environment whose supports_dynamic_topology() is False is a contract violation the arena
+        catches at deploy time."""
+        return []
+
     def _write_runner_config(self, experiment_name: str, cfg: ExperimentManagerConfig, env_spec, access,
                              bastion_ip, prepared: "PreparedDefender", env_action_socket, box_channel=None) -> Path:
         """FRAMEWORK (called by setup()): build_config(env_spec, baton) → forward the credential-free
@@ -250,97 +338,71 @@ class DefenderPlugin(BaseModel):
         log(experiment_name, f"Prepared defender ({self.type}) config: {config_path}")
         return config_path
 
-    async def provision_box(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        bastion_ip: Optional[str] = None,
-        defender_env_spec=None,
-        defender_access=None,
-        needs_agent: bool = False,
-    ) -> "PreparedDefender":
-        """PHASE A — produce the baton BEFORE build_config (symmetric with the attacker's setup()→prepared).
-        A telemetry defender overrides this to stand up its per-experiment box ES (+ the box agent when
-        needs_agent) and return a PreparedDefender carrying es_url / falco_index / sysflow_index /
-        box_agent_* — which build_config() then bakes into the runner config. Taking env_spec/access as
-        args (not reading a written config) is what lets it run before build_config. Default: an empty
-        baton, for a defender with no box telemetry (canary / velociraptor)."""
-        return PreparedDefender()
-
-    async def prepare(
-        self,
-        config_path: Path,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-    ) -> "PreparedDefender":
-        """EXTERNAL arming phase — the arena calls this AFTER build_config()/config-write and BEFORE
-        run(), and blocks on it. A deception defender overrides it to run its strategy's external arming
-        (deploy decoys / plant honey-creds) to completion, so the slow, failure-prone arming finishes —
-        and raises HERE if it fails — before the attacker starts. It returns a PreparedDefender; run() then
-        only launches the reactive loop.
-
-        Default: no-op (an empty baton), for defenders with no external arming (e.g. canary). Whether any
-        arming actually happens is the strategy's call (Perry's Strategy.ARMS_IN_SETUP): a strategy that
-        arms inside its loop makes this a no-op and keeps using the readiness marker."""
-        return PreparedDefender()
-
-    async def teardown(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-    ) -> None:
-        """Best-effort cleanup of harness-side resources this defender created that the
-        environment's own teardown doesn't already handle. Runs before the environment
-        teardown. Default no-op; the caller (main.py) already wraps this in try/except,
-        same best-effort treatment as log collection - a defender teardown failure must
-        not block reclaiming the environment's VMs.
-
-        NOTE: stray VMs a defender stood up outside the topology (decoys) are NOT the
-        defender's problem to reap - deleting a VM is backend-specific, and defenders are
-        backend-agnostic. The ENVIRONMENT sweeps those on its own networks as the first
-        step of its teardown (see MHBenchEnvironment._teardown_dynamic_hosts)."""
-        return None
-
-    def box_ingress(self) -> dict[str, list[int]]:
-        """The defender-requested box-ingress this plugin needs the ENVIRONMENT to open, by kind:
-
-            "telemetry": [9200]  -> the env relay routes sensor telemetry to the box ES on these
-                                    ports (no new victim-facing firewall port opens).
-            "forward":   [8000]  -> a victim->mgmt->box raw-TCP passthrough + a victim->mgmt SG rule
-                                    on these ports (server-mediated EDR clients beacon in).
-
-        The harness reads this at defender arm and calls `request-ingress` with exactly these ports,
-        so the box's exposed surface matches precisely what the defender uses. A defender that needs
-        nothing returns {} (default) and opens ZERO box ports. Config-aware: e.g. a diagnostic-only
-        canary that runs no telemetry checks opens nothing."""
-        return {}
-
-    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
-        """The MAX extra VMs this defender may spin up during the run, as (vcpus, ram_mb, disk_gb)
-        specs — the same shape EnvironmentPlugin.capacity() returns, so the arena simply appends them to
-        the topology's footprint at admission. The cluster then holds room for `topology + this budget`
-        BEFORE the experiment is admitted, so every mid-run add_host draws from an already-reserved pool
-        and can never block or oversubscribe; the arena rejects an add that would exceed the ceiling.
-
-        OPT-IN, like box_ingress(): a defender that never changes topology (canary, velociraptor, a
-        passive SOC) returns [] (default) and needs no other change — the whole dynamic-host path is
-        inert for it (topology + 0 reserved, no env↔defender dynamic contract). Only a defender that
-        actually requests hosts (a deception/decoy strategy) overrides this. Pairing a non-empty budget
-        with an environment whose supports_dynamic_topology() is False is a contract violation the arena
-        catches at deploy time."""
-        return []
-
-    # Resolve this plugin's own external code checkout + interpreter (helpers you may CALL from run()/
-    # setup(); a self-contained defender with no code_dir_field never uses them).
-    def _code_dir(self, cfg: ExperimentManagerConfig) -> Path:
-        return cfg.plugin_dir(self.code_dir_field)
-
-    def _code_python(self, cfg: ExperimentManagerConfig) -> Path:
-        return cfg.plugin_python(self.code_dir_field, self.code_python_field)
-
     # ========================================================================
     # FRAMEWORK — the arena calls these; do NOT override. (See the class docstring.)
     # ========================================================================
+
+    @classmethod
+    def validate_built_config(cls, built: dict) -> None:
+        """Assert build_config()'s output carries every key the runner requires (REQUIRED_CONFIG_KEYS).
+        Called by the arena right after build_config() — before it injects the arena-provided keys — so a
+        plugin whose config drifts from what its runner reads fails fast with a precise message."""
+        if not cls.REQUIRED_CONFIG_KEYS:
+            return
+        if not isinstance(built, dict):
+            raise ValueError(f"{cls.__name__}.build_config() returned {type(built).__name__}, not a dict")
+        missing = cls.REQUIRED_CONFIG_KEYS - built.keys()
+        if missing:
+            raise ValueError(
+                f"{cls.__name__}.build_config() omitted required key(s) {sorted(missing)} declared in "
+                f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
+
+    @staticmethod
+    def primary_access(access) -> "DefenderSetupAccess":
+        """The first scoped DefenderSetupAccess (mirrors AttackerPlugin.primary_access by shape). WARNING:
+        for the ATTACKER access[0] is the single foothold (correct), but the DEFENDER's access list is
+        VICTIMS-FIRST / box-last (see deployer.defender_setup_access), so access[0] is a VICTIM, NOT the
+        defender box. A box-resident defender MUST select its box by env_spec.box.ip (see the plugin's
+        _launch_on_box) — this helper is only a last-resort fallback when no box ip is available."""
+        if not access:
+            raise RuntimeError("no DefenderSetupAccess passed to the defender — the arena must pass it to run_setup()")
+        return access[0]
+
+    # ------------------------------------------------------------------ scoped access
+    # Mirrors AttackerPlugin's foothold-access recovery. setup()/run_setup receive the scoped
+    # DefenderSetupAccess list from the arena (experiment._defender_access), but run_start/run_stop/
+    # run_collect_logs run later (a failure path, or a clean-slate stop after a restart) where it isn't in
+    # scope — so run_setup persists it and the wrappers load it back + thread it to start()/stop()/
+    # collect_logs() (symmetric with the attacker). A box-resident defender's start() reaches the box with
+    # it; a harness-run defender's start() ignores it (creds already in the written config). The attacker
+    # persists ONE entry (its single foothold); the defender persists the WHOLE list (box AND victims).
+    _ACCESS_FILE: ClassVar[str] = "setup_access.json"
+
+    @classmethod
+    def _access_path(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
+        return output_root(experiment_name, cfg) / experiment_name / "defender" / cls._ACCESS_FILE
+
+    def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig, access) -> None:
+        """Internal (run_setup): write the scoped access list so the run_* wrappers can recover it.
+        Persists the whole list (box + victims), unlike the attacker's single primary."""
+        path = self._access_path(experiment_name, cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([a.model_dump() for a in (access or [])]))
+
+    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig):
+        """Internal (run_* wrappers): recover the persisted scoped access list, or None if none was
+        persisted or it can't be read (mirrors AttackerPlugin._load_access)."""
+        try:
+            raw = json.loads(self._access_path(experiment_name, cfg).read_text())
+            return [DefenderSetupAccess.model_validate(a) for a in raw]
+        except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
+            return None
+
+    @staticmethod
+    def _lifecycle(experiment):
+        """The DefenderLifecycle the arena attached (mirrors AttackerPlugin._lifecycle); None in tests
+        that drive run_setup without one."""
+        return getattr(experiment, "_defender_lifecycle", None)
 
     async def run_setup(self, experiment, cfg: ExperimentManagerConfig) -> "PreparedDefender":
         """The SETUP phase — the defender analog of AttackerPlugin.run_setup, and the SAME shape: emit
@@ -396,63 +458,6 @@ class DefenderPlugin(BaseModel):
         a box-resident defender uses it to pull box logs."""
         access = self._load_access(experiment.experiment_name, cfg)
         await self.collect_logs(experiment, cfg, dest, access=access)
-
-    # ------------------------------------------------------------------ scoped access
-    # Mirrors AttackerPlugin's foothold-access recovery. setup()/run_setup receive the scoped
-    # DefenderSetupAccess list from the arena (experiment._defender_access), but run_start/run_stop/
-    # run_collect_logs run later (a failure path, or a clean-slate stop after a restart) where it isn't in
-    # scope — so run_setup persists it and the wrappers load it back + thread it to start()/stop()/
-    # collect_logs() (symmetric with the attacker). A box-resident defender's start() reaches the box with
-    # it; a harness-run defender's start() ignores it (creds already in the written config). The attacker
-    # persists ONE entry (its single foothold); the defender persists the WHOLE list (box AND victims).
-    _ACCESS_FILE: ClassVar[str] = "setup_access.json"
-
-    @staticmethod
-    def primary_access(access) -> "DefenderSetupAccess":
-        """The first scoped DefenderSetupAccess (mirrors AttackerPlugin.primary_access by shape). WARNING:
-        for the ATTACKER access[0] is the single foothold (correct), but the DEFENDER's access list is
-        VICTIMS-FIRST / box-last (see deployer.defender_setup_access), so access[0] is a VICTIM, NOT the
-        defender box. A box-resident defender MUST select its box by env_spec.box.ip (see the plugin's
-        _launch_on_box) — this helper is only a last-resort fallback when no box ip is available."""
-        if not access:
-            raise RuntimeError("no DefenderSetupAccess passed to the defender — the arena must pass it to run_setup()")
-        return access[0]
-
-    @classmethod
-    def _access_path(cls, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
-        return output_root(experiment_name, cfg) / experiment_name / "defender" / cls._ACCESS_FILE
-
-    def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig, access) -> None:
-        """Internal (run_setup): write the scoped access list so the run_* wrappers can recover it.
-        Persists the whole list (box + victims), unlike the attacker's single primary."""
-        path = self._access_path(experiment_name, cfg)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps([a.model_dump() for a in (access or [])]))
-
-    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig):
-        """Internal (run_* wrappers): recover the persisted scoped access list, or None if none was
-        persisted or it can't be read (mirrors AttackerPlugin._load_access)."""
-        try:
-            raw = json.loads(self._access_path(experiment_name, cfg).read_text())
-            return [DefenderSetupAccess.model_validate(a) for a in raw]
-        except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
-            return None
-
-
-    @classmethod
-    def validate_built_config(cls, built: dict) -> None:
-        """Assert build_config()'s output carries every key the runner requires (REQUIRED_CONFIG_KEYS).
-        Called by the arena right after build_config() — before it injects the arena-provided keys — so a
-        plugin whose config drifts from what its runner reads fails fast with a precise message."""
-        if not cls.REQUIRED_CONFIG_KEYS:
-            return
-        if not isinstance(built, dict):
-            raise ValueError(f"{cls.__name__}.build_config() returned {type(built).__name__}, not a dict")
-        missing = cls.REQUIRED_CONFIG_KEYS - built.keys()
-        if missing:
-            raise ValueError(
-                f"{cls.__name__}.build_config() omitted required key(s) {sorted(missing)} declared in "
-                f"REQUIRED_CONFIG_KEYS — its runner reads them. Got keys: {sorted(built)}")
 
     # ------------------------------------------------------------------
     # Readiness handshake
@@ -512,10 +517,3 @@ class DefenderPlugin(BaseModel):
                     f"{cfg.defender_ready_timeout_seconds}s - see {marker.parent / 'defender.log'}"
                 )
             await asyncio.sleep(2)
-
-    @staticmethod
-    def _lifecycle(experiment):
-        """The DefenderLifecycle the arena attached (mirrors AttackerPlugin._lifecycle); None in tests
-        that drive run_setup without one."""
-        return getattr(experiment, "_defender_lifecycle", None)
-
