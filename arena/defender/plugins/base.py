@@ -102,6 +102,19 @@ class DefenderPlugin(BaseModel):
     box_python: ClassVar[Optional[str]] = None
     _BOX_DIR: ClassVar[str] = "/opt/arena-defender"  # where the runner + config (+ uv venv) live on the box
 
+    # A runs_on_box ENGINE defender (box_python set) that needs a whole code tree on the box — not just the
+    # single stdlib runner.py — sets this True and overrides box_engine_src() to point at the repo to ship.
+    # _launch_on_box rsyncs that tree (+ its .env) to the box's engine dir, _box_run_command installs its
+    # requirements.txt into the uv venv and runs the runner with cwd + PYTHONPATH = the shipped engine (so a
+    # repo-backed defender like Perry's FalcoLLM runs box-resident, reading box-local ES, routing cloud
+    # actions to the env over the ssh -R tunnel). The stdlib runner / declared box_pip_spec paths are unchanged.
+    box_ships_engine: ClassVar[bool] = False
+
+    def box_engine_src(self, cfg: ExperimentManagerConfig) -> Optional[Path]:
+        """The local code tree a box_ships_engine defender ships to the box (e.g. the Perry repo). Only
+        consulted when box_ships_engine is True; the base returns None (nothing to ship)."""
+        return None
+
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
@@ -456,7 +469,8 @@ class DefenderPlugin(BaseModel):
     def _box_paths(self) -> dict:
         d = self._BOX_DIR
         return {"dir": d, "runner": f"{d}/runner.py", "config": f"{d}/defender_config.json",
-                "venv": f"{d}/venv", "log_dir": f"{d}/logs", "ready": f"{d}/logs/defender_ready"}
+                "venv": f"{d}/venv", "engine": f"{d}/engine", "log_dir": f"{d}/logs",
+                "ready": f"{d}/logs/defender_ready"}
 
     def box_pip_spec(self) -> str:
         """What `uv pip install` installs for a uv-venv box engine (e.g. the Perry defender package). Only
@@ -477,15 +491,32 @@ class DefenderPlugin(BaseModel):
         prelude = f"set -e; mkdir -p {shlex.quote(p['dir'])} {shlex.quote(p['log_dir'])}"
         if self.box_python is None:
             return f"{prelude}; exec python3 {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
-        venv_py = shlex.quote(p["venv"] + "/bin/python")
+        venv_py = p["venv"] + "/bin/python"
+        # box_ships_engine: install the shipped repo's requirements.txt and run the runner with cwd +
+        # PYTHONPATH = the shipped engine (the runner imports the repo's packages + reads its config/.env
+        # relative to cwd). Otherwise: install the declared box_pip_spec() and run the lone stdlib-light runner.
+        if self.box_ships_engine:
+            install = f"uv pip install --python {shlex.quote(venv_py)} -r {shlex.quote(p['engine'] + '/requirements.txt')}"
+            # Fail loud + EARLY if the box has no outbound internet (uv's CPython download, PyPI wheels, and
+            # the engine's own LLM API calls all need it) — a precise exit beats a mid-run hang. Live-proven
+            # green on the OpenStack estate; this is the regression guard.
+            preflight = ("curl -sf -m 25 -o /dev/null https://pypi.org/simple/ || "
+                         "{ echo 'BOX EGRESS FAIL: no route to pypi.org — a box-resident engine needs outbound internet'; exit 3; }; ")
+            run = (f"cd {shlex.quote(p['engine'])}; exec env PYTHONPATH={shlex.quote(p['engine'])} "
+                   f"{shlex.quote(venv_py)} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}")
+        else:
+            install = f"uv pip install --python {shlex.quote(venv_py)} {self.box_pip_spec()}"
+            preflight = ""
+            run = f"exec {shlex.quote(venv_py)} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
         boot = (
             "export PATH=$HOME/.local/bin:$PATH; "
+            f"{preflight}"
             "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh; "
             "export PATH=$HOME/.local/bin:$PATH; "
             f"test -d {shlex.quote(p['venv'])} || uv venv {shlex.quote(p['venv'])} --python {shlex.quote(self.box_python)}; "
-            f"uv pip install --python {venv_py} {self.box_pip_spec()}"
+            f"{install}"
         )
-        return f"{prelude}; {boot}; exec {venv_py} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
+        return f"{prelude}; {boot}; {run}"
 
     @staticmethod
     def _tty_ssh(base: list[str]) -> list[str]:
@@ -504,6 +535,36 @@ class DefenderPlugin(BaseModel):
         _, err = await asyncio.wait_for(proc.communicate(content.encode()), timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(f"shipping {remote_path} to the box failed: {err.decode()[-400:]}")
+
+    async def _ship_engine_to_box(self, base: list[str], paths: dict, cfg: ExperimentManagerConfig) -> None:
+        """Rsync a box_ships_engine defender's engine tree (its code packages + requirements.txt + .env) to
+        the box's engine dir, over the box's own ssh routing (the bastion ProxyCommand in ssh_base). Excludes
+        .git/__pycache__/*.pyc and the heavy ansible/artifacts trees the box engine never uses (it routes
+        infra actions to the env over the tunnel; it runs no ansible locally)."""
+        src = self.box_engine_src(cfg)
+        if src is None:
+            raise RuntimeError(
+                f"{type(self).__name__} sets box_ships_engine=True but box_engine_src() returned None")
+        src = Path(src)
+        engine_dir = paths["engine"]
+        # ssh transport for rsync: ssh_base() minus the leading "ssh" and the trailing user@host target.
+        ssh_e = "ssh " + " ".join(shlex.quote(o) for o in base[1:-1])
+        target = base[-1]
+        mk = await asyncio.create_subprocess_exec(
+            *base, f"mkdir -p {shlex.quote(engine_dir)}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, mkerr = await asyncio.wait_for(mk.communicate(), timeout=60)
+        if mk.returncode != 0:
+            raise RuntimeError(f"creating engine dir on box failed: {mkerr.decode()[-300:]}")
+        proc = await asyncio.create_subprocess_exec(
+            "rsync", "-a", "--delete", "-e", ssh_e,
+            "--exclude", ".git", "--exclude", "__pycache__", "--exclude", "*.pyc",
+            "--exclude", "artifacts", "--exclude", "ansible",
+            f"{str(src).rstrip('/')}/", f"{target}:{engine_dir}/",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=600)
+        if proc.returncode != 0:
+            raise RuntimeError(f"shipping engine tree to the box failed: {err.decode()[-400:]}")
 
     @staticmethod
     def _rewrite_access_keys(access_entries: list, key_map: dict) -> list:
@@ -558,6 +619,10 @@ class DefenderPlugin(BaseModel):
         base = box.ssh_base()
         p = self._box_paths()
         built["log_dir"] = p["log_dir"]
+        # box_ships_engine: rsync the plugin's engine tree (+ its .env) to the box FIRST, so _box_run_command
+        # can install its requirements.txt into the uv venv and run the runner with cwd/PYTHONPATH = the engine.
+        if self.box_ships_engine:
+            await self._ship_engine_to_box(base, p, cfg)
         # thread the scoped creds to the box (ship keys + rewrite the access paths to box-local copies) so
         # the box runner reaches victims with keys that exist on the box, not harness paths.
         if built.get("defender_setup_access"):
