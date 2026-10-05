@@ -36,11 +36,12 @@ class DefenderPlugin(BaseModel):
         build_config(experiment_name, env_spec, prepared) -> dict  the contents of the runner's config file
         ui_schema() -> PluginUISchema                              the dashboard form for this plugin
         run(config_path, experiment_name, cfg)                     launch the reactive-loop process
-      Optional (the base provides a safe default):
-        setup(...)                              bespoke sensor install on the estate     (default: no-op)
-        provision_box(...) -> PreparedDefender  stand up the per-exp box ES / box agent; returns the baton
-                                                build_config bakes in                    (default: empty baton)
-        prepare(config_path, ...) -> PreparedDefender  EXTERNAL arming (deploy decoys / plant honey-creds),
+      Optional HOOKS the setup() template calls (the base provides a safe default — override the HOOK, not
+      setup()):
+        provision_box(...) -> PreparedDefender  stand up the per-exp box ES / box agent (or other infra,
+                                                e.g. velociraptor's server/clients); returns the baton the
+                                                plugin's build_config bakes in           (default: empty baton)
+        prepare(config_path, ...)               EXTERNAL arming (deploy decoys / plant honey-creds),
                                                 reads the written config                 (default: no-op)
         teardown(experiment_name, cfg)          release host-side resources at env teardown (default: no-op)
         box_ingress() -> {kind: [ports]}        box ports the env should open            (default: {} = none)
@@ -48,10 +49,12 @@ class DefenderPlugin(BaseModel):
         REQUIRED_CONFIG_KEYS / code_dir_field / code_python_field / executes_from_box  — declarations.
 
     FRAMEWORK — the arena calls these; do NOT override:
-        run_setup(experiment, cfg) -> PreparedDefender — the SETUP phase the arena drives: it runs setup()
-            + provision_box() + build_config() + writes the config + prepare(), fully arming the defender.
-            The arena calls run_setup (then run_defender only launches run()); it never calls your
-            setup()/provision_box()/prepare()/build_config() directly.
+        run_setup(experiment, cfg) -> PreparedDefender — the SETUP phase the arena drives: emits
+            SETUP_STARTED, then calls setup(). Shape-identical to the attacker's run_setup (a bare setup()).
+        setup(experiment, cfg, bastion_ip, access) -> PreparedDefender — the arming TEMPLATE (do NOT
+            override — override the provision_box()/prepare() hooks instead). It runs provision_box() +
+            _write_runner_config (build_config + inject creds/routing + write) + prepare(), fully arming the
+            defender. The arena never calls your provision_box()/prepare()/build_config() directly.
         wait_until_ready / ready_marker_path / clear_ready_marker — the readiness-marker gate: the arena
             blocks on it before the attacker runs; your RUNNER touches the marker once its loop is armed.
         validate_built_config, __init_subclass__ (registration), _lifecycle.
@@ -167,33 +170,73 @@ class DefenderPlugin(BaseModel):
         (tests/test_plugin_conformance.py) can build its config without provision_box()."""
         return PreparedDefender()
 
-    async def setup(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        bastion_ip: Optional[str] = None,
-        defender_env_spec=None,
-        defender_access=None,
-    ) -> None:
-        """One-time setup this defender needs before it can run (e.g. ensuring shared
-        infrastructure like Elasticsearch is up, installing Falco on the experiment's
-        hosts). Runs once, before build_config()/run() - default no-op. Mirrors
-        AttackerPlugin.setup(); unlike that one there's no per-defender resource (a C2
-        container) to tear down on failure, so this has no transactional cleanup -
-        raising here just fails the defender start (see run_defender()'s caller).
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> "PreparedDefender":
+        """Fully ARM the defender and RETURN its baton — the single arming entry, shape-identical to the
+        attacker's setup(): stand up box infra (provision_box) → build + write the runner config → external
+        arming (prepare) → return the baton. run_setup() just calls this, so BOTH agents' run_setup are the
+        same shape (bare setup() call). Plugins override the HOOKS provision_box()/prepare() + build_config(),
+        NOT setup() itself (the template).
 
-        `bastion_ip` is this experiment's own bastion floating IP (from MHBench
-        provisioning) - NOT the same as cfg.arena_host_ip (the harness's own fixed
-        address, used for Elasticsearch). Any AnsibleRunner use needs THIS one to
-        SSH-ProxyCommand into the experiment's internal hosts at all.
+        `access` is the scoped DefenderSetupAccess list (key + bastion routing); env_spec and the
+        dynamic-topology flag are read off `experiment` (mirroring the attacker reading
+        experiment._attacker_env_spec). `bastion_ip` is this experiment's own bastion floating IP — NOT
+        cfg.arena_host_ip (the harness's own fixed address). Raising here fails the defender start."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
+        # The dynamic topology-mutation window (+ box agent) is armed only for an executes_from_box defender;
+        # the arena sets experiment._env_dynamic before this runs.
+        env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
+        needs_agent = env_action_socket is not None
+        # HOOK A — stand up the per-experiment box ES / box agent and produce the baton (default: empty).
+        prepared = await self.provision_box(
+            experiment_name, cfg, bastion_ip,
+            defender_env_spec=env_spec, defender_access=access, needs_agent=needs_agent)
+        # build + write the runner config from the baton (credential injection kept out of build_config).
+        config_path = self._write_runner_config(
+            experiment_name, cfg, env_spec, access, bastion_ip, prepared, env_action_socket)
+        # HOOK B — EXTERNAL arming (deploy decoys / plant honey-creds) that CONSUMES the written config;
+        # blocks + raises before the attacker starts (default: no-op). The attacker's twin: it deploys its
+        # foothold agent + waits-for-beacon inside its own setup().
+        await self.prepare(config_path, experiment_name, cfg)
+        log(experiment_name, f"Defender armed ({self.type})")
+        return prepared
 
-        `defender_env_spec` (agent-facing: host inventory + the defender box) and
-        `defender_access` (setup-time: scoped key + bastion routing per host, a
-        list[SetupAccess]) are produced by the ENVIRONMENT plugin and passed in so a
-        defender that needs the box/victims at setup time reads them from here instead
-        of reaching into a specific backend's deployer. They are the same values the
-        arena injects into build_config()'s output for the runner; default None for
-        defenders whose setup() doesn't need them."""
+    def _write_runner_config(self, experiment_name: str, cfg: ExperimentManagerConfig, env_spec, access,
+                             bastion_ip, prepared: "PreparedDefender", env_action_socket) -> Path:
+        """FRAMEWORK (called by setup()): build_config(env_spec, baton) → forward the credential-free
+        DefenderEnvSpec → INJECT the credential-bearing SetupAccess/routing (kept OUT of build_config's own
+        output by the leak guard) + management_ip/bastion_ip/log_dir + the dynamic-topology channel → write
+        the runner config. Returns the config path. The written config IS part of arming: prepare() reads
+        it, and so does the run loop. (The baton's box fields are baked by each plugin's own build_config —
+        PreparedDefender is opaque to the base.)"""
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, prepared)
+        type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        # Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts on
+        # victims directly, it asks the box agent (which alone holds victim access) and the env.
+        _access = list(access or [])
+        if getattr(type(self), "executes_from_box", False) and env_spec is not None:
+            _box = getattr(env_spec, "box", None)
+            _box_ip = getattr(_box, "ip", None) if _box else None
+            if _box_ip:
+                _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
+        built["defender_setup_access"] = [a.model_dump() for a in _access]
+        # management_ip is the harness's own fixed host (NOT an ES address); bastion_ip is this experiment's
+        # ephemeral bastion FIP the runner ProxyCommands through to reach internal hosts.
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        # Dynamic topology-mutation channel (UDS, no token — unreachable from in-env); executes_from_box only.
+        if env_action_socket is not None:
+            built["env_action_socket"] = env_action_socket
+            built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
+        config_path.write_text(json.dumps(built, indent=2))
+        log(experiment_name, f"Prepared defender ({self.type}) config: {config_path}")
+        return config_path
 
     async def provision_box(
         self,
@@ -287,90 +330,26 @@ class DefenderPlugin(BaseModel):
     # ========================================================================
 
     async def run_setup(self, experiment, cfg: ExperimentManagerConfig) -> "PreparedDefender":
-        """The SETUP phase — the defender analog of AttackerPlugin.run_setup: fully ARM the defender, so
-        the RUN phase (run_defender) only launches the loop. Emit SETUP_STARTED, then:
-          setup() + provision_box()   -> the box ES / box-agent baton (what build_config consumes)
-          build_config(env_spec, baton) + inject creds/routing + write the runner config
-          prepare()                   -> EXTERNAL arming (decoy / honey-cred deploy) that consumes that config
-        Returns the PreparedDefender from prepare(). Symmetric with the attacker, whose run_setup also runs
-        build_config + writes the config after setup() (its arming — the C2 — happens in setup() itself).
-
-        For the defender build_config lives HERE, not in run_defender: the written config IS part of arming
-        (prepare() reads it, and so does the run loop). The credential-bearing SetupAccess + bastion routing
-        are injected into the written config (kept OUT of build_config's own output by the leak guard),
-        because the defender's runner acts on victims/the box during the run.
+        """The SETUP phase — the defender analog of AttackerPlugin.run_setup, and the SAME shape: emit
+        SETUP_STARTED, then setup() fully arms the defender (stand up box infra → build+write the runner
+        config → external arming) and returns the baton; run_defender then only launches run(). Both
+        agents' run_setup are shape-identical — a bare setup() call around the lifecycle signals.
 
         It does NOT emit READY: a defender is READY only once its RUNNER has armed (the readiness marker,
-        gated by wait_until_ready after run()), not when setup finishes. FAILED stays centralized in the
-        arena's defender error handler (it covers the whole setup→run block), so this just raises."""
+        gated by wait_until_ready after run()), not when setup finishes — that readiness asymmetry is the
+        one essential defender difference. FAILED stays centralized in the arena's defender error handler
+        (it covers the whole setup→run block), so this just raises."""
         lc = self._lifecycle(experiment)
         if lc is not None:
             await lc.emit(DefenderSignal.SETUP_STARTED)
         experiment_name = experiment.experiment_name
-        env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
         access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
         bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
-        # SLICE 3 SCAFFOLD: when runs_on_box, persist the scoped access so run_start/run_stop/collect can
-        # thread it at launch (mirroring the attacker) instead of it being injected into the config below.
+        # when runs_on_box, persist the scoped access so run_start/run_stop/collect thread it at launch
+        # (mirroring the attacker) instead of it being injected into the written config.
         if self.runs_on_box and access and cfg is not None:
             self._persist_access(experiment_name, cfg, access)
-        # The dynamic topology-mutation window (+ box agent) is armed only for an executes_from_box defender —
-        # the arena sets experiment._env_dynamic and opens the window before this runs.
-        env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
-        needs_agent = env_action_socket is not None
-        # Phase-A baton: box ES + ssh -L tunnel (+ box agent), produced BEFORE build_config.
-        await self.setup(experiment_name, cfg, bastion_ip,
-                         defender_env_spec=env_spec, defender_access=access)
-        prepared = await self.provision_box(
-            experiment_name, cfg, bastion_ip,
-            defender_env_spec=env_spec, defender_access=access,
-            needs_agent=needs_agent,
-        )
-        # build_config(env_spec, baton) -> write the runner config (the defender's arming config).
-        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        built = self.build_config(experiment_name, env_spec, prepared)
-        type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
-        # Forward the agent-facing DefenderEnvSpec (host inventory; NO creds) into the runner config,
-        # uniformly — it is universal + credential-free, so no plugin's build_config has to. The Phase-A box
-        # baton (es_url / indices / box agent) is OPAQUE to the base (PreparedDefender is an empty marker):
-        # a telemetry defender carries those in its OWN PreparedDefender subclass and bakes them in its OWN
-        # build_config — symmetric with the attacker's build_config baking its C2 URLs from PreparedAttacker.
-        if env_spec is not None:
-            built["defender_env_spec"] = env_spec.model_dump()
-        # INJECT the credential-bearing SetupAccess + routing (kept OUT of build_config's output by the leak
-        # guard). Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts
-        # on victims directly, it asks the box agent (which alone holds victim access) and the env.
-        # SLICE 3 TODO: a runs_on_box defender does NOT need creds in the config (it gets them via the
-        # access threaded through run_start/run_stop from the persisted SetupAccess above); skip this
-        # injection for it once box launch is live. Left in for now — harmless, and runs_on_box ships nowhere.
-        _access = list(access or [])
-        if getattr(type(self), "executes_from_box", False) and env_spec is not None:
-            _box = getattr(env_spec, "box", None)
-            _box_ip = getattr(_box, "ip", None) if _box else None
-            if _box_ip:
-                _access = [a for a in _access if getattr(a, "host", None) == _box_ip]
-        built["defender_setup_access"] = [a.model_dump() for a in _access]
-        # No plugin-named repo-path key in the config (the old "deception_dir" — dropped in PR #32): every
-        # defender runner is spawned with cwd + PYTHONPATH set to its repo and reads its repo-relative files
-        # (config/config.json) via cwd. management_ip is the harness's own fixed host (NOT an ES address);
-        # bastion_ip is this experiment's ephemeral bastion FIP the runner ProxyCommands through to reach
-        # internal hosts.
-        built["management_ip"] = cfg.arena_host_ip
-        built["bastion_ip"] = bastion_ip
-        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
-        # Dynamic topology-mutation channel (UDS, no token — unreachable from in-env); present only for an
-        # executes_from_box defender.
-        if env_action_socket is not None:
-            built["env_action_socket"] = env_action_socket
-            built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
-        config_path.write_text(json.dumps(built, indent=2))
-        log(experiment_name, f"Prepared defender ({self.type}) config: {config_path}")
-        # EXTERNAL arming (decoy / honey-cred deploy) that CONSUMES the written config. BLOCKS + raises on
-        # failure, before the attacker starts. run() then only launches the reactive loop.
-        await self.prepare(config_path, experiment_name, cfg)
-        log(experiment_name, f"Defender armed ({self.type})")
-        return prepared  # the provision_box box baton, mirroring the attacker's run_setup returning its baton
+        return await self.setup(experiment, cfg, bastion_ip, access)
 
     async def run_start(self, experiment, prepared: "PreparedDefender", config_path: Path,
                         cfg: ExperimentManagerConfig) -> "asyncio.subprocess.Process":
