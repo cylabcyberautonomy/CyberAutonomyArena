@@ -399,7 +399,8 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
             if time.monotonic() - start > timeout_s:
                 raise RuntimeError(f"box defender did not arm within {timeout_s:.0f}s (no {p['ready']})")
             await asyncio.sleep(poll_s)
-        local = self.ready_marker_path(experiment_name, cfg)  # bridge: the arena polls the LOCAL marker
-        local.parent.mkdir(parents=True, exist_ok=True)
-        local.touch()
+        # The box runner is armed. No local-marker bridge any more (the arena's readiness handshake is gone —
+        # run_setup emits READY once this returns). FOLLOW-UP: this launch+wait should move into setup() so
+        # READY is emitted after the box arms; today it still runs in start(), so for a box-resident defender
+        # READY precedes the box arming (acceptable on the set-aside box-resident line).
         return time.monotonic() - start

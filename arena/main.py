@@ -921,35 +921,32 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # mutates topology during ARMING (static decoy deploy in prepare), not only during the attack.
                 # It stays open through the attack and closes at DEACTIVATE (finally).
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _executes_from_box = getattr(type(experiment.defender), "executes_from_box", False)
                 _uses_env_actions = getattr(type(experiment.defender), "uses_env_actions", False)
-                _env_dynamic = _executes_from_box or _uses_env_actions
-                if _env_dynamic:
+                if _uses_env_actions:
                     experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)
                     experiment._env_lifecycle = _env_lc(experiment)
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                    # A BOX-RESIDENT defender (uses_env_actions, runner in-env) cannot reach the harness UDS,
-                    # so serve the env-action channel over a TOKEN'd TCP port on HARNESS-LOOPBACK and set the
-                    # per-experiment token/port BEFORE run_setup (so the runner config carries url+token and a
-                    # box-resident ARMING can already reach it). The ssh -R tunnel to the box is opened by the
-                    # DEFENDER PLUGIN itself (it owns it, like the Incalmo attacker owns its ssh -L C2 tunnel),
-                    # not here. A HARNESS-RUN executes_from_box controller keeps the tokenless UDS (set in
-                    # setup() off _env_dynamic) — its runner is on the harness.
-                    if _uses_env_actions and not _executes_from_box:
-                        from .env_action_server import (new_env_action_token, pick_free_tcp_port,
-                                                        serve_env_actions_tcp)
-                        _tcp_port = pick_free_tcp_port()  # ephemeral, per-experiment: no harness collision
-                        experiment._env_action_token = new_env_action_token()
-                        experiment._env_action_tcp_port = _tcp_port
-                        experiment._env_action_box_port = _tcp_port  # box-loopback; distinct box/exp, no collision
-                        experiment._env_action_tcp_task = asyncio.create_task(
-                            serve_env_actions_tcp("127.0.0.1", _tcp_port, registry, cfg, _openstack_lock))
-                        exp_log.info("env-action TCP server up for box defender '%s' (harness 127.0.0.1:%d, "
-                                     "token'd; the plugin opens the ssh -R tunnel to the box)",
-                                     experiment.experiment_name, _tcp_port)
+                    # Arm BOTH env-action doors and let the PLUGIN pick (the base/arena are agnostic to WHERE
+                    # the runner runs — executes_from_box is gone): the always-on UDS server (serve_env_actions,
+                    # started at boot) for a harness-run runner, AND a per-experiment token'd TCP port on
+                    # harness-loopback for an in-env runner to tunnel to. The plugin's setup() bakes whichever
+                    # endpoint it chose into its config (harness-run -> env_action_socket; box-resident ->
+                    # env_action_url+token, and the plugin opens its OWN ssh -R tunnel, like the Incalmo
+                    # attacker owns its ssh -L C2 tunnel). Set the token/port BEFORE run_setup so a box-resident
+                    # ARMING can already reach it. A harness-run defender simply ignores the (idle) TCP port.
+                    from .env_action_server import (new_env_action_token, pick_free_tcp_port,
+                                                    serve_env_actions_tcp)
+                    _tcp_port = pick_free_tcp_port()  # ephemeral, per-experiment: no harness collision
+                    experiment._env_action_token = new_env_action_token()
+                    experiment._env_action_tcp_port = _tcp_port
+                    experiment._env_action_box_port = _tcp_port  # box-loopback; distinct box/exp, no collision
+                    experiment._env_action_tcp_task = asyncio.create_task(
+                        serve_env_actions_tcp("127.0.0.1", _tcp_port, registry, cfg, _openstack_lock))
+                    exp_log.info("env-action channel armed for '%s' (UDS always-on + token'd TCP 127.0.0.1:%d; "
+                                 "the plugin picks its door)", experiment.experiment_name, _tcp_port)
                 # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
                 # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
                 # run_defender then only launches the reactive loop (the defender analog of run_attacker).
