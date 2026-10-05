@@ -138,26 +138,33 @@ capability flags (`executes_from_box`/`runs_on_box`), and the box/C2-equivalent 
 
 **Convergeable (design-artifact, not essential) — the parity-convergence slice:** earlier filed as
 "essential," but on review these are just current data-flow and SHOULD converge:
-- **access as a LIST on both — DONE on the attacker side** (`_persist_access`/`_load_access` now persist/load
-  the list; run_* hand plugins their primary foothold, so existing plugins are unchanged; a multi-foothold
-  env is now supported). Symmetric with the defender.
-- **opaque baton** — make `PreparedDefender` an empty marker subclassed per-plugin (like `PreparedAttacker`),
-  moving the es_url/index/box-agent fields into each telemetry defender's own subclass + its `build_config`,
-  and dropping the base `run_setup` field-forwarding. *Cross-repo* (Defense defenders) + touches the
-  teammate's box-agent fields → coordinated, not solo.
-- **fold `provision_box` + `prepare` into `setup()`** so defender `setup()` stands up infra + arms + blocks
-  until ready and RETURNS the baton — exactly the attacker's `setup() -> Prepared` shape. Requires the arming
-  to read the spec/baton instead of the written config, and touches every defender plugin (Defense repo) +
-  the teammate's `run_setup`/box path → the heavy, coordinated piece.
+- **access as a LIST on both — DONE** (attacker `_persist_access`/`_load_access` persist/load the list; run_*
+  hand plugins their primary foothold, so existing plugins are unchanged; multi-foothold env supported).
+- **opaque baton — DONE** (teammate, `53b1ef4`): `PreparedDefender` is now an empty marker exactly like
+  `PreparedAttacker`; each telemetry defender carries its own subclass (`PreparedLLMSOC`/…) and bakes its
+  fields in its OWN `build_config`; the base `run_setup` field-forwarding loop is gone. Attacker already
+  matched (empty `PreparedAttacker` + C2 subclasses), so no attacker change.
+- **fold `provision_box` → `setup()` — DONE** (teammate, `53b1ef4`): `provision_box()` is gone; defender
+  `setup()` now stands up infra + returns the baton, and `run_setup` is a single `prepared = await setup()`
+  → `build_config` → write → `prepare()`. Mirrors the attacker's `setup() -> Prepared` + `run_setup` shape.
+- **fold `prepare()` → `setup()` — OPEN (decision pending).** `prepare()` is the external-arming step
+  (deploy decoys / plant honey-creds). The teammate argues it's a defender-only capability with no attacker
+  twin (leave it labeled, like `box_ingress`); I think there IS a partial twin (the attacker deploys its
+  foothold agent + waits in `setup()`), so folding would be real convergence (`run_setup` becomes
+  shape-identical) — but it costs a Defense-repo runner change (arming must read the spec/baton, not the
+  written config) + a full live revalidation of all 5 defenders, for the last increment of symmetry. User
+  to decide whether the symmetry is worth that cost.
 - **`sweep_stale_state` on the defender** — add once box defenders can orphan state (uv-venvs/tunnels).
 
-**Box-deferred:** the `setup()` signature alignment folds into the `provision_box`/`prepare` convergence
-above; the readiness-marker collapse rides with the box model (`setup()` launch-and-wait).
+**Box-deferred:** the `setup()` *signature* still differs (defender `(experiment_name, cfg, bastion_ip,
+defender_env_spec, defender_access, needs_agent)` vs attacker `(experiment, cfg, bastion_ip, access)`) —
+aligning it touches every defender plugin, same cross-repo cost bucket as the `prepare()` fold; the
+cred-injection in `run_setup` collapses with the box model (`runs_on_box` threads access instead).
 
 So: slice 1 unified the shared machinery; slice 2 + the parity pass made the lifecycle surface parallel
-(+ `run_stop` guard, `example_prepared` mirror, list-access); the baton + `setup()`-fold convergences are
-coordinated cross-repo work (with the teammate). After all of it the defender stays modestly larger only for
-the truly-irreducible set above — which is correct.
+(+ `run_stop` guard, `example_prepared` mirror, list-access); the baton + `provision_box`→`setup` fold are
+now DONE (teammate). Remaining: the `prepare()` fold (user decision) + `setup()` signature alignment (cross-
+repo). After those the defender stays modestly larger only for the truly-irreducible set above — correct.
 
 ## Full conversion (convert every defender to run on the box) — per-component live work
 
