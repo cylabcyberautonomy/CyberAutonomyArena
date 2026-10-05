@@ -28,7 +28,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
@@ -43,6 +43,10 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
 
     type: Literal["canary"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "checks", "fail_closed"})
+    # Run ON THE BOX (slice 3): the canary is the control-plane-free, stdlib-only first proof of
+    # _launch_on_box — it ships its runner to the box and runs it under the box's own python3 (box_python
+    # stays None), reaching victims with the box-threaded scoped key. No uv, no TCP channel needed.
+    runs_on_box: ClassVar[bool] = True
     checks: list[str] = list(_ALL_CHECKS)
     canary_host: Optional[str] = None       # victim name/role for the canary_event read; None = first victim
     telemetry_port: int = 9200

@@ -14,6 +14,18 @@ from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 
 
+class PreparedDeception(PreparedDefender):
+    """deception's box-telemetry baton: the per-experiment box ES ssh -L tunnel + falco/sysflow indices +
+    the box-agent endpoint (the decoy deploy routes host actions through it). Opaque to the base; baked into
+    the runner config by this plugin's own build_config (symmetric with a C2 attacker's Prepared subclass)."""
+    es_url: Optional[str] = None
+    falco_index: Optional[str] = None
+    sysflow_index: Optional[str] = None
+    box_agent_host: Optional[str] = None
+    box_agent_port: Optional[int] = None
+    box_agent_token: Optional[str] = None
+
+
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     type: Literal["deception"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy"})
@@ -109,6 +121,9 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             "strategy": self.strategy,
             "arsenal": self.arsenal,
         }
+        # bake this plugin's own Phase-A box baton (es tunnel + indices + box-agent endpoint); opaque to the
+        # base, so a telemetry defender forwards it here (symmetric with the attacker baking its C2 URLs).
+        built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built
 
     async def provision_box(
@@ -136,7 +151,7 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
             box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
             agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
             baton.update(agent)
-        return PreparedDefender(**baton)
+        return PreparedDeception(**baton)
 
     async def prepare(
         self,
