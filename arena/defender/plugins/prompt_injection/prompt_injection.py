@@ -54,7 +54,8 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     type: Literal["prompt_injection"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy"})
     code_dir_field = "prompt_injection_dir"          # Defense/Perry repo for this defender (per-plugin)
-    executes_from_box = True                           # box-only execution: deploy the box agent + arm the env channel
+    executes_from_box = True                           # harness-run box-agent model: deploy the box agent (plants decoys/creds)
+    uses_env_actions = True                            # issues env-actions (decoy deploy) -> needs the serving window + UDS channel
     code_python_field = "prompt_injection_python"
     # StaticLayeredAll, not AIAttackerDetection. AIAttackerDetection is reactive -
     # it waits on a burst of Falco events and only then deploys - which confounds

@@ -385,6 +385,71 @@ def test_llm_soc_box_keying_flags():
     assert LLMSOCBoxDefenderPlugin.executes_from_box is False
 
 
+def test_defender_plugin_keying_matrix():
+    """The two SEPARATE keying axes on the real plugins (coordinator's correction):
+      executes_from_box = uses the harness-run BOX AGENT (host actions) -> needs_agent/UDS.
+      uses_env_actions  = issues env-actions -> needs the SERVING WINDOW + an env channel.
+    deception/prompt_injection are harness-run decoy defenders: BOTH. llm_soc_box is box-resident: env
+    actions only. canary: neither."""
+    from arena.defender.plugins.deception.deception import DeceptionDefenderPlugin
+    from arena.defender.plugins.prompt_injection.prompt_injection import PromptInjectionDefenderPlugin
+    from arena.defender.plugins.llm_soc.llm_soc_box import LLMSOCBoxDefenderPlugin
+    from arena.defender.plugins.canary.canary import CanaryDefenderPlugin
+    assert (DeceptionDefenderPlugin.executes_from_box, DeceptionDefenderPlugin.uses_env_actions) == (True, True)
+    assert (PromptInjectionDefenderPlugin.executes_from_box, PromptInjectionDefenderPlugin.uses_env_actions) == (True, True)
+    assert (LLMSOCBoxDefenderPlugin.executes_from_box, LLMSOCBoxDefenderPlugin.uses_env_actions) == (False, True)
+    assert (CanaryDefenderPlugin.executes_from_box, CanaryDefenderPlugin.uses_env_actions) == (False, False)
+
+
+class _AgentDefender(DefenderPlugin, config_type="_agent_defender_test"):
+    """executes_from_box fake (the harness-run box-agent model): setup() must derive a UDS env_action_socket
+    + needs_agent, NOT the TCP box_channel. '_'-prefixed => conformance skips."""
+    type: str = "_agent_defender_test"
+    executes_from_box: ClassVar[bool] = True
+
+    @classmethod
+    def ui_schema(cls):
+        return {"config_type": "_agent_defender_test", "label": "agent", "fields": [], "cartesian_product": False}
+
+    def build_config(self, experiment_name, env_spec=None, prepared=None):
+        return {"experiment_name": experiment_name}
+
+    async def run(self, config_path, experiment_name, cfg):
+        return SimpleNamespace(returncode=None)
+
+
+def _written_defender_config(experiment_name, cfg):
+    from arena.experiment_log import output_root
+    path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+    import json as _json
+    return _json.loads(path.read_text())
+
+
+def test_executes_from_box_setup_arms_uds_not_tcp(tmp_path):
+    """An executes_from_box defender with the serving window open gets the tokenless UDS env_action_socket
+    baked into its runner config (the box-agent model) and NO TCP box_channel — keyed on executes_from_box,
+    NOT uses_env_actions."""
+    cfg = _run_cfg(tmp_path)
+    exp = SimpleNamespace(experiment_name="agentexp", deployed_environment=None, _defender_env_spec=None,
+                          _defender_access=None, _bastion_ip=None, _env_dynamic=True)
+    asyncio.run(_AgentDefender().setup(exp, cfg, bastion_ip=None, access=[]))
+    built = _written_defender_config("agentexp", cfg)
+    assert "env_action_socket" in built and "env_action_url" not in built
+
+
+def test_box_resident_setup_arms_tcp_not_uds(tmp_path):
+    """A box-resident defender (the arena set the TCP port+token) gets env_action_url+token baked in and NO
+    UDS socket — even though _env_dynamic is open. This is the uses_env_actions path; no box agent."""
+    cfg = _run_cfg(tmp_path)
+    exp = SimpleNamespace(experiment_name="boxexp2", deployed_environment=None, _defender_env_spec=None,
+                          _defender_access=None, _bastion_ip=None, _env_dynamic=True,
+                          _env_action_box_port=5555, _env_action_token="tok-xyz")
+    asyncio.run(_FakeDefender().setup(exp, cfg, bastion_ip=None, access=[]))
+    built = _written_defender_config("boxexp2", cfg)
+    assert built.get("env_action_url") == "http://127.0.0.1:5555" and built.get("env_action_token") == "tok-xyz"
+    assert "env_action_socket" not in built
+
+
 def test_tty_ssh_inserts_tt():
     """_launch_on_box runs over `ssh -tt` so the local ssh pid proxies the remote runner (stop() SIGTERM
     propagates). _tty_ssh (on each box plugin now) inserts -tt right after `ssh`, before the opts/host."""

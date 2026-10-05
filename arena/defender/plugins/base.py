@@ -182,12 +182,14 @@ class DefenderPlugin(BaseModel):
         if getattr(experiment, "_env_action_box_port", None) and getattr(experiment, "_env_action_token", None):
             box_channel = {"env_action_url": f"http://127.0.0.1:{experiment._env_action_box_port}",
                            "env_action_token": experiment._env_action_token}
-        # Otherwise, a HARNESS-RUN executes_from_box controller reaches the env-action channel over the
-        # tokenless UDS (+ a thin box agent for host actions). The UDS and the box agent are armed only when
-        # the dynamic window is open (experiment._env_dynamic) AND there is no TCP box_channel (a box-resident
-        # engine uses neither — it reaches victims itself and the env over its tunnel).
+        # The tokenless UDS env-action channel + the thin BOX AGENT (for host actions like honey-cred
+        # planting) are the HARNESS-RUN box-agent model, keyed on executes_from_box — a SEPARATE axis from
+        # uses_env_actions. A box-RESIDENT engine (executes_from_box=False) reaches the env over its own TCP
+        # tunnel (box_channel) and needs NEITHER, even though it issues env-actions; deception/prompt_injection
+        # (executes_from_box=True) keep the agent. Gated additionally on the serving window being open.
+        executes_from_box = getattr(type(self), "executes_from_box", False)
         env_action_socket = (resolve_socket_path(cfg)
-                             if getattr(experiment, "_env_dynamic", False) and box_channel is None else None)
+                             if executes_from_box and getattr(experiment, "_env_dynamic", False) else None)
         needs_agent = env_action_socket is not None
         # HOOK A — stand up the per-experiment box ES / box agent and produce the baton (default: empty).
         prepared = await self.provision_box(

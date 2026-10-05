@@ -30,7 +30,8 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     type: Literal["deception"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy"})
     code_dir_field = "deception_dir"          # Defense/Perry repo for this defender (per-plugin)
-    executes_from_box = True                   # box-only execution: deploy the box agent + arm the env channel
+    executes_from_box = True                   # harness-run box-agent model: deploy the box agent (plants honey-creds)
+    uses_env_actions = True                    # issues env-actions (decoy deploy / restore) -> needs the serving window + UDS channel
     code_python_field = "deception_python"
     strategy: str  # e.g. "DoNothing", "StaticLayered", "ReactiveLayered"
     arsenal: dict[str, int] = {}

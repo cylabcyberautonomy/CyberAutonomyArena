@@ -171,8 +171,13 @@ repo). After those the defender stays modestly larger only for the truly-irreduc
 > **EXECUTED on `feature/fuller-b-relocation` (offline; 121 tests green).** The plan below is done:
 > `runs_on_box` is gone from the whole repo, the box-launch unit lives on `canary` (stdlib subset) +
 > `llm_soc_box` (full uv/engine), base `start()` is `return await self.run(...)`, the base `run_*` wrappers
-> load the scoped access unconditionally (symmetric with the attacker), the arena keys the env-channel on
-> `uses_env_actions`, and `llm_soc_box` opens + reaps its OWN `ssh -R` tunnel (module-keyed, Incalmo-style).
+> load the scoped access unconditionally (symmetric with the attacker), and `llm_soc_box` opens + reaps its
+> OWN `ssh -R` tunnel (module-keyed, Incalmo-style). **Keying is TWO separate axes** (teammate correction):
+> the SERVING WINDOW opens on `executes_from_box OR uses_env_actions`; the box AGENT + tokenless UDS stay
+> keyed on `executes_from_box` (harness-run model); the token'd TCP channel is the box-resident case
+> (`uses_env_actions and not executes_from_box`). Plugin flags: deception/prompt_injection = BOTH,
+> llm_soc_box = uses_env_actions only, canary = neither; `llm_soc` left at `executes_from_box` only (works
+> via OR — flagged, not changed).
 > **Still owed before merge:** teammate line-review of the security-sensitive bits (key-shipping,
 > plugin-owned tunnel, token'd TCP) + a live `box_fll` re-run in a cloud window. See the deviations noted in
 > the branch's commit message. The paragraph below is the original plan, kept for the review diff.
