@@ -326,15 +326,21 @@ stand up the box ES, deploy decoys, plant honey-creds — which **blocks until a
 `build_config()` + writes the runner config → emits READY → returns the baton. `run_start` launches the
 loop and emits RUNNING. **`setup()` returning IS armed == READY** — there is deliberately no
 `prepare()`/`provision_box`, no `ready_marker`/`wait_until_ready` handshake, and no `executes_from_box`.
-A box-resident defender blocks inside its OWN `setup()` by SSH-polling the box (exactly as a C2 attacker
-blocks on its agent beacon), not via a framework handshake. If `setup()` raises, run_setup emits FAILED
-and the experiment fails — an undefended run is never reported as defended.
+Every defender — box-resident *and* harness-run — blocks inside its OWN `setup()` until its launched
+process signals armed (exactly as a C2 attacker blocks on its agent beacon), not via a framework handshake.
+If `setup()` raises (or the runner dies before arming), run_setup emits FAILED and the experiment fails —
+an undefended run is never reported as defended.
 
-> **Perry-engine caveat (transitional):** a reactive Perry strategy still does part of its arming inside
-> the run loop until the engine's prepare-move lands (reactive `initialize()` out of the loop + build the
-> engine from args). Until then deception/prompt_injection `setup()` pre-writes the config so the current
-> config-reading arming pass can run; the mirror invariant (armed == setup() returned) holds for every
-> harness-shaped and box-resident defender already.
+**Single-process arm-then-loop (how the Perry-backed defenders arm, incl. reactive).** The three
+Perry-backed harness-run defenders (deception / prompt_injection / llm_soc) use the same shape as the
+box-resident ones: `setup()` writes the runner config, **launches the runner once**, and blocks on a local
+readiness marker (`_wait_local_ready`); the runner does the strategy's **full `initialize()` — deploy
+decoys / plant honey-creds AND wire the in-process maps the loop consumes — in ONE process**, touches the
+marker, then enters the reactive loop. `start()` adopts that already-running process (stashed in a module
+dict) instead of launching a second one. Keeping arming in the *same* process as the loop is what lets a
+reactive strategy's tracking maps (e.g. ReactiveLayered's `honeycred_origin`/`honeycred_decoy`) survive
+into the loop — a throwaway prepare process would leave the loop inert. No Perry/strategy change, no
+prepare/run split, no persistence manifest.
 
 **Reaching victims + the box.** The arena injects `defender_setup_access` (a `SetupAccess` list, scoped
 key + routing per host) into your config; the runner reads its hosts and access from there — never resolve

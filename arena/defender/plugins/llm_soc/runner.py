@@ -179,21 +179,18 @@ print(
     f"(strategy={config['strategy']}, llm_model={config.get('llm_model')})",
     flush=True,
 )
-# This runner is only ever launched in "run" mode (argv[2]=="run"): llm_soc's prepare() is an
-# in-plugin box-ES stand-up (DefenderPlugin.prepare on the plugin), NOT the deception "prepare"-mode
-# runner — llm_soc strategies have no external arming to run here. So there is deliberately no
-# prepare-mode branch below (unlike the deception/prompt_injection runners).
-#
-# prepared=True: the arena ran the defender's prepare() phase (box ES stand-up; and for a
-# strategy that arms in setup, its external decoy/cred deploy) before launching this loop.
-# FalcoLLM/C2Block are ARMS_IN_SETUP=False, so start() still runs their in-process arming
-# (subscribe to Falco telemetry) here; prepared=True only suppresses a re-run of external
-# arming for the static strategies (not these), so it is safe + explicit for the contract.
-defender.start(prepared=True)
+# SINGLE-PROCESS ARM-THEN-LOOP (mirror of the box-resident runner). The plugin's setup() stood up the box
+# ES + agent, launched THIS process, and BLOCKS on the readiness marker written below, so READY (and the
+# attacker's release) follows arming. defender.start(prepared=False) runs the strategy's full initialize()
+# — for FalcoLLM / FalcoLLMC2Block that is subscribing to Falco telemetry + begin_monitoring (instant, no
+# placement). prepared=False: nothing was pre-deployed, so initialize() runs in full.
+defender.start(prepared=False)
 
-# No readiness marker any more: the arena's wait_until_ready gate is gone — the plugin's setup() stood up
-# the box ES and run_setup emitted READY before this loop started. FalcoLLM/C2Block then subscribe to
-# telemetry here (instant, no placement). See docs/agent-symmetry.md.
+# ARMED: subscribed + begin_monitoring set BEFORE the attacker runs (so no early attacker telemetry is
+# missed). Touch the readiness marker the plugin's setup() polls (_wait_local_ready) — the plugin-internal
+# arm signal. If arming raised above, the process exits non-zero before this and setup() surfaces it as a
+# failed arm.
+(log_dir / "defender_ready").write_text("armed\n")
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:
