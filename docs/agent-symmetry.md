@@ -175,13 +175,18 @@ Decided (user): FULLER B — box-exec moves off the base into the box plugins (c
 branch → teammate offline review → re-run box_fll → merge when green.
 
 MOVE OUT of `arena/defender/plugins/base.py` INTO each box plugin (copied, per B):
-- **canary** (control-plane-FREE, stdlib): the box_python=None subset — `_box_paths`, `_box_run_command`
-  (stdlib branch), `_box_push`, `_tty_ssh`, `_box_runner_src`, `_launch_on_box` (minus engine-ship + the
-  env-action cred-threading canary doesn't use), `_wait_box_ready`, `_BOX_DIR`. No tunnel, no `uses_env_actions`.
-- **llm_soc_box** (uv engine + control plane): the FULL unit — the above + `box_pip_spec`/`box_engine_src`/
-  `box_ships_engine`/`box_python`, `_ship_engine_to_box`, `_rewrite_access_keys`/`_thread_box_credentials`,
-  and it opens its OWN `ssh -R` tunnel in setup()/start() (the `box_channel` wiring from base `setup()`/
-  `_write_runner_config` moves here). Sets `uses_env_actions = True`.
+- **canary** (control-plane-FREE, stdlib): `_box_paths`, `_box_run_command` (stdlib branch), `_box_push`,
+  `_tty_ssh`, `_box_runner_src`, `_launch_on_box`, `_wait_box_ready`, `_BOX_DIR`, **AND the VICTIM-cred
+  key-shipping `_thread_box_credentials`/`_rewrite_access_keys`** — CORRECTION (teammate): canary ssh's to
+  every victim FROM THE BOX with box-threaded scoped keys (that's its 7/7 ssh/resolve result), so it needs
+  these; they are victim-access, NOT env-action. No tunnel, no engine-ship, no `uses_env_actions`.
+- **llm_soc_box** (uv engine + control plane): the canary subset ABOVE (incl. the shared cred-threading)
+  PLUS the llm_soc_box-ONLY pieces: `box_pip_spec`/`box_engine_src`/`box_ships_engine`/`box_python`,
+  `_ship_engine_to_box` (engine-ship), and the `box_channel`/`env_action_url`+token wiring — it opens its
+  OWN `ssh -R` tunnel in setup()/start(). Sets `uses_env_actions = True` **and flips `executes_from_box`
+  True→False** (once the tunnel keys off `uses_env_actions`, `executes_from_box=True` would only deploy an
+  unused box agent + the UDS branch; flipping it False also lets its `provision_box` drop the
+  `needs_agent`-skip). The flag itself STAYS in the base for the harness-run box-agent model.
 - The tunnel *helpers* (`pick_free_tcp_port`/`build_reverse_tunnel_cmd`/`open_reverse_tunnel`/
   `close_reverse_tunnel`) stay in `env_action_server.py` as importable arena env-channel infra; the box
   plugin calls them (the INVOCATION moves off `main.py` into the plugin).
@@ -191,7 +196,13 @@ CHANGE in the base:
 - Remove `runs_on_box`; remove the `runs_on_box` access-threading in `run_start`/`run_stop`/`run_collect_logs`
   and the `box_channel`/`runs_on_box` cred-branches in `setup()`/`_write_runner_config`. KEEP the
   `executes_from_box` UDS branch (harness-run box-agent model) untouched.
-- `primary_access`/`_persist_access`/`_load_access` move with the box plugins (only they use them).
+- `primary_access`/`_persist_access`/`_load_access` move with the box plugins. **NOTE (teammate, the fiddly
+  part):** the `runs_on_box` access-threading is woven into the FRAMEWORK `run_start`/`run_stop`/
+  `run_collect_logs` (`access = self._load_access(...) if self.runs_on_box else None`) + `_persist_access` in
+  `setup()`. With `start()`→`run()` and `runs_on_box` gone, the base `run_*` no longer load access — so the
+  box plugin must recover its access in its OWN `run()`/`stop()`/`collect_logs` (e.g. its `run()` does the
+  launch+load). So this is converting 3 framework call-sites + the setup() persist, not just lifting the 3
+  helpers.
 
 CHANGE in `main.py` (arena):
 - Key the env-channel server + token + serving window on **`uses_env_actions`** (not `runs_on_box`).
