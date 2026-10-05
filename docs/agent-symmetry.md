@@ -132,22 +132,32 @@ runs_on_box access-load), `primary_access`/`_persist_access`/`_load_access` (att
 defender the LIST — box+victims), `run_start` (attacker emits RUNNING; defender doesn't — it's READY only
 once armed).
 
-**Essential divergence (NOT to be forced identical):** defender-only capabilities (`provision_box`,
-`prepare`, `box_ingress`, `defender_vm_budget`, `executes_from_box`, `runs_on_box`); the readiness-marker
-trio (`ready_marker_path`/`clear_ready_marker`/`wait_until_ready`); the box-launch pair
-(`_launch_on_box`/`_wait_box_ready`); the baton (empty `PreparedAttacker` dataclass vs `PreparedDefender`
-with es_url/index/box-agent fields); and the `run_setup` bodies (attacker ~26 lines vs defender ~90 with the
-cred/routing/box-baton injection — the credential-locus asymmetry). Attacker-only `sweep_stale_state` is
-wired to clean-slate; a defender equivalent is a future parity item (when box defenders can orphan state).
+**Truly irreducible defender-only (do NOT force identical):** `box_ingress`, `defender_vm_budget`, the
+capability flags (`executes_from_box`/`runs_on_box`), and the box/C2-equivalent machinery
+(`_launch_on_box`/`_wait_box_ready` ↔ the attacker's own C2 lifecycle). These have no attacker analog.
 
-**Box-deferred (converge WITH the box work, not before):** the `setup()` signatures (attacker
-`(experiment, cfg, bastion_ip, access)` vs defender `(experiment_name, cfg, bastion_ip, defender_env_spec,
-defender_access)` — aligning touches every defender plugin's override, incl. the Defense repo); and the
-`run_setup`/readiness-marker collapse (the box model makes `setup()` launch-and-wait like the attacker's C2).
+**Convergeable (design-artifact, not essential) — the parity-convergence slice:** earlier filed as
+"essential," but on review these are just current data-flow and SHOULD converge:
+- **access as a LIST on both — DONE on the attacker side** (`_persist_access`/`_load_access` now persist/load
+  the list; run_* hand plugins their primary foothold, so existing plugins are unchanged; a multi-foothold
+  env is now supported). Symmetric with the defender.
+- **opaque baton** — make `PreparedDefender` an empty marker subclassed per-plugin (like `PreparedAttacker`),
+  moving the es_url/index/box-agent fields into each telemetry defender's own subclass + its `build_config`,
+  and dropping the base `run_setup` field-forwarding. *Cross-repo* (Defense defenders) + touches the
+  teammate's box-agent fields → coordinated, not solo.
+- **fold `provision_box` + `prepare` into `setup()`** so defender `setup()` stands up infra + arms + blocks
+  until ready and RETURNS the baton — exactly the attacker's `setup() -> Prepared` shape. Requires the arming
+  to read the spec/baton instead of the written config, and touches every defender plugin (Defense repo) +
+  the teammate's `run_setup`/box path → the heavy, coordinated piece.
+- **`sweep_stale_state` on the defender** — add once box defenders can orphan state (uv-venvs/tunnels).
 
-So: slice 1 unified the shared machinery, slice 2 + this pass made the lifecycle surface parallel (and added
-the `run_stop` guard + `example_prepared` mirror), but the defender stays ~1.8x larger because it has ~11
-capability/box methods and a heavier `run_setup` the attacker has no need for. That residual is correct.
+**Box-deferred:** the `setup()` signature alignment folds into the `provision_box`/`prepare` convergence
+above; the readiness-marker collapse rides with the box model (`setup()` launch-and-wait).
+
+So: slice 1 unified the shared machinery; slice 2 + the parity pass made the lifecycle surface parallel
+(+ `run_stop` guard, `example_prepared` mirror, list-access); the baton + `setup()`-fold convergences are
+coordinated cross-repo work (with the teammate). After all of it the defender stays modestly larger only for
+the truly-irreducible set above — which is correct.
 
 ## Full conversion (convert every defender to run on the box) — per-component live work
 
