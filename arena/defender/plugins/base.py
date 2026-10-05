@@ -21,16 +21,11 @@ from ...env_action_server import resolve_socket_path
 
 
 class PreparedDefender(BaseModel):
-    """The setup-produced data baton — symmetric with a C2 attacker's PreparedAttacker carrying its C2 URLs.
-    provision_box() (run BEFORE build_config, in the arena process) fills these in and returns it, and
-    build_config() bakes them into the runner config it emits. All optional: a defender with no box
-    telemetry (canary / velociraptor) produces an empty baton."""
-    es_url: Optional[str] = None          # harness-host -> box ES ssh -L tunnel URL (http://127.0.0.1:<lport>)
-    falco_index: Optional[str] = None     # falco index name on the box ES
-    sysflow_index: Optional[str] = None   # sysflow index name on the box ES
-    box_agent_host: Optional[str] = None  # box-agent endpoint (dynamic defenders only)
-    box_agent_port: Optional[int] = None
-    box_agent_token: Optional[str] = None
+    """The setup-produced data baton handed provision_box() -> build_config() -> run(). OPAQUE at the base
+    (empty, exactly like PreparedAttacker): a defender with box telemetry subclasses this with its OWN
+    fields (es_url / indices / box-agent endpoint) and bakes them in its OWN build_config; a defender with
+    no box telemetry (canary / velociraptor) produces this empty baton as-is. Mirrors PreparedAttacker + a
+    C2 attacker's own Prepared subclass (e.g. IncalmoPreparedC2)."""
 
 
 class DefenderPlugin(BaseModel):
@@ -336,16 +331,13 @@ class DefenderPlugin(BaseModel):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         built = self.build_config(experiment_name, env_spec, prepared)
         type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
-        # Forward the agent-facing DefenderEnvSpec (host inventory; NO creds) + the Phase-A box baton (es_url /
-        # indices / box agent) into the runner config, uniformly — so no plugin's build_config has to. (It
-        # still RECEIVES env_spec/prepared as args and MAY read them to make decisions; it just isn't forced
-        # to forward them.) Both are credential-free, so they go in the config alongside the other keys below.
+        # Forward the agent-facing DefenderEnvSpec (host inventory; NO creds) into the runner config,
+        # uniformly — it is universal + credential-free, so no plugin's build_config has to. The Phase-A box
+        # baton (es_url / indices / box agent) is OPAQUE to the base (PreparedDefender is an empty marker):
+        # a telemetry defender carries those in its OWN PreparedDefender subclass and bakes them in its OWN
+        # build_config — symmetric with the attacker's build_config baking its C2 URLs from PreparedAttacker.
         if env_spec is not None:
             built["defender_env_spec"] = env_spec.model_dump()
-        for _k in ("es_url", "falco_index", "sysflow_index", "box_agent_host", "box_agent_port", "box_agent_token"):
-            _v = getattr(prepared, _k, None)
-            if _v is not None:
-                built[_k] = _v
         # INJECT the credential-bearing SetupAccess + routing (kept OUT of build_config's output by the leak
         # guard). Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts
         # on victims directly, it asks the box agent (which alone holds victim access) and the env.

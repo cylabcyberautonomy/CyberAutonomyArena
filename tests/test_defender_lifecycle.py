@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Optional
 
 import pytest
 
@@ -20,6 +20,13 @@ from arena.defender.lifecycle import (
 )
 from arena.defender.env_spec import DefenderSetupAccess
 from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
+
+
+class _PreparedBoxBaton(PreparedDefender):
+    """A telemetry defender's opaque-baton subclass (base PreparedDefender is now an empty marker); for the
+    tests that exercise box-baton fields flowing provision_box -> build_config."""
+    es_url: Optional[str] = None
+    falco_index: Optional[str] = None
 from arena.defender.defender import run_defender
 from arena.experiment.models import Experiment, ExperimentStatus
 
@@ -171,7 +178,7 @@ class _OrderDefender(DefenderPlugin, config_type="_order_defender_test"):
     async def provision_box(self, experiment_name, cfg, bastion_ip=None,
                             defender_env_spec=None, defender_access=None, needs_agent=False):
         _ORDER_CALLS.append("provision_box")  # Phase A: produce the baton BEFORE build_config
-        return PreparedDefender(es_url="http://127.0.0.1:1")
+        return _PreparedBoxBaton(es_url="http://127.0.0.1:1")
 
     def build_config(self, experiment_name, env_spec=None, prepared=None):
         _ORDER_CALLS.append("build_config")
@@ -226,14 +233,14 @@ def test_base_prepare_is_noop_baton(tmp_path):
     happens in the loop and still uses the readiness marker."""
     prepared = asyncio.run(_FakeDefender().prepare(tmp_path / "c.json", "p", _cfg(tmp_path)))
     assert isinstance(prepared, PreparedDefender)
-    assert prepared.es_url is None  # empty baton
+    assert prepared.model_dump() == {}  # empty opaque baton (fields live on each plugin's subclass now)
 
 
 def test_prepared_defender_baton_roundtrips():
     """The box baton round-trips as JSON (a Perry defender's prepare-mode runner writes it and
     _run_prepare_and_wait reads it back; provision_box likewise returns one build_config consumes)."""
-    back = PreparedDefender.model_validate_json(
-        PreparedDefender(es_url="http://127.0.0.1:9200", falco_index="falco").model_dump_json())
+    back = _PreparedBoxBaton.model_validate_json(
+        _PreparedBoxBaton(es_url="http://127.0.0.1:9200", falco_index="falco").model_dump_json())
     assert back.es_url == "http://127.0.0.1:9200" and back.falco_index == "falco"
 
 

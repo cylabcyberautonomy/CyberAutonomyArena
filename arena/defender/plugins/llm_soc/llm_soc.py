@@ -55,6 +55,18 @@ _LLM_MODEL_SUGGESTIONS = [
 ]
 
 
+class PreparedLLMSOC(PreparedDefender):
+    """llm_soc's box-telemetry baton: the per-experiment box ES ssh -L tunnel + falco/sysflow indices, plus
+    the box-agent endpoint for FalcoLLMC2Block. Opaque to the base; baked into the runner config by this
+    plugin's own build_config (symmetric with a C2 attacker's PreparedAttacker subclass)."""
+    es_url: Optional[str] = None
+    falco_index: Optional[str] = None
+    sysflow_index: Optional[str] = None
+    box_agent_host: Optional[str] = None
+    box_agent_port: Optional[int] = None
+    box_agent_token: Optional[str] = None
+
+
 class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
     """Wraps Perry's LLM-SOC-analyst strategies (defender/strategy/llm/*.py). On a
     Falco-flagged suspicious host, an LLM agent (SysFlowAgent) investigates by
@@ -125,10 +137,13 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "llm_model": self.llm_model,
-            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec, and
-            # reads the box ES tunnel url + indices + box-agent endpoint — all forwarded into the config by
-            # the framework (run_setup: defender_env_spec + the provision_box baton), not emitted here.
+            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec
+            # (forwarded by the framework), and reads the box ES tunnel url + indices + box-agent endpoint
+            # from the Phase-A baton this plugin produced — baked in below.
         }
+        # bake this plugin's own Phase-A box baton (es tunnel + indices + box-agent endpoint); opaque to the
+        # base, so a telemetry defender forwards it here (symmetric with the attacker baking its C2 URLs).
+        built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built
 
     async def provision_box(
@@ -158,7 +173,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
             agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
             baton.update(agent)
-        return PreparedDefender(**baton)
+        return PreparedLLMSOC(**baton)
 
     # -- box agent deploy (the defender's in-environment effector) ---------------------------------
     # Copied per dynamic-defender plugin (box_agent_install.sh co-located), like prepare_box_es. Ships the
