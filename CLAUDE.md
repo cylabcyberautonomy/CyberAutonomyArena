@@ -100,8 +100,8 @@ pytest tests/
   lifecycle methods present + right async-ness, `build_config` serializable + no credential leak). A new
   plugin is checked automatically; a failure names the plugin and lists every problem at once.
 - `tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
-- `tests/test_defender_lifecycle.py` — the defender handshake + the `wait_until_ready` readiness-marker gate
-  (returns on the marker, raises if the runner dies first or arming times out).
+- `tests/test_defender_lifecycle.py` — the defender setup → ready → running → stopping → stopped handshake
+  (mirror of the attacker: arming in `setup()`, READY on return, no readiness marker).
 - `tests/test_no_god_key.py` — the scoped-key regression guard.
 
 There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud + LLM
@@ -288,7 +288,7 @@ Existing:
   prompt-injection payloads aimed at an LLM attacker. Same not-yet-open-sourced status and same
   decoy-deployment caveats as `deception`.
 
-**The interface:**
+**The interface (a mirror of `AttackerPlugin` — same members, same shapes; differs only in objective):**
 ```python
 class MyDefender(DefenderPlugin, config_type="my_defender"):
     type: Literal["my_defender"]
@@ -297,38 +297,44 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
     @classmethod
     def ui_schema(cls) -> PluginUISchema: ...
 
-    def build_config(self, experiment_name, environment) -> dict:
-        """Run config the runner reads. The arena injects `defender_env_spec` (agent-facing host
-        inventory) and `defender_setup_access` (the setup-time scoped key + routing per victim + the box)."""
+    def build_config(self, experiment_name, env_spec, prepared) -> dict:
+        """Run config the runner reads. env_spec is the agent-facing DefenderEnvSpec (host inventory,
+        NO creds); `prepared` is this plugin's own baton from setup() — read arming outputs off it (box
+        ES url + indices, the env-channel endpoint the plugin picked). The arena then injects the
+        credential-bearing `defender_setup_access` + `defender_env_spec` + `management_ip`/`bastion_ip`/
+        `log_dir` AFTER build_config (kept out of its own output by the leak guard)."""
 
     async def run(self, config_path, experiment_name, cfg) -> asyncio.subprocess.Process:
-        """Spawn the defender runner (the reactive loop) and return the process. External arming already
-        ran in prepare(); a loop-armed strategy still writes the readiness marker once armed (see below)."""
+        """Launch the reactive-loop process and return it. Arming already happened in setup(); this just
+        starts the loop. (Override start() instead if you need the scoped access at launch.)"""
 
-    # optional:
-    async def prepare(self, config_path, experiment_name, cfg) -> PreparedDefender:
-        """EXTERNAL arming — run BEFORE run() and blocked on: stand up the box ES, and deploy decoys /
-        plant honey-creds for a strategy that arms in setup. Return a PreparedDefender. Default: no-op."""
-    def box_ingress(self) -> dict[str, list[int]]: ...   # ports the env should open to the box
-    async def setup(self, experiment_name, environment, cfg, mgmt_ip=None) -> None: ...
-    async def teardown(self, experiment_name, environment, cfg) -> None: ...
+    # optional (the base provides a safe default):
+    async def setup(self, experiment, cfg, bastion_ip=None, access=None) -> PreparedDefender:
+        """ARM the defender and BLOCK until it is actually armed, then return the baton — the single
+        arming entry, shape-identical to AttackerPlugin.setup(). Stand up the box ES (+ a box agent if
+        used), deploy decoys / plant honey-creds — everything in place BEFORE the attacker runs. Default:
+        empty baton. Reach box/victims with self.primary_access(access).ssh_base()."""
+    async def start(self, prepared, config_path, experiment_name, cfg, access=None): ...  # box-resident override
+    def box_ingress(self) -> dict[str, list[int]]: ...        # ports the env should open to the box
+    def defender_vm_budget(self) -> list[tuple[int,int,int]]: ...  # max extra VMs (decoy strategies)
+    async def teardown(self, experiment_name, cfg) -> None: ...
 ```
 
-**Arming: prepare() then the marker.** A defender's arming splits in two, mirroring the attacker's
-setup()→start():
-- **EXTERNAL arming** (deploy decoy VMs, plant honey-creds/fake data) runs in **`prepare()`**, which the
-  arena drives after `build_config()` and **before** `run()`, and **blocks on**. It runs to completion and
-  returns a `PreparedDefender`; a failure raises there and fails the experiment, so the slow decoy deploy
-  finishes before the attacker starts instead of racing it inside the loop. (On the Perry side this is
-  `Strategy.ARMS_IN_SETUP` + `Defender.prepare()`.)
-- **In-loop arming** (subscribing to telemetry; strategies that deploy reactively or whose placement can't
-  leave the loop process — llm_soc, prompt_injection, Reactive*) stays in the run loop. For those, `run()`
-  spawns the runner and the runner **must touch the readiness marker once actually armed**:
-  ```python
-  DefenderPlugin.ready_marker_path(experiment_name, cfg)   # touch from inside the runner once armed
-  ```
-  The arena blocks on `wait_until_ready` before letting the attacker in. If the runner crashes before
-  writing it, the experiment fails — an undefended run must never be reported as defended.
+**Arming happens in `setup()` — no readiness marker.** A defender is just an agent in the environment,
+so its lifecycle is the attacker's: `run_setup` emits SETUP_STARTED → runs **`setup()`** (full arming —
+stand up the box ES, deploy decoys, plant honey-creds — which **blocks until actually armed**) →
+`build_config()` + writes the runner config → emits READY → returns the baton. `run_start` launches the
+loop and emits RUNNING. **`setup()` returning IS armed == READY** — there is deliberately no
+`prepare()`/`provision_box`, no `ready_marker`/`wait_until_ready` handshake, and no `executes_from_box`.
+A box-resident defender blocks inside its OWN `setup()` by SSH-polling the box (exactly as a C2 attacker
+blocks on its agent beacon), not via a framework handshake. If `setup()` raises, run_setup emits FAILED
+and the experiment fails — an undefended run is never reported as defended.
+
+> **Perry-engine caveat (transitional):** a reactive Perry strategy still does part of its arming inside
+> the run loop until the engine's prepare-move lands (reactive `initialize()` out of the loop + build the
+> engine from args). Until then deception/prompt_injection `setup()` pre-writes the config so the current
+> config-reading arming pass can run; the mirror invariant (armed == setup() returned) holds for every
+> harness-shaped and box-resident defender already.
 
 **Reaching victims + the box.** The arena injects `defender_setup_access` (a `SetupAccess` list, scoped
 key + routing per host) into your config; the runner reads its hosts and access from there — never resolve
@@ -338,8 +344,7 @@ a key or parse the topology yourself.
 env-provided box and tunnels to it. The machinery (`prepare_box_es` + the tunnel helpers +
 `box_es_install.sh`) is **copied into each telemetry defender** (`llm_soc`/`deception`/`prompt_injection`)
 — it is per-plugin, not a base method, so `canary`/other defenders don't inherit it. Call it in
-`prepare()` (before the external arming that reads the box ES); it injects `es_url` into the config the
-runner reads.
+`setup()` (before the arming that reads the box ES); it injects `es_url` into the baton the config reads.
 
 **Box ingress — request exactly what you use:**
 ```python
