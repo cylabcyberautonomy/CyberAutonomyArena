@@ -34,7 +34,6 @@ async def _stop_defender_process(experiment, process, cfg) -> None:
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
-from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -226,23 +225,14 @@ async def lifespan(app: FastAPI):
     _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
                                 max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
-    # Defender→environment action channel: a UDS-only listener (no TCP port, so no in-env VM can reach
-    # it) that services EnvActionRequest events from a running defender. Per-manager socket path keeps the
-    # two managers one host may run from colliding. Inert unless a defender arms the serving window.
-    _env_action_socket_path = resolve_socket_path(cfg)
-    _env_action_task = asyncio.create_task(
-        serve_env_actions(_env_action_socket_path, registry, cfg, _openstack_lock)
-    )
-    logger.warning("env-action channel listening on UDS %s", _env_action_socket_path)
+    # Defender→environment action channel: there is NO always-on UDS listener any more. It is armed
+    # per-experiment as a TOKEN'd TCP endpoint on harness-loopback when a defender uses env actions (see the
+    # run loop) — a harness-run runner POSTs to 127.0.0.1:port directly, a box-resident one tunnels to the
+    # same port. ONE channel; the plugin just bakes the endpoint, it doesn't pick a transport.
     try:
         yield
     finally:
-        _env_action_task.cancel()
-        try:
-            await _env_action_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — never let channel teardown mask shutdown
-            pass
-    await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
+        await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
 
 
 def _proc_cmdline(pid: int) -> str:
@@ -929,14 +919,12 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                    # Arm BOTH env-action doors and let the PLUGIN pick (the base/arena are agnostic to WHERE
-                    # the runner runs — executes_from_box is gone): the always-on UDS server (serve_env_actions,
-                    # started at boot) for a harness-run runner, AND a per-experiment token'd TCP port on
-                    # harness-loopback for an in-env runner to tunnel to. The plugin's setup() bakes whichever
-                    # endpoint it chose into its config (harness-run -> env_action_socket; box-resident ->
-                    # env_action_url+token, and the plugin opens its OWN ssh -R tunnel, like the Incalmo
-                    # attacker owns its ssh -L C2 tunnel). Set the token/port BEFORE run_setup so a box-resident
-                    # ARMING can already reach it. A harness-run defender simply ignores the (idle) TCP port.
+                    # Arm the ONE env-action channel: a per-experiment token'd TCP server on harness-loopback.
+                    # The base/arena are agnostic to WHERE the runner runs (executes_from_box is gone) — a
+                    # harness-run runner POSTs to 127.0.0.1:port directly, a box-resident one opens its OWN
+                    # ssh -R tunnel to the same port (like the Incalmo attacker owns its ssh -L C2 tunnel). The
+                    # plugin's setup() just bakes env_action_url+token into its config. Set the token/port
+                    # BEFORE run_setup so a box-resident ARMING can already reach it.
                     from .env_action_server import (new_env_action_token, pick_free_tcp_port,
                                                     serve_env_actions_tcp)
                     _tcp_port = pick_free_tcp_port()  # ephemeral, per-experiment: no harness collision

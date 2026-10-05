@@ -40,6 +40,9 @@ from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 
 _ALL_CHECKS = ["ssh", "resolve", "telemetry", "canary_event"]
+# The box runner process, launched in setup() (box-resident mirror), handed to run_start via start().
+# Keyed by experiment_name — the plugin is a stateless pydantic model, so the process lives here.
+_BOX_PROCS: dict = {}
 
 
 class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
@@ -124,6 +127,28 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
             stderr=subprocess.STDOUT,
         )
 
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> PreparedDefender:
+        """ARM (mirror of AttackerPlugin.setup): write the runner config, LAUNCH the canary ON the box over
+        SSH, and SSH-poll until it arms. The launched process is stashed in _BOX_PROCS and handed to run_start
+        via start(), so READY (emitted by run_setup) follows the box arming. Canary is checks-only (no env
+        channel, no decoys) — arming is just 'the runner is up and its checks loop started'."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, PreparedDefender())
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        built["defender_setup_access"] = [a.model_dump() for a in (access or [])]
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        config_path.write_text(json.dumps(built, indent=2))
+        _BOX_PROCS[experiment_name] = await self._launch_on_box(
+            PreparedDefender(), config_path, experiment_name, cfg, access)
+        return PreparedDefender()
+
     async def start(
         self,
         prepared: "PreparedDefender",
@@ -132,8 +157,12 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
         cfg: ExperimentManagerConfig,
         access=None,
     ) -> asyncio.subprocess.Process:
-        """Launch the canary ON THE BOX over SSH (overrides the base's local run()). Ships the stdlib runner
-        + a box-local config, threads the scoped keys to the box, and runs it under the box's own python3."""
+        """Hand run_start the canary process launched + armed in setup() (box-resident mirror). Fallback:
+        launch now (ships the stdlib runner + box-local config, threads the scoped keys, runs under the box's
+        python3) if setup() didn't run for this experiment."""
+        proc = _BOX_PROCS.pop(experiment_name, None)
+        if proc is not None:
+            return proc
         return await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
 
     # ------------------------------------------------------------------ box launch (stdlib subset)

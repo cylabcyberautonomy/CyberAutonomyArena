@@ -10,7 +10,6 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
-from ....env_action_server import resolve_socket_path
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
@@ -26,8 +25,9 @@ class PreparedPromptInjection(PreparedDefender):
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
-    # The env-action door this plugin picked (harness-run -> the always-on UDS socket); build_config bakes it.
-    env_action_socket: Optional[str] = None
+    # The env-action channel — ONE token'd TCP endpoint the arena armed on harness-loopback. build_config bakes these.
+    env_action_url: Optional[str] = None
+    env_action_token: Optional[str] = None
 
 
 class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injection"):
@@ -170,8 +170,10 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
         box_cfg.update(es)
         agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
+        _box_port = getattr(experiment, "_env_action_box_port", None)
         prepared = PreparedPromptInjection(
-            env_action_socket=(resolve_socket_path(cfg) if self.uses_env_actions else None),
+            env_action_url=(f"http://127.0.0.1:{_box_port}" if _box_port else None),
+            env_action_token=getattr(experiment, "_env_action_token", None),
             **{**es, **agent})
         # Write the runner config so the arming 'prepare' pass can read it (run_setup re-writes it for the run
         # loop); build_config bakes the baton, then inject the credential-bearing access + routing.

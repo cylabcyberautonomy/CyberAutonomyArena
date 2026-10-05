@@ -9,7 +9,6 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
-from ....env_action_server import resolve_socket_path
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
@@ -66,8 +65,9 @@ class PreparedLLMSOC(PreparedDefender):
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
-    # The env-action door this plugin picked (harness-run -> the always-on UDS socket); build_config bakes it.
-    env_action_socket: Optional[str] = None
+    # The env-action channel — ONE token'd TCP endpoint the arena armed on harness-loopback. build_config bakes these.
+    env_action_url: Optional[str] = None
+    env_action_token: Optional[str] = None
 
 
 class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
@@ -164,9 +164,12 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
         box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
         agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
-        # This plugin picks its OWN env-action door: harness-run -> the always-on UDS socket (on the baton).
+        # The env-action channel: the ONE token'd TCP endpoint the arena armed on harness-loopback (a
+        # harness-run runner reaches 127.0.0.1:port directly). Carried on the baton; build_config bakes it.
+        _box_port = getattr(experiment, "_env_action_box_port", None)
         return PreparedLLMSOC(
-            env_action_socket=(resolve_socket_path(cfg) if self.uses_env_actions else None),
+            env_action_url=(f"http://127.0.0.1:{_box_port}" if _box_port else None),
+            env_action_token=getattr(experiment, "_env_action_token", None),
             **{**es, **agent})
 
     # -- box agent deploy (the defender's in-environment effector) ---------------------------------

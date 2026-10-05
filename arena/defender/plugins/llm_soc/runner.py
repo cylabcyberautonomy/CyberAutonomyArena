@@ -191,11 +191,9 @@ print(
 # arming for the static strategies (not these), so it is safe + explicit for the contract.
 defender.start(prepared=True)
 
-# Signal the harness that this strategy is armed (for llm_soc, subscribed to telemetry).
-# main.py blocks on this file before starting the attacker - see DefenderPlugin.wait_until_ready.
-# Written after start() returns, so it means "armed", not merely "process alive"; the harness's
-# own log_dir is used so no extra config key is needed.
-(log_dir / "defender_ready").write_text(str(time.time()))
+# No readiness marker any more: the arena's wait_until_ready gate is gone — the plugin's setup() stood up
+# the box ES and run_setup emitted READY before this loop started. FalcoLLM/C2Block then subscribe to
+# telemetry here (instant, no placement). See docs/agent-symmetry.md.
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:

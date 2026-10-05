@@ -10,7 +10,6 @@ from typing import Literal, Optional
 from pydantic import field_validator
 
 from ....config import ExperimentManagerConfig
-from ....env_action_server import resolve_socket_path
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
@@ -26,9 +25,10 @@ class PreparedDeception(PreparedDefender):
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
-    # The env-action door this plugin picked for itself (harness-run -> the always-on UDS socket; the base is
-    # agnostic — see DefenderPlugin.uses_env_actions). build_config bakes it into the runner config.
-    env_action_socket: Optional[str] = None
+    # The env-action channel — ONE token'd TCP endpoint the arena armed on harness-loopback. A harness-run
+    # runner POSTs to it directly; a box-resident one tunnels to it. build_config bakes these.
+    env_action_url: Optional[str] = None
+    env_action_token: Optional[str] = None
 
 
 class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
@@ -153,10 +153,12 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
         box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
         agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
-        # This plugin picks its OWN env-action door: harness-run -> the always-on UDS socket (carried on the
-        # baton so build_config bakes it). The base is agnostic to the choice.
+        # The env-action channel: the ONE token'd TCP endpoint the arena armed on harness-loopback (set
+        # before run_setup). A harness-run runner reaches 127.0.0.1:port directly; a box-resident one tunnels.
+        _box_port = getattr(experiment, "_env_action_box_port", None)
         prepared = PreparedDeception(
-            env_action_socket=(resolve_socket_path(cfg) if self.uses_env_actions else None),
+            env_action_url=(f"http://127.0.0.1:{_box_port}" if _box_port else None),
+            env_action_token=getattr(experiment, "_env_action_token", None),
             **{**es, **agent})
         # Write the runner config so the arming 'prepare' pass can read it (run_setup re-writes the same
         # config for the run loop): build_config bakes the baton, then inject the credential-bearing access +

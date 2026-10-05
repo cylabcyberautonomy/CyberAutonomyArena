@@ -45,6 +45,10 @@ from .llm_soc import LLMSOCDefenderPlugin, PreparedLLMSOC, _LLM_MODEL_SUGGESTION
 # runs on every teardown path (main.py's finally -> _stop_defender_process -> run_stop -> stop), so the
 # tunnel is reaped reliably; a hard manager crash is the one residual (the same one Incalmo's ssh -L has).
 _ENV_TUNNELS: dict = {}
+# The box runner process, launched in setup() (a box-resident defender arms by launching the engine ON the
+# box and SSH-polling until it arms), handed to run_start via start(). Keyed by experiment_name, like
+# _ENV_TUNNELS — the plugin is a stateless pydantic model, so the process lives here, not on the instance.
+_BOX_PROCS: dict = {}
 
 
 class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
@@ -79,30 +83,49 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
         s["label"] = "LLM SOC (box-resident engine)"
         return s
 
-    async def provision_box(
-        self,
-        experiment_name: str,
-        cfg: ExperimentManagerConfig,
-        bastion_ip: Optional[str] = None,
-        defender_env_spec=None,
-        defender_access=None,
-        needs_agent: bool = False,
-    ) -> PreparedLLMSOC:
-        # Box-resident Phase A: stand up this run's per-experiment ES ON the box, but DON'T open a harness
-        # ssh -L tunnel (the engine runs on the box and reads ES at box-loopback) and DON'T deploy the box
-        # agent (FalcoLLM has no host actions; RestoreServer routes to the env over the ssh -R tunnel). The
-        # baton hands build_config the box's OWN loopback es_url, which it bakes into the runner config.
-        box_cfg = {
-            "defender_env_spec": defender_env_spec.model_dump() if defender_env_spec is not None else {},
-            "defender_setup_access": [a.model_dump() for a in (defender_access or [])],
-        }
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> PreparedLLMSOC:
+        """ARM the defender and BLOCK until armed — mirror of AttackerPlugin.setup(). Box-resident: stand up
+        the per-experiment ES ON the box (read at box-loopback 127.0.0.1:9200, no harness ssh -L tunnel),
+        write the runner config, open the plugin-owned ssh -R env-action tunnel (box-loopback ->
+        harness-loopback, so the box engine's RestoreServer reaches the harness TCP server), then LAUNCH the
+        engine on the box and SSH-poll until it arms. The launched process is stashed in _BOX_PROCS and handed
+        to run_start via start(), so READY (emitted by run_setup) follows the box arming. No box agent
+        (FalcoLLM's env actions route over the tunnel). Raising here fails the defender start."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec
+        box_cfg = {"defender_env_spec": env_spec.model_dump() if env_spec is not None else {},
+                   "defender_setup_access": [a.model_dump() for a in (access or [])]}
         loop = asyncio.get_event_loop()
         es = await loop.run_in_executor(None, self._install_box_es_only, box_cfg, experiment_name, cfg)
-        return PreparedLLMSOC(
-            es_url="http://127.0.0.1:9200",
-            falco_index=es["falco_index"],
-            sysflow_index=es["sysflow_index"],
-        )
+        _box_port = getattr(experiment, "_env_action_box_port", None)
+        prepared = PreparedLLMSOC(
+            es_url="http://127.0.0.1:9200", falco_index=es["falco_index"], sysflow_index=es["sysflow_index"],
+            env_action_url=(f"http://127.0.0.1:{_box_port}" if _box_port else None),
+            env_action_token=getattr(experiment, "_env_action_token", None))
+        # Write the runner config the box engine reads (build_config bakes the baton; inject creds/routing —
+        # kept out of build_config by the leak guard, same as the base's run_setup).
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, prepared)
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        built["defender_setup_access"] = [a.model_dump() for a in (access or [])]
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        config_path.write_text(json.dumps(built, indent=2))
+        # Open the plugin-owned ssh -R tunnel BEFORE the engine, so its env actions route the instant it arms
+        # (mirrors the Incalmo attacker owning its ssh -L C2 tunnel).
+        if built.get("env_action_url"):
+            port = int(built["env_action_url"].rsplit(":", 1)[1])
+            box = self._select_box(access, built)
+            tun_log = output_root(experiment_name, cfg) / experiment_name / "defender" / "env_action_tunnel.log"
+            tun_log.parent.mkdir(parents=True, exist_ok=True)
+            _ENV_TUNNELS[experiment_name] = await open_reverse_tunnel(box, port, port, log_path=tun_log)
+        # Launch the engine on the box + BLOCK until it arms (_launch_on_box ends in _wait_box_ready).
+        _BOX_PROCS[experiment_name] = await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
+        return prepared
 
     def _install_box_es_only(self, box_cfg: dict, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
         """Install the per-experiment Elasticsearch ON the defender box (idempotent; box_es_install.sh binds
@@ -159,27 +182,20 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
         cfg: ExperimentManagerConfig,
         access=None,
     ) -> asyncio.subprocess.Process:
-        """Open THIS PLUGIN's ssh -R env-action tunnel (box-loopback -> harness-loopback), then launch the
-        engine ON THE BOX (overrides the base's local run()). The tunnel mirrors the Incalmo attacker's ssh -L
-        C2 tunnel — the plugin owns it, not the arena: the arena armed the token'd TCP server + port (keyed
-        on uses_env_actions) and baked env_action_url+token into the runner config; here we read that port
-        back and open the reverse forward so the box engine's RestoreServer calls reach the harness server.
-
-        TIMING NOTE: the tunnel opens HERE in start() (run_defender), i.e. AFTER setup()/prepare(). That is
-        fine for a REACTIVE box-resident defender like FalcoLLM, whose prepare() is a no-op and whose env
-        actions only fire once the run loop is live. A FUTURE box-resident DECOY defender that deploys decoys
-        during prepare() (external arming) would need its env channel up BEFORE that — open its tunnel in
-        provision_box()/setup() instead of here. (Our harness-run decoy defenders — deception / prompt_injection
-        — don't hit this: they reach the env over the UDS, not this tunnel.)"""
+        """Hand run_start the box runner process that setup() already LAUNCHED + armed (the tunnel is open and
+        the engine blocked until armed inside setup(), so READY — emitted by run_setup — follows the box
+        arming, symmetric with the attacker). start() just hands the process over so run_start emits RUNNING.
+        Fallback: if setup() didn't run for this experiment (e.g. a direct call), open the tunnel + launch now."""
+        proc = _BOX_PROCS.pop(experiment_name, None)
+        if proc is not None:
+            return proc
         built = json.loads(Path(config_path).read_text())
         url = built.get("env_action_url")
-        if url:  # uses_env_actions: arm the reverse tunnel BEFORE the engine so its env actions can route
+        if url and experiment_name not in _ENV_TUNNELS:
             port = int(url.rsplit(":", 1)[1])
             box = self._select_box(access, built)
             tun_log = output_root(experiment_name, cfg) / experiment_name / "defender" / "env_action_tunnel.log"
             tun_log.parent.mkdir(parents=True, exist_ok=True)
-            # open + confirm up; a failure RAISES -> fails the start (like a readiness gate). box_port ==
-            # tcp_port (same loopback port both ends; distinct per box/experiment, so no collision).
             _ENV_TUNNELS[experiment_name] = await open_reverse_tunnel(box, port, port, log_path=tun_log)
         return await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
 

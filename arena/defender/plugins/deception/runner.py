@@ -230,11 +230,9 @@ print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", 
 # start() does NOT re-deploy those; a reactive/in-process strategy still does its full arming here.
 defender.start(prepared=True)
 
-# Signal the harness that this strategy is armed. For a reactive strategy its decoy/cred deploy +
-# subscriptions happened here in start(); for a static strategy they happened in the prepare pass and
-# start() only began monitoring. Either way the marker means "armed" and gates the attacker (see
-# DefenderPlugin.wait_until_ready). Written after start() returns, in the harness's own log_dir.
-(log_dir / "defender_ready").write_text(str(time.time()))
+# No readiness marker any more: the arena's wait_until_ready gate is gone — the plugin's setup() ran the
+# arming ('prepare') pass and run_setup emitted READY before this loop started. (A reactive strategy still
+# does its in-loop arming here until the Perry engine prepare-move lands — see docs/agent-symmetry.md.)
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:
