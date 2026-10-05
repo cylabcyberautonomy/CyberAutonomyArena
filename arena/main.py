@@ -890,9 +890,6 @@ async def _run_experiment(experiment: Experiment) -> None:
         # _handle_failure inside the block cannot deadlock; the lock releases on return.
         async with _configure_lock.acquire(_gate_priority(experiment)):
             try:
-                # Drop any marker left by a previous run of this experiment name
-                # (overwrite=true reuses the output dir) before the gate below.
-                experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
                 # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
                 # arena records each phase so an observer sees where the defender is and a hang shows
                 # as a stalled status, not one opaque "failed to arm".
@@ -956,7 +953,11 @@ async def _run_experiment(experiment: Experiment) -> None:
                 # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
                 # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
                 # run_defender then only launches the reactive loop (the defender analog of run_attacker).
-                _prepared = await experiment.defender.run_setup(experiment, cfg)
+                _prepared = await experiment.defender.run_setup(experiment, cfg)  # ARMS, emits SETUP_STARTED -> READY
+                # arena -> defender: launch the reactive loop (run_defender -> run_start emits RUNNING). No
+                # readiness marker: run_setup() already blocked until armed and emitted READY (symmetric with
+                # the attacker — see docs/agent-symmetry.md).
+                await defender_lc.send(DefenderCommand.START)
                 defender_process = await run_defender(experiment.defender, experiment, cfg, _prepared)
                 experiment.defender_pid = defender_process.pid
                 experiment.defender_started_at = datetime.now(timezone.utc)
@@ -973,31 +974,13 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await _handle_failure(experiment, f"Failed to start defender — {e}")
                 return
 
-            # Wait for the defender to actually arm before letting the attacker in.
-            # run_defender() only spawns the process; the strategy's initialize()
-            # (deploying decoys, planting fake data and honey credentials) runs
-            # inside it and takes minutes. Without this the attacker could complete
-            # its entire chain against an environment that had no deception in it
-            # yet - which produced a "defense held / did not hold" result that
-            # measured nothing. Failing here is deliberate: a defense that never
-            # armed must not be reported as a defended run.
-            try:
-                await experiment.defender.wait_until_ready(
-                    experiment.experiment_name, cfg, defender_process, log
-                )
-                # Armed: the detection loop is up and reading telemetry. A passive detector is live
-                # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
-                # is gated on READY above; RUNNING marks "defender actively defending").
-                await defender_lc.emit(DefenderSignal.READY)
-                await defender_lc.send(DefenderCommand.START)
-                await defender_lc.emit(DefenderSignal.RUNNING)
-                await registry.update(experiment)
-            except Exception as e:
-                exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
-                await defender_lc.emit(DefenderSignal.FAILED, str(e))
-                await _stop_defender_process(experiment, defender_process, cfg)
-                await _handle_failure(experiment, f"Defender failed to arm — {e}")
-                return
+            # No readiness handshake: run_setup() above fully ARMED the defender — setup() stands up the
+            # box infra and deploys decoys / plants honey-creds, blocking until armed, then emits READY —
+            # and run_defender() -> run_start() launched the reactive loop and emitted RUNNING. The defender
+            # is live and defending; the attacker (gated below) can start. An arming failure raised out of
+            # run_setup() and was handled by the "Failed to start defender" block above, exactly as the
+            # attacker's setup failure is. (Symmetric with the attacker; the old marker/wait_until_ready gate
+            # existed only because arming used to happen inside the run loop — see docs/agent-symmetry.md.)
 
     # Host-log rotation is now an MHBench wrapper detail run inside mhbench.configure() (right after
     # configuring), NOT an arena step — so there is no rotate call here.
