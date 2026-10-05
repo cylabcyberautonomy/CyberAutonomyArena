@@ -289,7 +289,8 @@ def test_attacker_plugin_conforms(name):
 
 # --------------------------------------------------------------------------- defender conformance
 
-_DEFENDER_METHODS = {"build_config": False, "run": True, "setup": True, "teardown": True, "prepare": True}
+_DEFENDER_METHODS = {"build_config": False, "setup": True, "start": True, "stop": True,
+                     "collect_logs": True, "teardown": True, "prepare": True}
 
 
 @pytest.mark.parametrize("name", _real_plugins(DefenderPlugin._registry), ids=lambda n: n)

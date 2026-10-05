@@ -123,13 +123,16 @@ class DefenderPlugin(BaseModel):
     def ui_schema(cls) -> PluginUISchema:
         raise NotImplementedError(f"{cls.__name__} must implement ui_schema()")
 
-    @abstractmethod
     async def run(
         self,
         config_path: Path,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
-    ) -> asyncio.subprocess.Process: ...
+    ) -> asyncio.subprocess.Process:
+        """REQUIRED (unless you override start()). Launch the defender run loop and return it. start() calls
+        this by default; override start() instead — e.g. a box-resident defender launching over SSH — if you
+        need the scoped access at launch. Mirrors AttackerPlugin.run()."""
+        raise NotImplementedError(f"{type(self).__name__} must implement run() or override start()")
 
     async def start(
         self,
@@ -287,6 +290,7 @@ class DefenderPlugin(BaseModel):
         defender's problem to reap - deleting a VM is backend-specific, and defenders are
         backend-agnostic. The ENVIRONMENT sweeps those on its own networks as the first
         step of its teardown (see MHBenchEnvironment._teardown_dynamic_hosts)."""
+        return None
 
     def box_ingress(self) -> dict[str, list[int]]:
         """The defender-requested box-ingress this plugin needs the ENVIRONMENT to open, by kind:
@@ -393,9 +397,11 @@ class DefenderPlugin(BaseModel):
 
     @staticmethod
     def primary_access(access) -> "DefenderSetupAccess":
-        """The box entry the defender's runner operates from (mirrors AttackerPlugin.primary_access).
-        TODO (slice 3): select the box entry by env_spec.box.ip rather than [0], since the defender's
-        access list also carries victim entries; [0] is a placeholder for the scaffold."""
+        """The first scoped DefenderSetupAccess (mirrors AttackerPlugin.primary_access by shape). WARNING:
+        for the ATTACKER access[0] is the single foothold (correct), but the DEFENDER's access list is
+        VICTIMS-FIRST / box-last (see deployer.defender_setup_access), so access[0] is a VICTIM, NOT the
+        defender box. A runs_on_box defender MUST select its box by env_spec.box.ip (see _launch_on_box) —
+        this helper is only a last-resort fallback when no box ip is available."""
         if not access:
             raise RuntimeError("no DefenderSetupAccess passed to the defender — the arena must pass it to run_setup()")
         return access[0]
