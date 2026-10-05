@@ -166,6 +166,42 @@ So: slice 1 unified the shared machinery; slice 2 + the parity pass made the lif
 now DONE (teammate). Remaining: the `prepare()` fold (user decision) + `setup()` signature alignment (cross-
 repo). After those the defender stays modestly larger only for the truly-irreducible set above — correct.
 
+## Fuller-B relocation plan (box-exec → plugins) — for the teammate-paired pass, against the live window
+
+Decided (user): FULLER B — box-exec moves off the base into the box plugins (copied per plugin), base
+`start()` → `return run()`, `runs_on_box` eliminated. Box path LIVE-VALIDATED (box_fll green @ d5e893e).
+**Held for a coordinated pass** (not a solo overnight merge): the box machinery is woven + security-sensitive
+(key-shipping + token'd ssh -R) and can't be live-re-validated until both users are back. Execute on a side
+branch → teammate offline review → re-run box_fll → merge when green.
+
+MOVE OUT of `arena/defender/plugins/base.py` INTO each box plugin (copied, per B):
+- **canary** (control-plane-FREE, stdlib): the box_python=None subset — `_box_paths`, `_box_run_command`
+  (stdlib branch), `_box_push`, `_tty_ssh`, `_box_runner_src`, `_launch_on_box` (minus engine-ship + the
+  env-action cred-threading canary doesn't use), `_wait_box_ready`, `_BOX_DIR`. No tunnel, no `uses_env_actions`.
+- **llm_soc_box** (uv engine + control plane): the FULL unit — the above + `box_pip_spec`/`box_engine_src`/
+  `box_ships_engine`/`box_python`, `_ship_engine_to_box`, `_rewrite_access_keys`/`_thread_box_credentials`,
+  and it opens its OWN `ssh -R` tunnel in setup()/start() (the `box_channel` wiring from base `setup()`/
+  `_write_runner_config` moves here). Sets `uses_env_actions = True`.
+- The tunnel *helpers* (`pick_free_tcp_port`/`build_reverse_tunnel_cmd`/`open_reverse_tunnel`/
+  `close_reverse_tunnel`) stay in `env_action_server.py` as importable arena env-channel infra; the box
+  plugin calls them (the INVOCATION moves off `main.py` into the plugin).
+
+CHANGE in the base:
+- `start()` → just `return await self.run(...)` (drop the `runs_on_box` branch).
+- Remove `runs_on_box`; remove the `runs_on_box` access-threading in `run_start`/`run_stop`/`run_collect_logs`
+  and the `box_channel`/`runs_on_box` cred-branches in `setup()`/`_write_runner_config`. KEEP the
+  `executes_from_box` UDS branch (harness-run box-agent model) untouched.
+- `primary_access`/`_persist_access`/`_load_access` move with the box plugins (only they use them).
+
+CHANGE in `main.py` (arena):
+- Key the env-channel server + token + serving window on **`uses_env_actions`** (not `runs_on_box`).
+- Remove the `ssh -R` arming block (the plugin opens its own). Arena still runs `serve_env_actions_tcp`,
+  generates the token, and sets `experiment._env_action_box_port`/`_env_action_token` for the plugin to read.
+
+ADD: `uses_env_actions: ClassVar[bool] = False` on the base; `llm_soc_box` sets it True; canary leaves False.
+KEEP untouched: `defender_vm_budget` (capacity; full delete gated on the OSS capacity story), `executes_from_box`.
+ALSO land then: `env_action_server` security-docstring (loopback + ssh -R), attacker residual `run_setup` (doc only).
+
 ## Full conversion (convert every defender to run on the box) — per-component live work
 
 Investigating the real conversion surfaced that it spans **three** components, and several seams are
