@@ -164,7 +164,14 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
         engine ON THE BOX (overrides the base's local run()). The tunnel mirrors the Incalmo attacker's ssh -L
         C2 tunnel — the plugin owns it, not the arena: the arena armed the token'd TCP server + port (keyed
         on uses_env_actions) and baked env_action_url+token into the runner config; here we read that port
-        back and open the reverse forward so the box engine's RestoreServer calls reach the harness server."""
+        back and open the reverse forward so the box engine's RestoreServer calls reach the harness server.
+
+        TIMING NOTE: the tunnel opens HERE in start() (run_defender), i.e. AFTER setup()/prepare(). That is
+        fine for a REACTIVE box-resident defender like FalcoLLM, whose prepare() is a no-op and whose env
+        actions only fire once the run loop is live. A FUTURE box-resident DECOY defender that deploys decoys
+        during prepare() (external arming) would need its env channel up BEFORE that — open its tunnel in
+        provision_box()/setup() instead of here. (Our harness-run decoy defenders — deception / prompt_injection
+        — don't hit this: they reach the env over the UDS, not this tunnel.)"""
         built = json.loads(Path(config_path).read_text())
         url = built.get("env_action_url")
         if url:  # uses_env_actions: arm the reverse tunnel BEFORE the engine so its env actions can route
