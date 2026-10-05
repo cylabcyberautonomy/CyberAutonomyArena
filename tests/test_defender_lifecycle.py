@@ -389,14 +389,17 @@ def test_defender_plugin_keying_matrix():
     """The two SEPARATE keying axes on the real plugins (coordinator's correction):
       executes_from_box = uses the harness-run BOX AGENT (host actions) -> needs_agent/UDS.
       uses_env_actions  = issues env-actions -> needs the SERVING WINDOW + an env channel.
-    deception/prompt_injection are harness-run decoy defenders: BOTH. llm_soc_box is box-resident: env
-    actions only. canary: neither."""
+    deception/prompt_injection/llm_soc are harness-run decoy/active defenders: BOTH (box agent for host
+    actions AND the env channel for RebuildHost/decoy). llm_soc_box is box-resident: env actions only.
+    canary: neither."""
     from arena.defender.plugins.deception.deception import DeceptionDefenderPlugin
     from arena.defender.plugins.prompt_injection.prompt_injection import PromptInjectionDefenderPlugin
+    from arena.defender.plugins.llm_soc.llm_soc import LLMSOCDefenderPlugin
     from arena.defender.plugins.llm_soc.llm_soc_box import LLMSOCBoxDefenderPlugin
     from arena.defender.plugins.canary.canary import CanaryDefenderPlugin
     assert (DeceptionDefenderPlugin.executes_from_box, DeceptionDefenderPlugin.uses_env_actions) == (True, True)
     assert (PromptInjectionDefenderPlugin.executes_from_box, PromptInjectionDefenderPlugin.uses_env_actions) == (True, True)
+    assert (LLMSOCDefenderPlugin.executes_from_box, LLMSOCDefenderPlugin.uses_env_actions) == (True, True)
     assert (LLMSOCBoxDefenderPlugin.executes_from_box, LLMSOCBoxDefenderPlugin.uses_env_actions) == (False, True)
     assert (CanaryDefenderPlugin.executes_from_box, CanaryDefenderPlugin.uses_env_actions) == (False, False)
 

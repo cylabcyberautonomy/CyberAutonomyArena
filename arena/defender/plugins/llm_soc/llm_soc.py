@@ -82,6 +82,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "llm_model"})
     code_dir_field = "llm_soc_dir"          # Defense/Perry repo for this defender (per-plugin)
     executes_from_box = True                 # box-only execution: deploy the box agent + arm the env channel
+    uses_env_actions = True                  # issues env-actions (FalcoLLM RebuildHost; FalcoLLMC2Block BlockIP via the box agent)
     code_python_field = "llm_soc_python"
     strategy: str  # "FalcoLLM" or "FalcoLLMC2Block"
     # Default to Sonnet-5 on OpenRouter so it shares a route with the 4.5
