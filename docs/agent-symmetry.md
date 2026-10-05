@@ -168,6 +168,15 @@ repo). After those the defender stays modestly larger only for the truly-irreduc
 
 ## Fuller-B relocation plan (box-exec → plugins) — for the teammate-paired pass, against the live window
 
+> **EXECUTED on `feature/fuller-b-relocation` (offline; 121 tests green).** The plan below is done:
+> `runs_on_box` is gone from the whole repo, the box-launch unit lives on `canary` (stdlib subset) +
+> `llm_soc_box` (full uv/engine), base `start()` is `return await self.run(...)`, the base `run_*` wrappers
+> load the scoped access unconditionally (symmetric with the attacker), the arena keys the env-channel on
+> `uses_env_actions`, and `llm_soc_box` opens + reaps its OWN `ssh -R` tunnel (module-keyed, Incalmo-style).
+> **Still owed before merge:** teammate line-review of the security-sensitive bits (key-shipping,
+> plugin-owned tunnel, token'd TCP) + a live `box_fll` re-run in a cloud window. See the deviations noted in
+> the branch's commit message. The paragraph below is the original plan, kept for the review diff.
+
 Decided (user): FULLER B — box-exec moves off the base into the box plugins (copied per plugin), base
 `start()` → `return run()`, `runs_on_box` eliminated. Box path LIVE-VALIDATED (box_fll green @ d5e893e).
 **Held for a coordinated pass** (not a solo overnight merge): the box machinery is woven + security-sensitive

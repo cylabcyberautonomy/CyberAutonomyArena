@@ -1,6 +1,6 @@
 """Slice 4: the token'd TCP control-plane channel (env_action_server).
 
-A box-resident defender (runs_on_box) reaches the env-action channel over TCP, not the harness UDS, so
+A box-resident defender (uses_env_actions) reaches the env-action channel over TCP, not the harness UDS, so
 the per-experiment token is restored. These are pure handler tests (no sockets): they assert the token
 gate (trusted_transport=False) accepts the right token and rejects anything else, and that the UDS path
 (trusted_transport=True) is unchanged (token-free). handle_env_action checks the token right after

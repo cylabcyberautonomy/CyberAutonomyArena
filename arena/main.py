@@ -916,15 +916,17 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
-                # Arm the dynamic topology-mutation window. Box-only execution: a defender that
-                # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
-                # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
-                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
-                # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
-                # not only during the attack. It stays open through the attack and closes at DEACTIVATE
-                # (finally). No token: the env channel is a UDS unreachable from in-env.
+                # Arm the dynamic topology-mutation window for a defender that issues ENV ACTIONS
+                # (restore/BlockIP/decoy): either a HARNESS-RUN controller (executes_from_box — box agent +
+                # UDS channel) or a BOX-RESIDENT engine (uses_env_actions — token'd TCP channel). The VM
+                # budget only sets how many hosts add_host may create (0 is fine for a block/restore-only
+                # defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a decoy-deploying defender
+                # mutates topology during ARMING (static decoy deploy in prepare), not only during the attack.
+                # It stays open through the attack and closes at DEACTIVATE (finally).
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
+                _executes_from_box = getattr(type(experiment.defender), "executes_from_box", False)
+                _uses_env_actions = getattr(type(experiment.defender), "uses_env_actions", False)
+                _env_dynamic = _executes_from_box or _uses_env_actions
                 if _env_dynamic:
                     experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)
@@ -932,37 +934,25 @@ async def _run_experiment(experiment: Experiment) -> None:
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
-                    # A runs_on_box defender's engine is in-env and cannot reach the harness UDS, so serve
-                    # the env-action channel over a TOKEN'd TCP port on HARNESS-LOOPBACK + a harness-initiated
-                    # ssh -R tunnel to the box (loopback both ends; mirrors Incalmo's ssh -L). Set up BEFORE
-                    # run_setup so the box runner config carries the url+token and a box-resident ARMING
-                    # (decoy deploy) can already reach it. (executes_from_box WITHOUT runs_on_box keeps the
-                    # UDS — its runner is still on the harness; canary is runs_on_box but not _env_dynamic.)
-                    if getattr(type(experiment.defender), "runs_on_box", False):
+                    # A BOX-RESIDENT defender (uses_env_actions, runner in-env) cannot reach the harness UDS,
+                    # so serve the env-action channel over a TOKEN'd TCP port on HARNESS-LOOPBACK and set the
+                    # per-experiment token/port BEFORE run_setup (so the runner config carries url+token and a
+                    # box-resident ARMING can already reach it). The ssh -R tunnel to the box is opened by the
+                    # DEFENDER PLUGIN itself (it owns it, like the Incalmo attacker owns its ssh -L C2 tunnel),
+                    # not here. A HARNESS-RUN executes_from_box controller keeps the tokenless UDS (set in
+                    # setup() off _env_dynamic) — its runner is on the harness.
+                    if _uses_env_actions and not _executes_from_box:
                         from .env_action_server import (new_env_action_token, pick_free_tcp_port,
-                                                        serve_env_actions_tcp, open_reverse_tunnel)
-                        _dspec = experiment._defender_env_spec
-                        _box_ip = str(getattr(getattr(_dspec, "box", None), "ip", None))
-                        _box_acc = next((a for a in (experiment._defender_access or [])
-                                         if str(a.host) == _box_ip), None)
-                        if _box_acc is None:
-                            raise RuntimeError(f"no defender-box SetupAccess (box ip {_box_ip}) for the "
-                                               "env-action reverse tunnel")
+                                                        serve_env_actions_tcp)
                         _tcp_port = pick_free_tcp_port()  # ephemeral, per-experiment: no harness collision
                         experiment._env_action_token = new_env_action_token()
                         experiment._env_action_tcp_port = _tcp_port
                         experiment._env_action_box_port = _tcp_port  # box-loopback; distinct box/exp, no collision
                         experiment._env_action_tcp_task = asyncio.create_task(
                             serve_env_actions_tcp("127.0.0.1", _tcp_port, registry, cfg, _openstack_lock))
-                        _tun_log = (output_root(experiment.experiment_name, cfg) / experiment.experiment_name
-                                    / "defender" / "env_action_tunnel.log")
-                        _tun_log.parent.mkdir(parents=True, exist_ok=True)
-                        # open on arm + confirm up; a failure RAISES -> fails the arm (like a readiness gate).
-                        experiment._env_action_tunnel_proc = await open_reverse_tunnel(
-                            _box_acc, _tcp_port, _tcp_port, log_path=_tun_log)
-                        exp_log.info("env-action TCP+tunnel up for box defender '%s' (box 127.0.0.1:%d -> "
-                                     "harness 127.0.0.1:%d, token'd)", experiment.experiment_name,
-                                     _tcp_port, _tcp_port)
+                        exp_log.info("env-action TCP server up for box defender '%s' (harness 127.0.0.1:%d, "
+                                     "token'd; the plugin opens the ssh -R tunnel to the box)",
+                                     experiment.experiment_name, _tcp_port)
                 # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
                 # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
                 # run_defender then only launches the reactive loop (the defender analog of run_attacker).
@@ -1074,12 +1064,10 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment._env_serving = False
             experiment._env_lifecycle.send(EnvironmentCommand.DEACTIVATE)
             experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)
-            # tear down the box env-action channel (reverse tunnel + per-experiment TCP server), if one was
-            # opened for a runs_on_box defender. Best-effort; the VMs get reclaimed regardless.
-            _tun = getattr(experiment, "_env_action_tunnel_proc", None)
-            if _tun is not None:
-                from .env_action_server import close_reverse_tunnel
-                await close_reverse_tunnel(_tun)
+            # Cancel the per-experiment env-action TCP server (the arena owns it). The ssh -R tunnel to the
+            # box is the DEFENDER PLUGIN's own and is closed in its stop() (driven below via
+            # _stop_defender_process → run_stop → stop), mirroring the Incalmo attacker reaping its ssh -L.
+            # Best-effort; the VMs get reclaimed regardless.
             _tcp_task = getattr(experiment, "_env_action_tcp_task", None)
             if _tcp_task is not None:
                 _tcp_task.cancel()

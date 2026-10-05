@@ -1,11 +1,7 @@
 import asyncio
-import inspect
 import json
 import os
-import shlex
 import signal
-import subprocess
-import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import ClassVar, Optional
@@ -85,35 +81,13 @@ class DefenderPlugin(BaseModel):
     # orchestrator any more). Checks-only/self-contained defenders (canary, velociraptor) leave it False.
     executes_from_box: ClassVar[bool] = False
 
-    # SLICE 3 SCAFFOLD (opt-in, default False — see docs/agent-symmetry.md). When True the defender is
-    # driven like the attacker: its scoped access is THREADED THROUGH run_start/run_stop/run_collect_logs
-    # at launch (loaded from the persisted SetupAccess by the wrappers) instead of baked into the runner
-    # config, and the runner executes from the box. Default False keeps today's behavior exactly (harness
-    # run loop + creds injected into the config). The box launch (_launch_on_box) and the readiness wait
-    # (_wait_box_ready) are stubs until live-validated; no shipped defender sets this yet. (This axis
-    # subsumes executes_from_box, which slice 4 folds in once the control-plane channel lands.)
-    runs_on_box: ClassVar[bool] = False
-
-    # Box runtime for a runs_on_box defender (how _launch_on_box provides the interpreter the box runner
-    # needs): None => run the shipped runner.py under the box's own `python3` (a stdlib-only runner, e.g.
-    # canary — the box is Ubuntu 20.04/py3.8). A version string like "3.12" => provision a `uv` venv with
-    # that interpreter on the box (downloads a standalone CPython — sidesteps the box's broken apt + missing
-    # venv module, the Terminus pattern) and run under it; such a plugin must also override box_pip_spec().
-    box_python: ClassVar[Optional[str]] = None
-    _BOX_DIR: ClassVar[str] = "/opt/arena-defender"  # where the runner + config (+ uv venv) live on the box
-
-    # A runs_on_box ENGINE defender (box_python set) that needs a whole code tree on the box — not just the
-    # single stdlib runner.py — sets this True and overrides box_engine_src() to point at the repo to ship.
-    # _launch_on_box rsyncs that tree (+ its .env) to the box's engine dir, _box_run_command installs its
-    # requirements.txt into the uv venv and runs the runner with cwd + PYTHONPATH = the shipped engine (so a
-    # repo-backed defender like Perry's FalcoLLM runs box-resident, reading box-local ES, routing cloud
-    # actions to the env over the ssh -R tunnel). The stdlib runner / declared box_pip_spec paths are unchanged.
-    box_ships_engine: ClassVar[bool] = False
-
-    def box_engine_src(self, cfg: ExperimentManagerConfig) -> Optional[Path]:
-        """The local code tree a box_ships_engine defender ships to the box (e.g. the Perry repo). Only
-        consulted when box_ships_engine is True; the base returns None (nothing to ship)."""
-        return None
+    # Whether this defender issues ENV ACTIONS (restore / BlockIP / deploy-decoy) that need the arena's
+    # environment-plugin connection — i.e. it uses the token'd TCP env-action channel + the dynamic serving
+    # window + a mid-run VM budget. The arena keys the env-channel (sets the token + box/tcp ports, starts
+    # serve_env_actions_tcp) and the serving window on THIS, independent of where the runner physically runs
+    # (a box-resident defender opens its own ssh -R tunnel to reach the channel — see llm_soc_box). Default
+    # False = a detect-only defender (canary, a plain SOC) that mutates nothing and needs no channel.
+    uses_env_actions: ClassVar[bool] = False
 
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
@@ -156,16 +130,16 @@ class DefenderPlugin(BaseModel):
         access=None,
     ) -> asyncio.subprocess.Process:
         """OPTIONAL (default: call run()). Launch the defender run loop. Mirrors AttackerPlugin.start();
-        the run_start wrapper calls this. `prepared`/`access` are accepted for symmetry. When runs_on_box
-        (slice 3) the loop is launched FROM THE BOX over SSH via `access` (_launch_on_box); otherwise it
-        runs as a local harness subprocess and `prepared`/`access` are ignored."""
-        if self.runs_on_box:
-            return await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
+        the run_start wrapper calls this with the scoped `access`. The default runs run() as a local harness
+        subprocess and ignores `prepared`/`access`. A box-resident defender OVERRIDES this to launch its
+        runner ON THE BOX over SSH via `access` (and, if it issues env actions, to open its own ssh -R
+        tunnel first) — the box-launch machinery lives on that plugin, not here (see llm_soc_box / canary)."""
         return await self.run(config_path, experiment_name, cfg)
 
     async def stop(self, experiment, cfg: ExperimentManagerConfig, access=None) -> None:
-        """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop); a
-        box-resident defender (runs_on_box) overrides this to kill its remote process via `access`."""
+        """OPTIONAL. Terminate the defender process. Local pid here (mirrors AttackerPlugin.stop) — for a
+        box-resident defender this is the local `ssh -tt` process, whose SIGTERM tears the remote runner
+        down with it; a plugin that needs a cleaner remote kill overrides this to use `access`."""
         if getattr(experiment, "defender_pid", None):
             try:
                 os.kill(experiment.defender_pid, signal.SIGTERM)
@@ -174,8 +148,8 @@ class DefenderPlugin(BaseModel):
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
         """OPTIONAL. Pull defender-side logs into dest. Default no-op — the harness-run defender's logs are
-        already local. A box-resident defender (runs_on_box) overrides this to pull its box logs via
-        `access`, mirroring AttackerPlugin.collect_logs."""
+        already local. A box-resident defender overrides this to pull its box logs via `access`, mirroring
+        AttackerPlugin.collect_logs."""
 
     @classmethod
     def example_prepared(cls) -> "PreparedDefender":
@@ -200,16 +174,21 @@ class DefenderPlugin(BaseModel):
         cfg.arena_host_ip (the harness's own fixed address). Raising here fails the defender start."""
         experiment_name = experiment.experiment_name
         env_spec = experiment._defender_env_spec        # agent-facing DefenderEnvSpec (host inventory, NO creds)
-        # The dynamic topology-mutation window (+ box agent) is armed only for an executes_from_box defender;
-        # the arena sets experiment._env_dynamic before this runs.
-        env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
-        needs_agent = env_action_socket is not None
-        # A runs_on_box defender reaches the env-action channel over the TOKEN'd TCP tunnel (box-loopback
-        # url + token the arena set up before run_setup), NOT the harness UDS (unreachable from the box).
+        # If the arena stood up a TOKEN'd TCP env-action channel for this experiment (a uses_env_actions
+        # BOX-RESIDENT defender — whose plugin opens its own ssh -R tunnel to it), bake the box-loopback url +
+        # token into the runner config. Keyed on the arena having set the port/token, NOT on where the runner
+        # runs.
         box_channel = None
-        if self.runs_on_box and getattr(experiment, "_env_action_box_port", None) and getattr(experiment, "_env_action_token", None):
+        if getattr(experiment, "_env_action_box_port", None) and getattr(experiment, "_env_action_token", None):
             box_channel = {"env_action_url": f"http://127.0.0.1:{experiment._env_action_box_port}",
                            "env_action_token": experiment._env_action_token}
+        # Otherwise, a HARNESS-RUN executes_from_box controller reaches the env-action channel over the
+        # tokenless UDS (+ a thin box agent for host actions). The UDS and the box agent are armed only when
+        # the dynamic window is open (experiment._env_dynamic) AND there is no TCP box_channel (a box-resident
+        # engine uses neither — it reaches victims itself and the env over its tunnel).
+        env_action_socket = (resolve_socket_path(cfg)
+                             if getattr(experiment, "_env_dynamic", False) and box_channel is None else None)
+        needs_agent = env_action_socket is not None
         # HOOK A — stand up the per-experiment box ES / box agent and produce the baton (default: empty).
         prepared = await self.provision_box(
             experiment_name, cfg, bastion_ip,
@@ -240,10 +219,10 @@ class DefenderPlugin(BaseModel):
             built["defender_env_spec"] = env_spec.model_dump()
         # Box-only execution: a HARNESS-RUN executes_from_box controller gets ONLY the box entry — it never
         # acts on victims directly, it asks the box agent (which alone holds victim access) and the env. A
-        # runs_on_box engine is the opposite: it runs IN-env and reaches victims itself (box-local keys,
-        # threaded at launch), so it keeps the full victim access.
+        # box-RESIDENT defender is the opposite: it runs IN-env and reaches victims itself (box-local keys,
+        # threaded at launch by the plugin), so it leaves executes_from_box False and keeps the full access.
         _access = list(access or [])
-        if getattr(type(self), "executes_from_box", False) and not self.runs_on_box and env_spec is not None:
+        if getattr(type(self), "executes_from_box", False) and env_spec is not None:
             _box = getattr(env_spec, "box", None)
             _box_ip = getattr(_box, "ip", None) if _box else None
             if _box_ip:
@@ -254,7 +233,7 @@ class DefenderPlugin(BaseModel):
         built["management_ip"] = cfg.arena_host_ip
         built["bastion_ip"] = bastion_ip
         built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
-        # Dynamic topology-mutation channel. A runs_on_box engine reaches it over the TOKEN'd TCP tunnel
+        # Dynamic topology-mutation channel. A box-resident defender reaches it over the TOKEN'd TCP tunnel
         # (box-loopback url + token); a harness-run executes_from_box controller over the UDS (no token —
         # unreachable from in-env). The runner's RemoteEnvOrchestrator uses env_action_url+token if present,
         # else env_action_socket.
@@ -377,9 +356,10 @@ class DefenderPlugin(BaseModel):
         experiment_name = experiment.experiment_name
         access = experiment._defender_access             # scoped SetupAccess list (key + bastion routing)
         bastion_ip = experiment._bastion_ip             # this experiment's ephemeral bastion floating IP
-        # when runs_on_box, persist the scoped access so run_start/run_stop/collect thread it at launch
-        # (mirroring the attacker) instead of it being injected into the written config.
-        if self.runs_on_box and access and cfg is not None:
+        # Persist the scoped access so run_start/run_stop/run_collect_logs can recover + thread it at launch
+        # (mirroring the attacker). A box-resident defender's start() uses it to reach the box; a harness-run
+        # defender's start() ignores it (its creds already travel in the written runner config).
+        if access and cfg is not None:
             self._persist_access(experiment_name, cfg, access)
         return await self.setup(experiment, cfg, bastion_ip, access)
 
@@ -390,7 +370,7 @@ class DefenderPlugin(BaseModel):
         emit RUNNING here: a defender is READY/RUNNING only once its runner has armed (the readiness
         marker, see wait_until_ready), which the arena detects after this returns. (That asymmetry
         collapses in the box model — see docs/agent-symmetry.md.)"""
-        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
+        access = self._load_access(experiment.experiment_name, cfg)
         return await self.start(prepared, config_path, experiment.experiment_name, cfg, access=access)
 
     async def run_stop(self, experiment, cfg: ExperimentManagerConfig) -> None:
@@ -401,7 +381,7 @@ class DefenderPlugin(BaseModel):
         lc = self._lifecycle(experiment)
         if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
             await lc.emit(DefenderSignal.STOPPING)
-        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
+        access = self._load_access(experiment.experiment_name, cfg)
         try:
             await self.stop(experiment, cfg, access=access)
         finally:
@@ -409,18 +389,20 @@ class DefenderPlugin(BaseModel):
                 await lc.emit(DefenderSignal.STOPPED)
 
     async def run_collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path) -> None:
-        """Load the persisted scoped access (when runs_on_box) and hand it to collect_logs() — mirrors
-        AttackerPlugin.run_collect_logs. For a harness-run defender access is None and logs are local."""
-        access = self._load_access(experiment.experiment_name, cfg) if self.runs_on_box else None
+        """Load the persisted scoped access and hand it to collect_logs() — mirrors
+        AttackerPlugin.run_collect_logs. A harness-run defender's collect_logs() ignores it (logs local);
+        a box-resident defender uses it to pull box logs."""
+        access = self._load_access(experiment.experiment_name, cfg)
         await self.collect_logs(experiment, cfg, dest, access=access)
 
-    # ------------------------------------------------------------------ scoped access (box path)
+    # ------------------------------------------------------------------ scoped access
     # Mirrors AttackerPlugin's foothold-access recovery. setup()/run_setup receive the scoped
     # DefenderSetupAccess list from the arena (experiment._defender_access), but run_start/run_stop/
     # run_collect_logs run later (a failure path, or a clean-slate stop after a restart) where it isn't in
-    # scope — so run_setup persists it and the wrappers load it back. ONLY used when runs_on_box; today the
-    # creds instead travel in the runner config (injected by run_setup). The attacker persists ONE entry
-    # (its single foothold); the defender persists the WHOLE list (it reaches the box AND victims).
+    # scope — so run_setup persists it and the wrappers load it back + thread it to start()/stop()/
+    # collect_logs() (symmetric with the attacker). A box-resident defender's start() reaches the box with
+    # it; a harness-run defender's start() ignores it (creds already in the written config). The attacker
+    # persists ONE entry (its single foothold); the defender persists the WHOLE list (box AND victims).
     _ACCESS_FILE: ClassVar[str] = "setup_access.json"
 
     @staticmethod
@@ -428,8 +410,8 @@ class DefenderPlugin(BaseModel):
         """The first scoped DefenderSetupAccess (mirrors AttackerPlugin.primary_access by shape). WARNING:
         for the ATTACKER access[0] is the single foothold (correct), but the DEFENDER's access list is
         VICTIMS-FIRST / box-last (see deployer.defender_setup_access), so access[0] is a VICTIM, NOT the
-        defender box. A runs_on_box defender MUST select its box by env_spec.box.ip (see _launch_on_box) —
-        this helper is only a last-resort fallback when no box ip is available."""
+        defender box. A box-resident defender MUST select its box by env_spec.box.ip (see the plugin's
+        _launch_on_box) — this helper is only a last-resort fallback when no box ip is available."""
         if not access:
             raise RuntimeError("no DefenderSetupAccess passed to the defender — the arena must pass it to run_setup()")
         return access[0]
@@ -439,8 +421,8 @@ class DefenderPlugin(BaseModel):
         return output_root(experiment_name, cfg) / experiment_name / "defender" / cls._ACCESS_FILE
 
     def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig, access) -> None:
-        """Internal (run_setup, runs_on_box only): write the scoped access list so the run_* wrappers can
-        recover it. Persists the whole list (box + victims), unlike the attacker's single primary."""
+        """Internal (run_setup): write the scoped access list so the run_* wrappers can recover it.
+        Persists the whole list (box + victims), unlike the attacker's single primary."""
         path = self._access_path(experiment_name, cfg)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps([a.model_dump() for a in (access or [])]))
@@ -454,219 +436,6 @@ class DefenderPlugin(BaseModel):
         except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
             return None
 
-    # ------------------------------------------------------------------ SLICE 3: box execution
-    # Opt-in via runs_on_box. Makes the defender's long-running process symmetric with the attacker's:
-    # run_start launches it INTO the env over the scoped box access and blocks until it reports ready, so
-    # prepare()/the readiness marker collapse into the launch wait (the mirror of the attacker's C2 bring-up
-    # + wait_c2c_agent). Control-plane cloud ops (restore/BlockIP/decoy) still route to the env over the
-    # token'd TCP channel (slice 4) — the box holds no cloud creds. Command construction is PURE
-    # (unit-testable); only the ship/ssh round-trips need a live box.
-    def _box_runner_src(self) -> Path:
-        """The plugin's own runner.py, shipped to the box. Each plugin keeps its runner next to its module
-        (the plugin-self-containment rule); the base just locates it generically."""
-        return Path(inspect.getfile(type(self))).parent / "runner.py"
-
-    def _box_paths(self) -> dict:
-        d = self._BOX_DIR
-        return {"dir": d, "runner": f"{d}/runner.py", "config": f"{d}/defender_config.json",
-                "venv": f"{d}/venv", "engine": f"{d}/engine", "log_dir": f"{d}/logs",
-                "ready": f"{d}/logs/defender_ready"}
-
-    def box_pip_spec(self) -> str:
-        """What `uv pip install` installs for a uv-venv box engine (e.g. the Perry defender package). Only
-        called when box_python is set; a stdlib runner (box_python is None, e.g. canary) never needs it.
-        Override in a uv-mode plugin — the base raises so a misconfigured one fails loud, not silently bare."""
-        raise NotImplementedError(
-            f"{type(self).__name__} sets box_python={self.box_python!r} but does not override box_pip_spec() "
-            "— a uv-venv box engine must declare what to install (see docs/agent-symmetry.md slice 3)")
-
-    def _box_run_command(self) -> str:
-        """PURE (no I/O — unit-testable): the remote shell command run over SSH to launch the box runner.
-          box_python is None  -> run the shipped runner under the box's own python3 (stdlib runner, e.g. canary).
-          box_python == "3.N" -> install uv + a standalone CPython venv (Terminus pattern, sidesteps the box's
-                                 broken apt + missing venv module) + the engine, then run under that venv.
-        `exec` so the runner replaces the shell as the ssh session's process; with `ssh -tt` the local ssh
-        pid then proxies it, so stop()'s local SIGTERM tears the box process down too."""
-        p = self._box_paths()
-        prelude = f"set -e; mkdir -p {shlex.quote(p['dir'])} {shlex.quote(p['log_dir'])}"
-        if self.box_python is None:
-            return f"{prelude}; exec python3 {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
-        venv_py = p["venv"] + "/bin/python"
-        # box_ships_engine: install the shipped repo's requirements.txt and run the runner with cwd +
-        # PYTHONPATH = the shipped engine (the runner imports the repo's packages + reads its config/.env
-        # relative to cwd). Otherwise: install the declared box_pip_spec() and run the lone stdlib-light runner.
-        if self.box_ships_engine:
-            install = f"uv pip install --python {shlex.quote(venv_py)} -r {shlex.quote(p['engine'] + '/requirements.txt')}"
-            # Fail loud + EARLY if the box has no outbound internet (uv's CPython download, PyPI wheels, and
-            # the engine's own LLM API calls all need it) — a precise exit beats a mid-run hang. Live-proven
-            # green on the OpenStack estate; this is the regression guard.
-            preflight = ("curl -sf -m 25 -o /dev/null https://pypi.org/simple/ || "
-                         "{ echo 'BOX EGRESS FAIL: no route to pypi.org — a box-resident engine needs outbound internet'; exit 3; }; ")
-            run = (f"cd {shlex.quote(p['engine'])}; exec env PYTHONPATH={shlex.quote(p['engine'])} "
-                   f"{shlex.quote(venv_py)} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}")
-        else:
-            install = f"uv pip install --python {shlex.quote(venv_py)} {self.box_pip_spec()}"
-            preflight = ""
-            run = f"exec {shlex.quote(venv_py)} {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
-        boot = (
-            "export PATH=$HOME/.local/bin:$PATH; "
-            f"{preflight}"
-            "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh; "
-            "export PATH=$HOME/.local/bin:$PATH; "
-            f"test -d {shlex.quote(p['venv'])} || uv venv {shlex.quote(p['venv'])} --python {shlex.quote(self.box_python)}; "
-            f"{install}"
-        )
-        return f"{prelude}; {boot}; {run}"
-
-    @staticmethod
-    def _tty_ssh(base: list[str]) -> list[str]:
-        """Insert `-tt` right after `ssh` so the remote process is bound to the ssh session: the LOCAL ssh
-        pid proxies the remote runner, so stop()'s SIGTERM to the local pid tears the box process down too."""
-        return [base[0], "-tt", *base[1:]]
-
-    async def _box_push(self, base: list[str], remote_path: str, content: str, mode: Optional[str] = None) -> None:
-        """Write `content` to `remote_path` on the box over the box's ssh access (no scp dependency). `mode`
-        (e.g. "600") chmods it after — used for shipped key files."""
-        chmod = f" && chmod {mode} {shlex.quote(remote_path)}" if mode else ""
-        proc = await asyncio.create_subprocess_exec(
-            *base,
-            f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && cat > {shlex.quote(remote_path)}{chmod}",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _, err = await asyncio.wait_for(proc.communicate(content.encode()), timeout=120)
-        if proc.returncode != 0:
-            raise RuntimeError(f"shipping {remote_path} to the box failed: {err.decode()[-400:]}")
-
-    async def _ship_engine_to_box(self, base: list[str], paths: dict, cfg: ExperimentManagerConfig) -> None:
-        """Rsync a box_ships_engine defender's engine tree (its code packages + requirements.txt + .env) to
-        the box's engine dir, over the box's own ssh routing (the bastion ProxyCommand in ssh_base). Excludes
-        .git/__pycache__/*.pyc and the heavy ansible/artifacts trees the box engine never uses (it routes
-        infra actions to the env over the tunnel; it runs no ansible locally)."""
-        src = self.box_engine_src(cfg)
-        if src is None:
-            raise RuntimeError(
-                f"{type(self).__name__} sets box_ships_engine=True but box_engine_src() returned None")
-        src = Path(src)
-        engine_dir = paths["engine"]
-        # ssh transport for rsync: ssh_base() minus the leading "ssh" and the trailing user@host target.
-        ssh_e = "ssh " + " ".join(shlex.quote(o) for o in base[1:-1])
-        target = base[-1]
-        mk = await asyncio.create_subprocess_exec(
-            *base, f"mkdir -p {shlex.quote(engine_dir)}",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _, mkerr = await asyncio.wait_for(mk.communicate(), timeout=60)
-        if mk.returncode != 0:
-            raise RuntimeError(f"creating engine dir on box failed: {mkerr.decode()[-300:]}")
-        proc = await asyncio.create_subprocess_exec(
-            "rsync", "-a", "--delete", "-e", ssh_e,
-            "--exclude", ".git", "--exclude", "__pycache__", "--exclude", "*.pyc",
-            "--exclude", "artifacts", "--exclude", "ansible",
-            f"{str(src).rstrip('/')}/", f"{target}:{engine_dir}/",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _, err = await asyncio.wait_for(proc.communicate(), timeout=600)
-        if proc.returncode != 0:
-            raise RuntimeError(f"shipping engine tree to the box failed: {err.decode()[-400:]}")
-
-    @staticmethod
-    def _rewrite_access_keys(access_entries: list, key_map: dict) -> list:
-        """PURE (unit-testable): return access entries with ssh_key AND the `-i <key>` path inside
-        ssh_common_args (the bastion ProxyCommand) rewritten per key_map (harness path -> box path), so a
-        box-resident runner reaches victims with keys that exist on the box."""
-        out = []
-        for entry in access_entries:
-            e = dict(entry)
-            k = e.get("ssh_key")
-            if k in key_map:
-                e["ssh_key"] = key_map[k]
-                if e.get("ssh_common_args"):
-                    e["ssh_common_args"] = e["ssh_common_args"].replace(k, key_map[k])
-            out.append(e)
-        return out
-
-    async def _thread_box_credentials(self, base: list[str], paths: dict, access_entries: list) -> list:
-        """Thread the scoped creds to the box: ship each UNIQUE key the access entries reference to a
-        box-local path (chmod 600), then return the entries rewritten to reference the box-local keys. The
-        box runner then reaches victims/box with keys that exist ON THE BOX, not harness paths — the
-        runs_on_box 'creds threaded at launch, not baked into the config' contract."""
-        import os as _os
-        key_dir = f"{paths['dir']}/keys"
-        key_map: dict = {}
-        for entry in access_entries:
-            k = entry.get("ssh_key")
-            if k and k not in key_map:
-                src = Path(_os.path.expanduser(k))
-                box_key = f"{key_dir}/{src.name}"
-                await self._box_push(base, box_key, src.read_text(), mode="600")
-                key_map[k] = box_key
-        return self._rewrite_access_keys(access_entries, key_map)
-
-    async def _launch_on_box(self, prepared: "PreparedDefender", config_path: Path, experiment_name: str,
-                             cfg: ExperimentManagerConfig, access) -> "asyncio.subprocess.Process":
-        """Launch the defender runner FROM THE BOX over SSH and return the ssh process (local pid proxies the
-        remote). Mirrors the attacker's foothold bring-up (terminus/incalmo): ship the runner + config, then
-        run it over `ssh -tt`. Credentials ride in `access` (threaded at launch), NEVER in the shipped config;
-        the config's log_dir is rewritten to a box path so the runner's readiness marker lands on the box,
-        which _wait_box_ready then bridges to the local marker the arena's wait_until_ready polls."""
-        # ship the runner + a box-local copy of the config (log_dir -> box path; the runner writes its
-        # defender_ready marker there). Everything else in the config is run-spec data, safe to ship.
-        built = json.loads(Path(config_path).read_text())
-        # Reach the DEFENDER BOX specifically — the access list is victims-first, box-last, so primary_access
-        # ([0]) is a VICTIM. Select the box by its ip (already in the config's defender_env_spec); fall back
-        # to primary_access only if the box ip is somehow absent (older single-subnet topologies).
-        _box_ip = ((built.get("defender_env_spec") or {}).get("box") or {}).get("ip")
-        box = next((a for a in access if str(getattr(a, "host", None)) == str(_box_ip)), None) if _box_ip else None
-        if box is None:
-            box = self.primary_access(access)
-        base = box.ssh_base()
-        p = self._box_paths()
-        built["log_dir"] = p["log_dir"]
-        # box_ships_engine: rsync the plugin's engine tree (+ its .env) to the box FIRST, so _box_run_command
-        # can install its requirements.txt into the uv venv and run the runner with cwd/PYTHONPATH = the engine.
-        if self.box_ships_engine:
-            await self._ship_engine_to_box(base, p, cfg)
-        # thread the scoped creds to the box (ship keys + rewrite the access paths to box-local copies) so
-        # the box runner reaches victims with keys that exist on the box, not harness paths.
-        if built.get("defender_setup_access"):
-            built["defender_setup_access"] = await self._thread_box_credentials(
-                base, p, built["defender_setup_access"])
-        await self._box_push(base, p["runner"], self._box_runner_src().read_text())
-        await self._box_push(base, p["config"], json.dumps(built))
-        log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "a")  # noqa: SIM115 — handed to the long-running subprocess
-        proc = await asyncio.create_subprocess_exec(
-            *self._tty_ssh(base), self._box_run_command(),
-            stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
-        # block until the box runner arms, then bridge its box marker to the local one (main.py's
-        # wait_until_ready stays untouched — it keeps polling the local marker).
-        await self._wait_box_ready(experiment_name, cfg, box, proc)
-        return proc
-
-    async def _wait_box_ready(self, experiment_name: str, cfg: ExperimentManagerConfig, box, process,
-                              timeout_s: float = 600.0, poll_s: float = 5.0) -> float:
-        """Poll the box over SSH until the runner writes its readiness marker (the box analog of the local
-        wait_until_ready poll / the attacker's wait_c2c_agent), then TOUCH the local marker so the arena's
-        wait_until_ready passes unchanged. Raises if the box process dies first or the wait times out — an
-        undefended run must never be reported defended. Returns seconds waited."""
-        p = self._box_paths()
-        base = box.ssh_base()
-        start = time.monotonic()
-        while True:
-            if process.returncode is not None:
-                raise RuntimeError(
-                    f"box defender process exited (rc={process.returncode}) before arming — see defender.log")
-            check = await asyncio.create_subprocess_exec(
-                *base, f"test -f {shlex.quote(p['ready'])} && echo READY || true",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            out, _ = await asyncio.wait_for(check.communicate(), timeout=poll_s * 4)
-            if b"READY" in out:
-                break
-            if time.monotonic() - start > timeout_s:
-                raise RuntimeError(f"box defender did not arm within {timeout_s:.0f}s (no {p['ready']})")
-            await asyncio.sleep(poll_s)
-        local = self.ready_marker_path(experiment_name, cfg)  # bridge: the arena polls the LOCAL marker
-        local.parent.mkdir(parents=True, exist_ok=True)
-        local.touch()
-        return time.monotonic() - start
 
     @classmethod
     def validate_built_config(cls, built: dict) -> None:

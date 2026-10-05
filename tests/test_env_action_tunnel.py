@@ -1,5 +1,5 @@
 """The harness-initiated ssh -R reverse tunnel that exposes the harness-loopback env-action TCP server to
-a box-resident (runs_on_box) defender. Pure command-construction + the ephemeral-port picker; the live
+a box-resident (uses_env_actions) defender. Pure command-construction + the ephemeral-port picker; the live
 ssh round-trip needs a box (ridden in the cloud revalidation window). Enforces the slice-4 security review
 conditions so a regression can't silently widen the tunnel."""
 from arena.defender.env_spec import DefenderSetupAccess

@@ -12,14 +12,18 @@ token would be pure redundancy against a path nothing hostile can take. (Contras
 a TCP service INSIDE the environment, which keeps its token because it is reachable from in-env.) This
 reasoning holds only while the channel stays a UDS; a move to TCP would require restoring a token.
 
-SLICE 4 (the box model — see docs/agent-symmetry.md). A defender whose RUNNER executes in-env (on the
-box, runs_on_box=True) cannot reach this UDS. serve_env_actions_tcp() serves the SAME app over a TCP port
-bound to the box-facing interface, with the per-experiment token RESTORED (X-Arena-Token header, verified
-in handle_env_action when trusted_transport=False against exp._env_action_token). The UDS path stays
-token-free (trusted_transport=True) and unchanged. This deliberately moves the security boundary the
-UDS gave for free, so: the TCP server MUST bind only to the isolated, attacker-invisible box subnet
-(never 0.0.0.0), the token is required on every request and compared in constant time, and the whole
-path NEEDS A SECURITY REVIEW before it is trusted in production.
+THE BOX MODEL (see docs/agent-symmetry.md). A defender whose RUNNER executes in-env (on the box — a
+box-resident defender that declares uses_env_actions, e.g. llm_soc_box) cannot reach this UDS.
+serve_env_actions_tcp() serves the SAME app over a TCP port bound to HARNESS loopback, with the
+per-experiment token RESTORED (X-Arena-Token header, verified in handle_env_action when
+trusted_transport=False against exp._env_action_token). The box reaches that loopback port over an
+ssh -R reverse tunnel the DEFENDER PLUGIN opens itself (it owns the tunnel, like the Incalmo attacker owns
+its ssh -L C2 tunnel; the arena owns only this server + the token/port). The UDS path stays token-free
+(trusted_transport=True) and unchanged. This deliberately moves the security boundary the UDS gave for
+free, so: the TCP server binds ONLY to 127.0.0.1 on the harness (never 0.0.0.0) and is reachable from the
+box ONLY through the loopback-pinned reverse tunnel (build_reverse_tunnel_cmd), the token is required on
+every request and compared in constant time, and the whole path NEEDS A SECURITY REVIEW before it is
+trusted in production.
 
 The serving window + bounded primitive vocabulary remain — not as security layers but as correctness:
 topology mutation is valid only while the attack runs (ACTIVATE..DEACTIVATE) and only for the primitives
@@ -45,8 +49,9 @@ from typing import Optional
 
 def new_env_action_token() -> str:
     """A fresh per-experiment token for the TCP control-plane channel (serve_env_actions_tcp). The arena
-    generates one when it arms a runs_on_box defender, stamps it on exp._env_action_token, and threads it
-    to the box runner so its RemoteEnvOrchestrator can authenticate. Unused by the UDS path."""
+    generates one when it arms a box-resident (uses_env_actions) defender, stamps it on
+    exp._env_action_token, and threads it to the box runner (baked into the runner config) so its
+    RemoteEnvOrchestrator can authenticate. Unused by the UDS path."""
     return secrets.token_urlsafe(32)
 
 
@@ -255,12 +260,14 @@ async def serve_env_actions(socket_path: str, registry, cfg, lock) -> None:
 
 
 async def serve_env_actions_tcp(host: str, port: int, registry, cfg, lock) -> None:
-    """Serve the SAME env-action app over TCP, TOKEN-REQUIRED, for a defender whose runner executes in-env
-    (on the box, runs_on_box=True) and so cannot reach the harness UDS.
+    """Serve the SAME env-action app over TCP, TOKEN-REQUIRED, for a BOX-RESIDENT defender (uses_env_actions)
+    whose runner executes in-env and so cannot reach the harness UDS; it reaches this server over the
+    ssh -R reverse tunnel its own plugin opens.
 
-    SECURITY (see the module docstring's SLICE 4 note): `host` MUST be the mgmt host's address on the
-    isolated, attacker-invisible defender/box subnet — NEVER 0.0.0.0 or a victim/attacker-reachable
-    interface. Every request must carry the per-experiment token (X-Arena-Token == exp._env_action_token),
+    SECURITY (see the module docstring's box-model note): `host` MUST be harness loopback (127.0.0.1) —
+    NEVER 0.0.0.0 or a victim/attacker-reachable interface; the box reaches it only through the
+    loopback-pinned reverse tunnel. Every request must carry the per-experiment token (X-Arena-Token ==
+    exp._env_action_token),
     verified in constant time by handle_env_action. This restores the token the UDS design could omit
     because, once the channel is a reachable TCP port, the transport is no longer the boundary. NEEDS A
     SECURITY REVIEW before production use."""
