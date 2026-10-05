@@ -191,13 +191,19 @@ class DefenderPlugin(BaseModel):
         # the arena sets experiment._env_dynamic before this runs.
         env_action_socket = resolve_socket_path(cfg) if getattr(experiment, "_env_dynamic", False) else None
         needs_agent = env_action_socket is not None
+        # A runs_on_box defender reaches the env-action channel over the TOKEN'd TCP tunnel (box-loopback
+        # url + token the arena set up before run_setup), NOT the harness UDS (unreachable from the box).
+        box_channel = None
+        if self.runs_on_box and getattr(experiment, "_env_action_box_port", None) and getattr(experiment, "_env_action_token", None):
+            box_channel = {"env_action_url": f"http://127.0.0.1:{experiment._env_action_box_port}",
+                           "env_action_token": experiment._env_action_token}
         # HOOK A — stand up the per-experiment box ES / box agent and produce the baton (default: empty).
         prepared = await self.provision_box(
             experiment_name, cfg, bastion_ip,
             defender_env_spec=env_spec, defender_access=access, needs_agent=needs_agent)
         # build + write the runner config from the baton (credential injection kept out of build_config).
         config_path = self._write_runner_config(
-            experiment_name, cfg, env_spec, access, bastion_ip, prepared, env_action_socket)
+            experiment_name, cfg, env_spec, access, bastion_ip, prepared, env_action_socket, box_channel)
         # HOOK B — EXTERNAL arming (deploy decoys / plant honey-creds) that CONSUMES the written config;
         # blocks + raises before the attacker starts (default: no-op). The attacker's twin: it deploys its
         # foothold agent + waits-for-beacon inside its own setup().
@@ -206,7 +212,7 @@ class DefenderPlugin(BaseModel):
         return prepared
 
     def _write_runner_config(self, experiment_name: str, cfg: ExperimentManagerConfig, env_spec, access,
-                             bastion_ip, prepared: "PreparedDefender", env_action_socket) -> Path:
+                             bastion_ip, prepared: "PreparedDefender", env_action_socket, box_channel=None) -> Path:
         """FRAMEWORK (called by setup()): build_config(env_spec, baton) → forward the credential-free
         DefenderEnvSpec → INJECT the credential-bearing SetupAccess/routing (kept OUT of build_config's own
         output by the leak guard) + management_ip/bastion_ip/log_dir + the dynamic-topology channel → write
@@ -219,10 +225,12 @@ class DefenderPlugin(BaseModel):
         type(self).validate_built_config(built)  # fail fast if the config drifts from the runner contract (pre-injection)
         if env_spec is not None:
             built["defender_env_spec"] = env_spec.model_dump()
-        # Box-only execution: an executes_from_box controller gets ONLY the box entry — it never acts on
-        # victims directly, it asks the box agent (which alone holds victim access) and the env.
+        # Box-only execution: a HARNESS-RUN executes_from_box controller gets ONLY the box entry — it never
+        # acts on victims directly, it asks the box agent (which alone holds victim access) and the env. A
+        # runs_on_box engine is the opposite: it runs IN-env and reaches victims itself (box-local keys,
+        # threaded at launch), so it keeps the full victim access.
         _access = list(access or [])
-        if getattr(type(self), "executes_from_box", False) and env_spec is not None:
+        if getattr(type(self), "executes_from_box", False) and not self.runs_on_box and env_spec is not None:
             _box = getattr(env_spec, "box", None)
             _box_ip = getattr(_box, "ip", None) if _box else None
             if _box_ip:
@@ -233,10 +241,17 @@ class DefenderPlugin(BaseModel):
         built["management_ip"] = cfg.arena_host_ip
         built["bastion_ip"] = bastion_ip
         built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
-        # Dynamic topology-mutation channel (UDS, no token — unreachable from in-env); executes_from_box only.
-        if env_action_socket is not None:
-            built["env_action_socket"] = env_action_socket
+        # Dynamic topology-mutation channel. A runs_on_box engine reaches it over the TOKEN'd TCP tunnel
+        # (box-loopback url + token); a harness-run executes_from_box controller over the UDS (no token —
+        # unreachable from in-env). The runner's RemoteEnvOrchestrator uses env_action_url+token if present,
+        # else env_action_socket.
+        if box_channel is not None:
+            built["env_action_url"] = box_channel["env_action_url"]
+            built["env_action_token"] = box_channel["env_action_token"]
             built["experiment_name"] = experiment_name  # the orchestrator stamps it into each request payload
+        elif env_action_socket is not None:
+            built["env_action_socket"] = env_action_socket
+            built["experiment_name"] = experiment_name
         config_path.write_text(json.dumps(built, indent=2))
         log(experiment_name, f"Prepared defender ({self.type}) config: {config_path}")
         return config_path
@@ -530,12 +545,18 @@ class DefenderPlugin(BaseModel):
         run it over `ssh -tt`. Credentials ride in `access` (threaded at launch), NEVER in the shipped config;
         the config's log_dir is rewritten to a box path so the runner's readiness marker lands on the box,
         which _wait_box_ready then bridges to the local marker the arena's wait_until_ready polls."""
-        box = self.primary_access(access)
-        base = box.ssh_base()
-        p = self._box_paths()
         # ship the runner + a box-local copy of the config (log_dir -> box path; the runner writes its
         # defender_ready marker there). Everything else in the config is run-spec data, safe to ship.
         built = json.loads(Path(config_path).read_text())
+        # Reach the DEFENDER BOX specifically — the access list is victims-first, box-last, so primary_access
+        # ([0]) is a VICTIM. Select the box by its ip (already in the config's defender_env_spec); fall back
+        # to primary_access only if the box ip is somehow absent (older single-subnet topologies).
+        _box_ip = ((built.get("defender_env_spec") or {}).get("box") or {}).get("ip")
+        box = next((a for a in access if str(getattr(a, "host", None)) == str(_box_ip)), None) if _box_ip else None
+        if box is None:
+            box = self.primary_access(access)
+        base = box.ssh_base()
+        p = self._box_paths()
         built["log_dir"] = p["log_dir"]
         # thread the scoped creds to the box (ship keys + rewrite the access paths to box-local copies) so
         # the box runner reaches victims with keys that exist on the box, not harness paths.

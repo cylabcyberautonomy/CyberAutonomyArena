@@ -30,10 +30,14 @@ serve_env_actions wraps it in a tiny UDS-bound FastAPI/uvicorn server started fr
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
 import secrets
+import shlex
+import socket
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -44,6 +48,68 @@ def new_env_action_token() -> str:
     generates one when it arms a runs_on_box defender, stamps it on exp._env_action_token, and threads it
     to the box runner so its RemoteEnvOrchestrator can authenticate. Unused by the UDS path."""
     return secrets.token_urlsafe(32)
+
+
+def pick_free_tcp_port() -> int:
+    """An ephemeral free TCP port on the harness (bind :0, read it, release). Used per-experiment for the
+    loopback env-action TCP server, so concurrent experiments on one harness never collide."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def build_reverse_tunnel_cmd(box_access, box_port: int, tcp_port: int) -> list[str]:
+    """PURE (unit-testable): the harness-initiated `ssh -R` command that exposes the harness's
+    127.0.0.1:<tcp_port> env-action server as 127.0.0.1:<box_port> ON THE BOX — so a box-resident defender
+    reaches the channel at box-loopback while the box→harness direction is never needed (mirrors Incalmo's
+    harness→foothold ssh -L). Hardening (security review conditions):
+      * EXPLICIT 127.0.0.1 bind on the box side of -R  -> loopback-only regardless of the box sshd's
+        GatewayPorts; no victim/attacker/other-box-subnet host can reach the forwarded port.
+      * EXACTLY ONE forward, no -D/-L/dynamic/SOCKS     -> the box can reach ONLY this one harness-loopback
+        service through the tunnel, nothing else on harness loopback (e.g. not the Incalmo planner).
+      * ExitOnForwardFailure=yes                        -> ssh exits non-zero if the forward can't bind,
+        never a live ssh with no tunnel (the arm then fails loudly).
+      * ServerAliveInterval/CountMax + -N (no shell)    -> a dead tunnel is detected; no remote command.
+    `box_access` is the defender box's DefenderSetupAccess (scoped key + bastion routing); ssh_base()
+    already carries -i <scoped key> and the bastion ProxyCommand."""
+    base = box_access.ssh_base()  # ["ssh", -i key, ...opts..., proxycommand, user@host]
+    opts = ["-N",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+            "-R", f"127.0.0.1:{box_port}:127.0.0.1:{tcp_port}"]
+    return [base[0], *opts, *base[1:]]
+
+
+async def open_reverse_tunnel(box_access, box_port: int, tcp_port: int,
+                              log_path: "Optional[Path]" = None, confirm_s: float = 12.0):
+    """Open the ssh -R tunnel (build_reverse_tunnel_cmd) and CONFIRM it came up, returning the live process
+    (kept for the serving window). With ExitOnForwardFailure=yes + -N, ssh exits promptly iff the forward
+    failed; so we wait up to confirm_s and raise if it exits (the arm fails, like a readiness gate). If it
+    dies mid-run later, the defender's env-actions simply fail (acceptable degradation)."""
+    cmd = build_reverse_tunnel_cmd(box_access, box_port, tcp_port)
+    out = open(log_path, "a") if log_path else subprocess.DEVNULL
+    proc = await asyncio.create_subprocess_exec(*cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                                                start_new_session=True)
+    # ExitOnForwardFailure makes an early non-zero exit the failure signal; a healthy -N tunnel stays up.
+    try:
+        rc = await asyncio.wait_for(proc.wait(), timeout=confirm_s)
+        raise RuntimeError(f"env-action reverse tunnel to the box failed to come up (ssh exited rc={rc}); "
+                           f"check the box sshd AllowTcpForwarding — see {log_path}")
+    except asyncio.TimeoutError:
+        return proc  # still running after the grace window => the forward is established
+
+async def close_reverse_tunnel(proc) -> None:
+    """Best-effort teardown of the ssh -R tunnel process (on DEACTIVATE/teardown)."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def resolve_socket_path(cfg) -> str:
