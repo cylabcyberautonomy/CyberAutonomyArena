@@ -119,14 +119,15 @@ def _cfg_get(key, default=None, path=None):
     return default
 
 
-MHBENCH_DIR = Path(_cfg_get("mhbench_dir", "/home/lakshmi/MHBench"))
+# Defaults match the arena checkouts (used only if config.yaml omits a key); config.yaml wins.
+MHBENCH_DIR = Path(_cfg_get("mhbench_dir", "/home/lakshmi/MHBench-arena-integration"))
 # Per-plugin code dirs (arena). Attackers: incalmo_llm + incalmo_strategy share the
 # Incalmo repo; the FalcoLLM defender is llm_soc. Their LLM keys live in each repo's
 # .env (the manager load_dotenv's incalmo_*_dir/.env at startup — main.py:210).
-INCALMO_LLM_DIR = Path(_cfg_get("incalmo_llm_dir", "/home/lakshmi/Incalmo"))
+INCALMO_LLM_DIR = Path(_cfg_get("incalmo_llm_dir", "/home/lakshmi/Incalmo-fix"))
 INCALMO_STRATEGY_DIR = Path(_cfg_get("incalmo_strategy_dir", str(INCALMO_LLM_DIR)))
 PERRY_DIR = Path(_cfg_get("llm_soc_dir",
-                          _cfg_get("deception_dir", "/home/lakshmi/Defense-MHBench-compatible")))
+                          _cfg_get("deception_dir", "/home/lakshmi/Defense-arena")))
 OUTPUT_ROOT = Path(_cfg_get("output_dir", str(_HARNESS_DIR / "output")))
 
 CLOUD_BACKEND = _cfg_get("cloud_backend", "openstack")   # "openstack" | "gcp"
@@ -338,8 +339,13 @@ def ensure_keys(force=False):
 # Backend readiness + live VM listing (backend-aware: OpenStack / GCP)
 # ---------------------------------------------------------------------------
 def check_backend():
-    """Quiet sanity check of the configured cloud backend. Returns (ok, [problems])."""
+    """Quiet sanity check before starting the manager. Returns (ok, [problems])."""
     problems = []
+    # The arena manager loads this config at startup and exits if it's missing — catch
+    # that here so we fail fast with a clear message instead of timing out on the port.
+    if not HARNESS_CONFIG_PATH.exists():
+        problems.append(f"arena config not found: {HARNESS_CONFIG_PATH} "
+                        "(create it from example_config.yaml, or set EXPERIMENT_MANAGER_CONFIG)")
     if not MHBENCH_DIR.exists():
         problems.append(f"mhbench_dir does not exist: {MHBENCH_DIR}")
     cli = "openstack" if CLOUD_BACKEND == "openstack" else "gcloud"
