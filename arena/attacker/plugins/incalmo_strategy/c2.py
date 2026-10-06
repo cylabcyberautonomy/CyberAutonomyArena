@@ -378,8 +378,12 @@ def teardown_c2(experiment_name: str, cfg=None) -> None:
 
 
 def sweep_stale_tunnels() -> None:
-    """Reap orphaned tunnels from a crashed prior manager: kill any recorded tunnel pid whose
-    /proc cmdline still looks like our ssh -L, then drop the statefile."""
+    """Crash-recovery ONLY: reap foothold-C2 `ssh -L` tunnels orphaned by an ABNORMAL manager exit (a crash
+    or SIGKILL). On a clean shutdown teardown() already killed the tunnel and dropped its statefile, so this
+    is a no-op — it exists only because the tunnel is started detached (start_new_session, so it survives the
+    manager) and a crash loses the in-memory registry teardown() keys on. For each leftover statefile: kill
+    the recorded tunnel pid ONLY if /proc/<pid>/cmdline still looks like our `ssh -L ...:8888` (guards against
+    the OS having recycled that pid to an unrelated process), then drop the statefile."""
     if not _STATE_DIR.exists():
         return
     for sf in _STATE_DIR.glob("*.json"):
