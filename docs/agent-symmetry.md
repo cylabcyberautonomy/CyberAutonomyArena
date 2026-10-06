@@ -62,7 +62,7 @@ run_setup / run_start / run_stop / run_collect_logs  # identical shapes; emit th
 The **only** members that stay defender-specific are its *capabilities* — the things the environment
 grants it that an attacker never gets:
 
-- `box_ingress()` / `defender_vm_budget()` — infra the env opens/reserves for it.
+- `box_ingress()` — infra the env opens for it.
 - **control-plane access** — a scoped, token'd channel to ask the environment for restore / BlockIP /
   decoy. (The attacker has no such channel.) See the security note below.
 
@@ -132,7 +132,7 @@ runs_on_box access-load), `primary_access`/`_persist_access`/`_load_access` (att
 defender the LIST — box+victims), `run_start` (attacker emits RUNNING; defender doesn't — it's READY only
 once armed).
 
-**Truly irreducible defender-only (do NOT force identical):** `box_ingress`, `defender_vm_budget`, the
+**Truly irreducible defender-only (do NOT force identical):** `box_ingress`, the
 capability flags (`executes_from_box`/`runs_on_box`), and the box/C2-equivalent machinery
 (`_launch_on_box`/`_wait_box_ready` ↔ the attacker's own C2 lifecycle). These have no attacker analog.
 
@@ -224,7 +224,7 @@ CHANGE in `main.py` (arena):
   generates the token, and sets `experiment._env_action_box_port`/`_env_action_token` for the plugin to read.
 
 ADD: `uses_env_actions: ClassVar[bool] = False` on the base; `llm_soc_box` sets it True; canary leaves False.
-KEEP untouched: `defender_vm_budget` (capacity; full delete gated on the OSS capacity story), `executes_from_box`.
+REMOVED: `defender_vm_budget` (the defender self-limits via its arsenal; the arena no longer pre-reserves or caps AddHost).
 ALSO land then: `env_action_server` security-docstring (loopback + ssh -R), attacker residual `run_setup` (doc only).
 
 ## Full conversion (convert every defender to run on the box) — per-component live work

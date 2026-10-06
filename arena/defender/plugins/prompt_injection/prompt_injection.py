@@ -83,13 +83,6 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
     # explicitly to whatever the deception arm is given, or the two arms deploy
     # different numbers of decoys on the same topology and are not comparable.
     arsenal: dict[str, int] = {}
-    max_decoys: int = 5  # upper bound on payload-named decoys this run may deploy; pre-reserved at admission.
-
-    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
-        """Pre-reserve one m1.small per potential decoy (same as the deception plugin) so the env's
-        add_host has capacity to draw from for the payload-named decoys."""
-        return [(1, 2048, 20)] * max(0, self.max_decoys)
-
     @field_validator("strategy", mode="before")
     @classmethod
     def _normalize_strategy(cls, value):

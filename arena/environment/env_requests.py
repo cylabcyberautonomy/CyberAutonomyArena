@@ -13,9 +13,9 @@ what the Perry actuators do today via `openstack.connect()`):
     DEFENDER-SCOPED DefenderSetupAccess, nothing broader (see docs/security-model.md).
   * backend neutrality — the defender names WHAT it wants (a host, a rule); the env decides HOW its
     backend (OpenStack / GCP) makes it. The same event works on both.
-  * admission — VMs the defender may add are pre-reserved at admission from `defender_vm_budget()`;
-    the arena enforces that ceiling before it dispatches an AddHost, so a mid-run add can never
-    oversubscribe the cluster (the room is already held).
+  * self-limiting — the defender bounds how many hosts it adds via its own arsenal (the Perry strategy
+    deploys exactly arsenal["DeployDecoy"] decoys), so the arena does not pre-reserve or cap AddHost;
+    a mid-run add draws from live cluster capacity.
 
 The flow: the defender's RemoteEnvOrchestrator (Defense repo) serialises each capability/action into
 one EnvActionRequest and POSTs it to the arena; the arena validates + accounts + dispatches to

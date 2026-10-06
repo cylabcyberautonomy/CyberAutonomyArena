@@ -316,7 +316,6 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
         empty baton. Reach box/victims with self.primary_access(access).ssh_base()."""
     async def start(self, prepared, config_path, experiment_name, cfg, access=None): ...  # box-resident override
     def box_ingress(self) -> dict[str, list[int]]: ...        # ports the env should open to the box
-    def defender_vm_budget(self) -> list[tuple[int,int,int]]: ...  # max extra VMs (decoy strategies)
     async def teardown(self, experiment_name, cfg) -> None: ...
 ```
 

@@ -146,12 +146,12 @@ def _trace_entry(request, result) -> dict:
 
 async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
                             token: Optional[str] = None, trusted_transport: bool = True) -> dict:
-    """Authorize, budget-check, dispatch, and record ONE env-mutation event. Returns a plain dict with
+    """Authorize, dispatch, and record ONE env-mutation event. Returns a plain dict with
     the EnvActionResult fields plus an internal "status" (HTTP status the transport should use, popped
     before the body is returned over the wire). Pure: no socket/transport here, so it is unit-testable.
 
     The serving-window state is read off the LIVE Experiment object (registry.get) that the run loop
-    stamps: _env_serving, _env_budget_remaining, _env_lifecycle.
+    stamps: _env_serving, _env_lifecycle.
 
     TRANSPORT + TOKEN. `trusted_transport` is True for the UDS server (unreachable from in-env — the
     transport IS the boundary, so no token: historical behavior, unchanged). It is False for the TCP
@@ -189,13 +189,6 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
 
     lc = getattr(exp, "_env_lifecycle", None)
 
-    # --- budget ceiling (ADD_HOST only) ------------------------------------
-    if req.kind == EnvActionKind.ADD_HOST and getattr(exp, "_env_budget_remaining", 0) <= 0:
-        result = EnvActionResult(kind=req.kind, ok=False, error="defender VM budget exhausted")
-        if lc is not None:
-            lc.record_request(_trace_entry(req, result))
-        return {**result.model_dump(mode="json"), "status": 200}
-
     # --- dispatch (serialise cloud mutations under the same lock provisioning uses) -----------------
     async def _dispatch():
         return await exp.environment.handle_env_request(exp, exp.deployed_environment, req, cfg)
@@ -210,12 +203,6 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
         result = EnvActionResult(kind=req.kind, ok=False, error=str(e))
     except Exception as e:  # noqa: BLE001 — a backend failure must degrade gracefully, not wedge the run
         result = EnvActionResult(kind=req.kind, ok=False, error=f"environment error: {e}")
-
-    # --- budget accounting (only on success) -------------------------------
-    if result.ok and req.kind == EnvActionKind.ADD_HOST:
-        exp._env_budget_remaining = getattr(exp, "_env_budget_remaining", 0) - 1
-    elif result.ok and req.kind == EnvActionKind.REMOVE_HOST:
-        exp._env_budget_remaining = getattr(exp, "_env_budget_remaining", 0) + 1
 
     if lc is not None:
         lc.record_request(_trace_entry(req, result))

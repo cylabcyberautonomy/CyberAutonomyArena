@@ -30,7 +30,7 @@ class EnvironmentCommand(str, Enum):
     request-serving service so a running defender can mutate the topology (add_host / rebuild_host /
     remove_host) via EnvActionRequest events (see env_requests.py). This is NOT a busy loop — the
     environment has no autonomous work; ACTIVATE just opens the window in which the arena honours those
-    events, and DEACTIVATE closes it. (A defender that declares no defender_vm_budget() never sends any,
+    events, and DEACTIVATE closes it. (A defender that does not set uses_env_actions never sends any,
     so the window is inert for it.)"""
     PROVISION = "Provision"   # bring the network + VMs up
     CONFIGURE = "Configure"   # run setup on the hosts

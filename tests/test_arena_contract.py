@@ -587,7 +587,7 @@ def test_env_action_handler_window_budget():
     lc = EnvironmentLifecycle()
     exp = SimpleNamespace(experiment_name="ci_dyn", environment=_DynEnv(environment_spec="x"),
                           deployed_environment=None,
-                          _env_serving=True, _env_budget_remaining=1, _env_lifecycle=lc)
+                          _env_serving=True, _env_lifecycle=lc)
 
     class _Reg:
         def get(self, name):
@@ -604,21 +604,18 @@ def test_env_action_handler_window_budget():
     assert run(add)["status"] == 409                                 # closed window rejects everything
     exp._env_serving = True
 
-    r = run(add)                                                     # success: ok, ip, budget decrement, traced
+    r = run(add)                                                     # success: ok, ip, traced
     assert r["status"] == 200 and r["ok"] is True and r["ip"] == "192.168.9.9"
-    assert exp._env_budget_remaining == 0
-    r2 = run(add)                                                    # over budget -> graceful ok=False
-    assert r2["ok"] is False and "budget" in r2["error"]
+    r2 = run(add)                                                    # no per-run cap: succeeds (defender self-limits via its arsenal)
+    assert r2["ok"] is True
     run({"experiment_name": "ci_dyn", "token": "secret-token",
-         "action": {"kind": "RemoveHost", "target": "decoy0"}})     # remove returns a budget slot
-    assert exp._env_budget_remaining == 1
+         "action": {"kind": "RemoveHost", "target": "decoy0"}})
     assert len(lc.requests) >= 3                                     # every serviced event recorded
 
     # an environment that does not support the primitive degrades to ok=False, not a crash
     class _Static(EnvironmentPlugin, config_type="static_env_action_test"):
         environment_spec: str = "x"
     exp.environment = _Static(environment_spec="x")
-    exp._env_budget_remaining = 1
     assert run(add)["ok"] is False
 
 
@@ -687,14 +684,6 @@ def test_defender_no_arena_execution_path():
     assert not hasattr(DefenderPlugin, "executes_from_box")
     for ct in ("llm_soc", "deception", "prompt_injection"):
         assert not hasattr(DefenderPlugin._registry[ct], "executes_from_box")
-
-
-def test_defender_vm_budget_optional_default():
-    """defender_vm_budget() is opt-in: the base default is [] (no extra VMs), so a defender that never
-    changes topology needs no change and reserves topology+0 at admission."""
-    from arena.defender.plugins.base import DefenderPlugin
-    # DefenderPlugin is abstract; the method ignores self, so call it unbound with a dummy self.
-    assert DefenderPlugin.defender_vm_budget(object()) == []
 
 
 def test_experiment_environment_property_returns_plugin():

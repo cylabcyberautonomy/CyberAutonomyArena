@@ -220,7 +220,7 @@ class EnvironmentPlugin(BaseModel):
 
     def supports_dynamic_topology(self) -> bool:
         """Whether this environment honours EnvActionRequests at all. The arena uses it to validate the
-        env↔defender contract up front: a defender that declares a non-empty defender_vm_budget() paired
-        with an env that returns False here is a contract violation (fail at deploy, like the defender-box
-        contract), not a mid-run surprise. Default: False (static env); MHBench overrides to True."""
+        env↔defender contract up front: a defender that sets uses_env_actions paired with an env that
+        returns False here is a contract violation (fail at deploy, like the defender-box contract), not a
+        mid-run surprise. Default: False (static env); MHBench overrides to True."""
         return False

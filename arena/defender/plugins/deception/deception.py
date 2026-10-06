@@ -45,15 +45,6 @@ class DeceptionDefenderPlugin(DefenderPlugin, config_type="deception"):
     code_python_field = "deception_python"
     strategy: str  # e.g. "DoNothing", "StaticLayered", "ReactiveLayered"
     arsenal: dict[str, int] = {}
-    max_decoys: int = 5  # upper bound on decoys this run may deploy; pre-reserved at admission so a
-    #                      mid-run/arming add_host draws from already-held capacity (never blocks).
-
-    def defender_vm_budget(self) -> list[tuple[int, int, int]]:
-        """Pre-reserve one m1.small (1 vCPU / 2048 MB / 20 GB) per potential decoy. The env's add_host
-        draws from this budget; add_host beyond it is rejected. A DeployDecoy strategy needs this (>0);
-        a non-decoy strategy can set max_decoys=0."""
-        return [(1, 2048, 20)] * max(0, self.max_decoys)
-
     @field_validator("strategy", mode="before")
     @classmethod
     def _normalize_strategy(cls, value):
