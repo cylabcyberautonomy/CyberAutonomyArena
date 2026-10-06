@@ -124,7 +124,7 @@ MHBENCH_DIR = Path(_cfg_get("mhbench_dir", "/home/lakshmi/MHBench-arena-integrat
 # Per-plugin code dirs (arena). Attackers: incalmo_llm + incalmo_strategy share the
 # Incalmo repo; the FalcoLLM defender is llm_soc. Their LLM keys live in each repo's
 # .env (the manager load_dotenv's incalmo_*_dir/.env at startup — main.py:210).
-INCALMO_LLM_DIR = Path(_cfg_get("incalmo_llm_dir", "/home/lakshmi/Incalmo-fix"))
+INCALMO_LLM_DIR = Path(_cfg_get("incalmo_llm_dir", "/home/lakshmi/Incalmo-arena-integration"))
 INCALMO_STRATEGY_DIR = Path(_cfg_get("incalmo_strategy_dir", str(INCALMO_LLM_DIR)))
 PERRY_DIR = Path(_cfg_get("llm_soc_dir",
                           _cfg_get("deception_dir", "/home/lakshmi/Defense-arena")))
