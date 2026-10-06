@@ -19,7 +19,9 @@ fi
 # ansible-core bundles only ansible.builtin; the honey-cred ssh-key playbook (setup_ssh_keys.yml) uses the
 # authorized_key module from the ansible.posix collection, so install it (to ~/.ansible/collections, which
 # is on ansible's default collection path). Without it AddHoneyCredentials fails with "couldn't resolve
-# module/action 'authorized_key'". Pinned for ansible-core<2.14 / py3.8. Idempotent.
+# module/action 'authorized_key'". Pinned <1.6.0: ansible.posix 1.6.0 raised requires_ansible to >=2.15,
+# which the box's ansible-core 2.13.13 doesn't meet (installs but warns "does not support 2.13.13"); every
+# version <1.6.0 requires >=2.9, so this resolves to 1.5.4 and supports the box cleanly. Idempotent.
 #
 # GATE: this install MUST succeed before the agent starts. A silently-skipped install (galaxy flakiness)
 # used to leave the agent serving AddHoneyCredentials that fail rc=4 mid-run. Retry the fetch for transient
@@ -29,7 +31,7 @@ if ! ansible-galaxy collection list 2>/dev/null | grep -q "ansible.posix"; then
     attempt=0
     while [ "$attempt" -lt 3 ]; do
         attempt=$((attempt + 1))
-        if ansible-galaxy collection install "ansible.posix:>=1.5.0,<2.0.0" >/dev/null 2>&1 \
+        if ansible-galaxy collection install "ansible.posix:>=1.4.0,<1.6.0" >/dev/null 2>&1 \
            || ansible-galaxy collection install ansible.posix >/dev/null 2>&1; then
             break
         fi
