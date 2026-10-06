@@ -1,5 +1,4 @@
-"""Unit tests for the attacker lifecycle handshake (AttackerLifecycle + the run_setup/run_stop
-templates). Pure asyncio, no cloud, no plugins beyond a fake attacker."""
+"""Unit tests for the attacker lifecycle handshake (AttackerLifecycle + run_setup/run_stop)."""
 from __future__ import annotations
 
 import asyncio
@@ -16,29 +15,28 @@ from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
 
 
 class _FakeAttacker(AttackerPlugin, config_type="_fake_lifecycle_test"):
-    """Minimal attacker: setup/stop just record and (optionally) fail, so we can drive the
-    templates without a C2 or a cloud."""
+    """Minimal attacker whose setup/stop record and optionally fail, to drive the templates."""
     fail_setup: bool = False
 
-    def build_config(self, experiment_name, env_spec, prepared):  # unused here
+    def build_config(self, experiment_name, env_spec, prepared):
         return {}
 
     async def setup(self, experiment, cfg, bastion_ip, access=None):
-        await asyncio.sleep(0)  # yield, so a concurrent waiter can observe SETUP_STARTED first
+        await asyncio.sleep(0)
         if self.fail_setup:
             raise RuntimeError("boom in setup")
         return PreparedAttacker()
 
     async def start(self, prepared, config_path, experiment_name, cfg, access=None):
         await asyncio.sleep(0)
-        return object()  # stand-in for the spawned process
+        return object()
 
     async def stop(self, experiment, cfg, access=None):
         await asyncio.sleep(0)
 
 
 class _Exp:
-    """Stand-in for Experiment: carries the lifecycle handle + a name (run_start needs it)."""
+    """Stand-in for Experiment carrying the lifecycle handle + a name."""
     def __init__(self, lc, name="lc_test"):
         self._attacker_lifecycle = lc
         self.experiment_name = name
@@ -52,9 +50,8 @@ def _record(seq):
 
 @pytest.mark.asyncio
 async def test_full_command_ack_handshake_sequence():
-    """The arena SENDS commands (START_SETUP/START_RUN/STOP); the attacker EMITS acks
-    (SETUP_STARTED/READY/RUNNING/STOPPING/STOPPED). Assert the full interleaved trace."""
-    trace = []  # both directions, in order
+    """The arena sends commands and the attacker emits acks. Assert the full interleaved trace."""
+    trace = []
     lc = AttackerLifecycle(
         on_emit=lambda sig, err: trace.append(("ack", sig)),
         on_command=lambda cmd: trace.append(("cmd", cmd)),
@@ -62,7 +59,6 @@ async def test_full_command_ack_handshake_sequence():
     exp = _Exp(lc)
     atk = _FakeAttacker(type="_fake_lifecycle_test")  # type: ignore[call-arg]
 
-    # arena -> START_SETUP; attacker acks SETUP_STARTED then READY
     await lc.send(AttackerCommand.START_SETUP)
     task = asyncio.create_task(atk.run_setup(exp, cfg=None, bastion_ip=None))
     await lc.wait(AttackerSignal.SETUP_STARTED, timeout=5)
@@ -70,13 +66,11 @@ async def test_full_command_ack_handshake_sequence():
     await lc.wait(AttackerSignal.READY, timeout=5)
     assert isinstance(prepared, PreparedAttacker)
 
-    # arena -> START_RUN; attacker acks RUNNING (from run_start)
     await lc.send(AttackerCommand.START_RUN)
     proc = await atk.run_start(exp, prepared, config_path=None, cfg=None)
     await lc.wait(AttackerSignal.RUNNING, timeout=5)
     assert proc is not None
 
-    # arena -> STOP; attacker acks STOPPING then STOPPED
     await lc.send(AttackerCommand.STOP)
     await atk.run_stop(exp, cfg=None)
     await lc.wait(AttackerSignal.STOPPED, timeout=5)
@@ -100,7 +94,6 @@ async def test_setup_failure_emits_failed_and_unblocks_ready_waiter():
     atk = _FakeAttacker(type="_fake_lifecycle_test", fail_setup=True)  # type: ignore[call-arg]
 
     task = asyncio.create_task(atk.run_setup(exp, cfg=None, bastion_ip=None))
-    # a waiter blocked on READY must be released with an error when setup fails, not hang
     with pytest.raises(AttackerLifecycleError):
         await lc.wait(AttackerSignal.READY, timeout=5)
     with pytest.raises(RuntimeError, match="boom in setup"):
@@ -121,8 +114,7 @@ if __name__ == "__main__":
 
 @pytest.mark.asyncio
 async def test_run_setup_threads_scoped_access_as_a_parameter():
-    """Unified with the defender: the arena passes the scoped foothold SetupAccess to run_setup as a
-    PARAMETER (not via an experiment._attacker_access attribute), and it reaches setup()."""
+    """The arena passes the scoped foothold SetupAccess to run_setup as a parameter, reaching setup()."""
     from arena.attacker.env_spec import AttackerSetupAccess
 
     seen = {}
@@ -136,15 +128,13 @@ async def test_run_setup_threads_scoped_access_as_a_parameter():
     await _Probe(type="_probe_access_param").run_setup(_Exp(AttackerLifecycle()), cfg=None, bastion_ip=None, access=acc)
     assert seen["access"] is acc
 
-    # and the base plugin no longer reads the old experiment._attacker_access side-channel
     import inspect
     from arena.attacker.plugins import base
     assert "_attacker_access" not in inspect.getsource(base)
 
 
 def test_access_persist_load_roundtrips_as_list(tmp_path):
-    """run_setup persists the scoped access LIST and the run_* wrappers load it back (symmetric with
-    DefenderPlugin; supports an env that grants several footholds). primary_access() yields the first."""
+    """run_setup persists the scoped access list and the run_* wrappers load it back. primary_access yields the first entry."""
     from types import SimpleNamespace
     from arena.attacker.env_spec import AttackerSetupAccess
 

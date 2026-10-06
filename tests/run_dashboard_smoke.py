@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""
-Self-contained integration smoke for the arena dashboard — NO cloud, NO real manager, NO credits.
-
-The experiment smoke (run_experiment_smoke.py) drives a real manager end to end. This drives the
-DASHBOARD end to end instead: it stands up a STUB upstream manager (captures whatever the dashboard
-forwards) and the REAL dashboard server pointed at that stub, then exercises the dashboard's HTTP
-surface and asserts:
-
-  1. GET /             -> 200, serves the SPA shell with the submit form mount points.
-  2. GET /api/schema   -> 200, the plugin ui-schemas are discovered (incalmo_strategy present).
-  3. GET /api/experiments -> 200 (the dashboard proxies the manager's registry).
-  4. POST /api/submit with the real BROWSER-shaped payload (bare-string environment + an EMBEDDED
-     attacker {type,...}) -> the dashboard converts it server-side to the arena wire form and forwards
-     THAT: environment becomes {environment_plugin, environment_spec=environments/<group>/<stem>.json},
-     the attacker becomes attacker_plugin + attacker_spec (the bespoke fields as an inline dict, `type`
-     stripped, no embedded `attacker`), and the embedded defender passes through unchanged.
-
-It runs in ~1s and is safe to run anywhere (two loopback HTTP servers on ephemeral ports).
-
-    PYTHONPATH=<repo> <venv>/bin/python tests/run_dashboard_smoke.py
-    (e.g. PYTHONPATH=~/experiment_harness-arena ~/experiment_harness/.venv/bin/python ...)
-"""
+"""Self-contained integration smoke for the arena dashboard — no cloud, no real manager, no credits."""
 from __future__ import annotations
 
 import json
@@ -39,8 +18,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-# --------------------------------------------------------------------------- stub manager
-_captured: list[dict] = []  # payloads the dashboard forwarded to "the manager"
+_captured: list[dict] = []
 
 
 class _StubManager(BaseHTTPRequestHandler):
@@ -48,7 +26,6 @@ class _StubManager(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        # the dashboard's /api/experiments proxies GET /experiments
         self._json(200, [])
 
     def do_POST(self):
@@ -94,7 +71,6 @@ def main() -> int:
     dash_port = _free_port()
 
     stub = ThreadingHTTPServer(("127.0.0.1", stub_port), _StubManager)
-    # point the dashboard at the stub instead of the real manager
     dashboard.EXPERIMENT_SERVER = f"http://127.0.0.1:{stub_port}/experiments"
     dash = ThreadingHTTPServer(("127.0.0.1", dash_port), dashboard.Handler)
 
@@ -113,7 +89,7 @@ def main() -> int:
         ok = code == 200 and 'id="atk-type-select"' in html and 'id="submit-form"' in html
         rows.append(("GET / serves the SPA shell", ok, f"HTTP {code}, {len(html)} bytes"))
 
-        # 2. the plugin ui-schemas are discovered and served
+        # 2. the dashboard discovers and serves the plugin ui-schemas
         code, body = _http("GET", f"{base}/api/schema")
         schema_ok = False
         try:
@@ -128,7 +104,7 @@ def main() -> int:
         code, _ = _http("GET", f"{base}/api/experiments")
         rows.append(("GET /api/experiments proxies the manager", code == 200, f"HTTP {code}"))
 
-        # 4. the browser-shaped payload is converted to the arena wire form server-side
+        # 4. the dashboard converts the browser-shaped payload to the arena wire form server-side
         _captured.clear()
         payload = {
             "experiment_name": "dash_smoke",

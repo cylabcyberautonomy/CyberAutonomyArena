@@ -1,20 +1,4 @@
-"""AttackerLifecycle — the arena<->attacker handshake channel.
-
-The arena drives the attacker through a fixed sequence, waiting for each signal before it sends
-the next (a handshake at every step):
-
-    arena: send start_setup ─► attacker: SETUP_STARTED ─► (setup runs) ─► attacker: READY
-    arena: send start       ─► attacker: RUNNING
-    arena: send stop        ─► attacker: STOPPING ─► attacker: STOPPED
-
-Signals are recorded on the Experiment (`attacker_status` + timestamps) so an observer can see
-exactly which phase the attacker is in, and a hang shows up as a stalled status with a distinct
-timeout (e.g. stuck at SETUP_STARTED, never reaching READY) instead of a silent block.
-
-This is an in-process channel: the arena and the attacker plugin run in the same event loop, so
-`emit()` from the attacker side and `wait()` from the arena side are asyncio primitives. FAILED
-short-circuits any pending wait with the underlying error.
-"""
+"""AttackerLifecycle — the arena<->attacker handshake channel."""
 from __future__ import annotations
 
 import asyncio
@@ -24,20 +8,20 @@ from typing import Callable, Optional
 
 
 class AttackerCommand(str, Enum):
-    """Arena -> attacker. The arena SENDS these to drive each phase."""
-    START_SETUP = "StartSetup"   # begin setup (bring up C2, prep foothold)
-    START_RUN = "StartRun"       # launch the attack now (setup is done + everything else is ready)
-    STOP = "Stop"                # stop the attack
+    """Arena -> attacker commands that drive each phase."""
+    START_SETUP = "StartSetup"
+    START_RUN = "StartRun"
+    STOP = "Stop"
 
 
 class AttackerSignal(str, Enum):
-    """Attacker -> arena. The attacker EMITS these; the arena waits on / records them."""
-    SETUP_STARTED = "SetupStarted"   # ack of START_SETUP
-    READY = "Ready"                  # setup finished, attack channel ready
-    RUNNING = "Running"              # ack of START_RUN — the attack process is up
-    STOPPING = "Stopping"           # ack of STOP
-    STOPPED = "Stopped"             # stop complete (or the attacker exited on its own)
-    FAILED = "Failed"               # a phase raised
+    """Attacker -> arena signals the arena waits on / records."""
+    SETUP_STARTED = "SetupStarted"
+    READY = "Ready"
+    RUNNING = "Running"
+    STOPPING = "Stopping"
+    STOPPED = "Stopped"
+    FAILED = "Failed"
 
 
 class AttackerLifecycleError(RuntimeError):
@@ -47,8 +31,6 @@ class AttackerLifecycleError(RuntimeError):
 class AttackerLifecycle:
     def __init__(self, on_emit: Optional[Callable[[AttackerSignal, Optional[str]], None]] = None,
                  on_command: Optional[Callable[["AttackerCommand"], None]] = None):
-        # on_emit persists each attacker signal; on_command records each arena command. Both are
-        # called synchronously (before waiters are woken).
         self._on_emit = on_emit
         self._on_command = on_command
         self._history: list[AttackerSignal] = []
@@ -62,9 +44,7 @@ class AttackerLifecycle:
         return list(self._commands)
 
     async def send(self, command: "AttackerCommand") -> None:
-        """Arena -> attacker: record + announce a command that drives the next phase. In-process the
-        arena then invokes the matching attacker template; the command is recorded so the full
-        command/ack trace is auditable (and a decoupled attacker could wait on it)."""
+        """Arena -> attacker: record + announce a command that drives the next phase."""
         async with self._cond:
             self._commands.append(command)
             if self._on_command is not None:
@@ -90,8 +70,8 @@ class AttackerLifecycle:
             self._cond.notify_all()
 
     async def wait(self, signal: AttackerSignal, timeout: Optional[float] = None) -> None:
-        """Block until `signal` has been emitted. Raises AttackerLifecycleError if the attacker
-        emitted FAILED first, or TimeoutError if `timeout` elapses."""
+        """Block until the attacker emits `signal`. Raise AttackerLifecycleError if the attacker
+        emits FAILED first. Raise TimeoutError if `timeout` elapses."""
         loop = asyncio.get_event_loop()
         deadline = None if timeout is None else loop.time() + timeout
         async with self._cond:
@@ -110,9 +90,7 @@ class AttackerLifecycle:
 
 
 def signal_recorder(experiment):
-    """on_emit callback that records each attacker signal onto the experiment (status + the matching
-    timestamp), mirroring defender/lifecycle.py's signal_recorder. Sync (no I/O) — the arena calls
-    registry.update() at phase boundaries to persist to disk."""
+    """on_emit callback that records each attacker signal onto the experiment."""
     _ts_field = {
         AttackerSignal.SETUP_STARTED: "attacker_setup_started_at",
         AttackerSignal.READY: "attacker_ready_at",

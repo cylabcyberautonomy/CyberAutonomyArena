@@ -14,8 +14,7 @@ from ..environment.environment import EnvironmentConfig
 
 
 def _load_spec(spec: Union[dict, str, None]) -> dict:
-    """Read a plugin spec. It may be an inline dict (used as-is), a path to a JSON/YAML file holding a
-    mapping, or None (empty spec -> plugin defaults). Returns the bespoke fields the plugin parses."""
+    """Read a plugin spec: an inline dict, a path to a JSON/YAML mapping, or None."""
     if spec is None:
         return {}
     if isinstance(spec, dict):
@@ -30,9 +29,7 @@ def _load_spec(spec: Union[dict, str, None]) -> dict:
 
 
 def _resolve_plugin(registry, plugin_name: str, spec: Union[dict, str, None]):
-    """Resolve a (plugin, spec) pair to a validated plugin instance. The plugin selects the
-    implementation; the spec (inline dict or a file path) holds its bespoke fields. `plugin_name` is
-    injected as `type`, so the spec need not repeat it (and cannot override the chosen plugin)."""
+    """Resolve a (plugin, spec) pair to a validated plugin instance."""
     cls = registry._registry.get(plugin_name)
     if cls is None:
         raise ValueError(f"Unknown plugin {plugin_name!r}. Available: {list(registry._registry)}")
@@ -42,44 +39,36 @@ def _resolve_plugin(registry, plugin_name: str, spec: Union[dict, str, None]):
 
 class ExperimentStatus(str, Enum):
     QUEUED = "Queued"
-    DEPLOYING = "Deploying"        # VMs being spun up by OpenStack
-    DEPLOYED = "Deployed"          # VMs up; holding a deploy slot, waiting for a configure slot (back-pressure buffer)
-    CONFIGURING = "Configuring"    # ansible playbooks running on the hosts
-    CONFIGURED = "Configured"      # configure done; waiting to start the attack
+    DEPLOYING = "Deploying"
+    DEPLOYED = "Deployed"
+    CONFIGURING = "Configuring"
+    CONFIGURED = "Configured"
     RUNNING = "Running"
-    RETRYING = "Retrying"   # non-terminal: an attempt failed but the harness is auto-retrying it in place
+    RETRYING = "Retrying"
     ERROR = "Error"
     FINISHED = "Finished"
-    TIMEDOUT = "TimedOut"   # terminal: hit the harness-enforced attacker wall-clock cap (not a failure — no retry)
-    BLOCKED = "Blocked"     # terminal: the attacker LLM was refused by a provider guardrail (not a harness failure — no retry)
-    EXPERIMENT_TIMEOUT = "ExperimentTimedOut"  # terminal: hit the overall experiment wall-clock cap (cfg.experiment_timeout_seconds) — a safety abort of a hung run (VMs reclaimed), distinct from the attacker's scored TimedOut; no retry
+    TIMEDOUT = "TimedOut"
+    BLOCKED = "Blocked"
+    EXPERIMENT_TIMEOUT = "ExperimentTimedOut"
 
 
 class ExperimentSpecs(BaseModel):
     experiment_name: str
-    # environment (the 4th selectable system): the explicit {environment_plugin, environment_spec} shape
-    # (environment_plugin names a registered plugin; environment_spec is a path). No bare-string shorthand.
     environment: EnvironmentConfig
-    # attacker as a (plugin, spec) pair. attacker_plugin selects the implementation; attacker_spec holds
-    # that plugin's bespoke fields, either inline as a dict or as a PATH to a JSON/YAML file. Resolved
-    # into `attacker` below. `attacker` is derived — do not pass it directly.
     attacker_plugin: Optional[str] = None
     attacker_spec: Optional[Union[dict, str]] = None
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
-    c2c_server: Optional[str] = None  # TEST ONLY: bypasses C2 container startup
+    c2c_server: Optional[str] = None
     trial: int = 0
-    output_dir: Optional[str] = None  # write this experiment's output tree here instead of cfg.output_dir
-    teardown: bool = True  # set False to leave the env + C2 standing (success AND failure) to run an exploit by hand
-    overwrite: bool = False  # if an output folder with this name already exists: false (default) → reject the request (409); true → replace it
-    priority: int = 0  # scheduling priority: higher = admitted from the queue sooner; 0 (default) = normal "whoever fits". Ties break FIFO.
+    output_dir: Optional[str] = None
+    teardown: bool = True
+    overwrite: bool = False
+    priority: int = 0
 
     @field_validator("environment", mode="before")
     @classmethod
     def _require_explicit_environment(cls, v):
-        # environment must be the explicit {environment_plugin, environment_spec} (or an EnvironmentConfig).
-        # No coercion: the bare-string and legacy {type, spec} shorthands were removed. pydantic then
-        # builds EnvironmentConfig and its validator checks environment_plugin against the registry.
         if isinstance(v, EnvironmentConfig):
             return v
         if isinstance(v, dict) and "environment_plugin" in v:
@@ -90,11 +79,7 @@ class ExperimentSpecs(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_attacker_plugin_spec(self):
-        """Resolve attacker_plugin + attacker_spec into the validated plugin instance in `self.attacker`,
-        so everything downstream (Experiment.attacker, build_config, ...) is unchanged.
-
-        The attacker is selected only by the (plugin, spec) pair. `attacker` is derived, not an input.
-        The experiment base is environment + attacker (both required); the defender is optional."""
+        """Resolve attacker_plugin + attacker_spec into the validated plugin instance in `self.attacker`."""
         if self.attacker is not None:
             raise ValueError("select the attacker with attacker_plugin (+ attacker_spec), not an "
                              "embedded 'attacker' block ('attacker' is a derived field).")
@@ -108,14 +93,12 @@ class ExperimentSpecs(BaseModel):
 
 def _json_default(o):
     if isinstance(o, datetime):
-        return o.timestamp()  # epoch seconds (float, sub-second) — matches the host logs; format at analysis time
-    if isinstance(o, BaseModel):  # attacker/defender configs, DeployedEnvironment
+        return o.timestamp()
+    if isinstance(o, BaseModel):
         return o.model_dump(mode="json")
     return str(o)
 
 
-# Which metadata keys are input config (→ experiment_config.json). Everything else is runtime state
-# (status + all timestamps + reservations/pid/c2c/deployed) and goes to experiment_result.json.
 _CONFIG_KEYS = {
     "experiment": ("name", "trial", "teardown", "priority"),
     "environment": ("config", "spec"),
@@ -125,9 +108,7 @@ _CONFIG_KEYS = {
 
 
 class _Field:
-    """Descriptor proxying a flat attribute (`experiment.attacker_started_at`) onto
-    `metadata[group][key]`, so every existing `experiment.<field>` read/write keeps working while the
-    data lives in one grouped dict."""
+    """Descriptor proxying a flat attribute onto `metadata[group][key]`."""
 
     def __init__(self, group: str, key: str) -> None:
         self._group, self._key = group, key
@@ -142,67 +123,47 @@ class _Field:
 
 
 class Experiment:
-    """One experiment. All state lives in `self.metadata`, grouped by concern
-    (experiment / environment / attacker / defender). The flat accessors below are descriptors onto
-    that dict — callers use `experiment.status`, `experiment.attacker_started_at`, etc. as before."""
+    """One experiment. All state lives in `self.metadata`, grouped by concern, with flat descriptor accessors."""
 
-    # --- experiment ---
     experiment_name = _Field("experiment", "name")
     trial = _Field("experiment", "trial")
     status = _Field("experiment", "status")
-    error = _Field("experiment", "error")  # human-readable failure reason when status is Error/TimedOut; None otherwise
+    error = _Field("experiment", "error")
     retry_count = _Field("experiment", "retry_count")
     base_name = _Field("experiment", "base_name")
     teardown = _Field("experiment", "teardown")
-    priority = _Field("experiment", "priority")  # queue scheduling priority; higher = sooner (see reserve())
+    priority = _Field("experiment", "priority")
     created_at = _Field("experiment", "created_at")
     updated_at = _Field("experiment", "updated_at")
-    # --- environment ---
-    environment_config = _Field("environment", "config")  # EnvironmentConfig (environment_plugin + environment_spec)
-    environment_spec = _Field("environment", "spec")  # the topology PATH, for the internal readers (deployer resolves it)
+    environment_config = _Field("environment", "config")
+    environment_spec = _Field("environment", "spec")
     deployed_environment = _Field("environment", "deployed")
     vcpus_reserved = _Field("environment", "vcpus_reserved")
     ram_mb_reserved = _Field("environment", "ram_mb_reserved")
     disk_gb_reserved = _Field("environment", "disk_gb_reserved")
-    # VMs this experiment was admitted for (topology incl. mgmt host + estimated decoys).
-    # Set under the CapacityTracker's lock at admission; cleared on retry. Together with
-    # teardown_finished_at this is what decides whether the experiment currently HOLDS
-    # VMs (see capacity._holds_vms) - the registry is the tracker's source of truth.
     vms_reserved = _Field("environment", "vms_reserved")
     environment_deploy_started_at = _Field("environment", "deploy_started_at")
     environment_deploy_finished_at = _Field("environment", "deploy_finished_at")
     teardown_started_at = _Field("environment", "teardown_started_at")
     teardown_finished_at = _Field("environment", "teardown_finished_at")
-    # The environment system's OWN lifecycle signal (see environment/lifecycle.py): the plugin emits
-    # Deploying/Deployed/Configuring/Configured/TearingDown/TornDown/Failed and the arena records the
-    # latest here — distinct from the whole-experiment `status` above.
     environment_status = _Field("environment", "lifecycle_status")
-    environment_last_command = _Field("environment", "last_command")  # last command the arena SENT (Provision/Configure/Teardown)
-    # --- attacker ---
+    environment_last_command = _Field("environment", "last_command")
     attacker = _Field("attacker", "config")
-    attacker_plugin = _Field("attacker", "plugin")     # provenance: the plugin name the user selected
-    attacker_spec = _Field("attacker", "spec_path")    # provenance: path to the spec file (if the pair form was used)
+    attacker_plugin = _Field("attacker", "plugin")
+    attacker_spec = _Field("attacker", "spec_path")
     pid = _Field("attacker", "pid")
     attacker_started_at = _Field("attacker", "started_at")
     attacker_finished_at = _Field("attacker", "finished_at")
-    # Lifecycle handshake (see attacker/lifecycle.py): the arena records each attacker signal here
-    # as it drives setup->ready->running->stopping->stopped, so an observer can see exactly which
-    # phase the attacker is in (and a hang shows up as a stalled status, not a silent block).
     attacker_status = _Field("attacker", "lifecycle_status")
-    attacker_last_command = _Field("attacker", "last_command")  # last command the arena SENT (StartSetup/StartRun/Stop)
+    attacker_last_command = _Field("attacker", "last_command")
     attacker_setup_started_at = _Field("attacker", "setup_started_at")
     attacker_ready_at = _Field("attacker", "ready_at")
     attacker_stopping_at = _Field("attacker", "stopping_at")
     attacker_stopped_at = _Field("attacker", "stopped_at")
-    # --- defender ---
     defender = _Field("defender", "config")
-    defender_pid = _Field("defender", "pid")           # pid of the defender run-loop process (mirrors attacker `pid`)
+    defender_pid = _Field("defender", "pid")
     defender_started_at = _Field("defender", "started_at")
     defender_finished_at = _Field("defender", "finished_at")
-    # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the arena records
-    # each defender signal here as it drives setup->ready->running->stopping->stopped, so an observer
-    # sees which phase the defender is in (a hang shows as a stalled status, not one opaque "failed to
-    # arm"). defender_started_at also serves as the RUNNING timestamp.
     defender_status = _Field("defender", "lifecycle_status")
     defender_setup_started_at = _Field("defender", "setup_started_at")
     defender_ready_at = _Field("defender", "ready_at")
@@ -212,8 +173,6 @@ class Experiment:
     def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
                  trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
-        # `environment` is an EnvironmentConfig or the explicit {environment_plugin, environment_spec}
-        # dict; validate to the config and derive the resolved name for the internal readers of the spec.
         env_config = environment if isinstance(environment, EnvironmentConfig) else EnvironmentConfig.model_validate(environment)
         self.metadata = {
             "experiment": {
@@ -244,23 +203,21 @@ class Experiment:
 
     @property
     def environment(self):
-        """The executable environment PLUGIN (built from the stored EnvironmentConfig) that the arena
-        drives — provision/configure/collect/teardown/capacity. Stored state is the config
-        (environment_plugin + environment_spec); the plugin is derived on access."""
+        """The executable environment plugin built from the stored EnvironmentConfig."""
         return build_environment(self.environment_config)
 
     def flat(self) -> dict:
-        """The old flat shape, for the REST API — keeps the PhDPT contract stable while state is grouped."""
+        """The flat shape for the REST API."""
         return {name: getattr(self, name)
                 for name, attr in vars(type(self)).items() if isinstance(attr, _Field)}
 
     def config_json(self, indent=2) -> str:
-        """The immutable submission record (grouped): input config only, no runtime/timestamps."""
+        """The immutable submission record: input config only, no runtime/timestamps."""
         d = {g: {k: self.metadata[g][k] for k in ks} for g, ks in _CONFIG_KEYS.items()}
         return json.dumps(d, indent=indent, default=_json_default)
 
     def result_json(self, indent=2) -> str:
-        """The runtime record (grouped): status + all timestamps + reservations/pid/c2c/deployed."""
+        """The runtime record: status + all timestamps + reservations/pid/c2c/deployed."""
         d = {g: {k: v for k, v in grp.items() if k not in _CONFIG_KEYS.get(g, ())}
              for g, grp in self.metadata.items()}
         return json.dumps(d, indent=indent, default=_json_default)

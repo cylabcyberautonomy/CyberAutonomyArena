@@ -1,21 +1,4 @@
-"""EnvironmentLifecycle — the environment system's own status signals.
-
-The environment box emits its lifecycle as the arena drives it (see the design diagram):
-
-    provision:  DEPLOYING   -> DEPLOYED
-    configure:  CONFIGURING -> CONFIGURED
-    teardown:   TEARING_DOWN -> TORN_DOWN
-    any phase raising -> FAILED (with the error)
-
-These are the environment's OWN signals, distinct from the whole-experiment ExperimentStatus.
-The plugin emits them (so a new environment plugin gets the same signals); the arena supplies an
-`on_emit` that persists the latest onto the Experiment (`environment_status`) so an observer can
-see exactly which phase the environment is in, and a hang shows up as a stalled signal.
-
-Emit-only + synchronous: unlike the attacker (a separate process the arena hands off to and waits
-on), the environment is driven in-process and synchronously by the arena, so there is no
-command/wait handshake — just recorded signals.
-"""
+"""EnvironmentLifecycle: the environment system's own status signals, distinct from ExperimentStatus."""
 from __future__ import annotations
 
 from enum import Enum
@@ -23,15 +6,7 @@ from typing import Callable, Optional
 
 
 class EnvironmentCommand(str, Enum):
-    """Arena -> environment. The arena SENDS these to drive each phase; recorded for an auditable
-    command/ack trace.
-
-    The environment now HAS an active phase: between CONFIGURED and teardown the arena ACTIVATEs it as a
-    request-serving service so a running defender can mutate the topology (add_host / rebuild_host /
-    remove_host) via EnvActionRequest events (see env_requests.py). This is NOT a busy loop — the
-    environment has no autonomous work; ACTIVATE just opens the window in which the arena honours those
-    events, and DEACTIVATE closes it. (A defender that does not set uses_env_actions never sends any,
-    so the window is inert for it.)"""
+    """Arena -> environment. The arena sends these to drive each phase. ACTIVATE/DEACTIVATE bound the request-serving window."""
     PROVISION = "Provision"   # bring the network + VMs up
     CONFIGURE = "Configure"   # run setup on the hosts
     ACTIVATE = "Activate"     # open the request-serving window (defender may now mutate topology)
@@ -40,15 +15,15 @@ class EnvironmentCommand(str, Enum):
 
 
 class EnvironmentSignal(str, Enum):
-    """Environment -> arena. The plugin EMITS these; the arena records them."""
+    """Environment -> arena. The plugin emits these and the arena records them."""
     DEPLOYING = "Deploying"       # provision started (VMs/network coming up)
     DEPLOYED = "Deployed"         # provision finished
     CONFIGURING = "Configuring"   # configure started (ansible on the hosts)
-    CONFIGURED = "Configured"     # configure finished; environment ready
+    CONFIGURED = "Configured"     # configure finished. Environment ready
     SERVING = "Serving"           # ack of ACTIVATE — the request-serving window is open
-    IDLE = "Idle"                 # ack of DEACTIVATE — the window is closed; just idling until teardown
+    IDLE = "Idle"                 # ack of DEACTIVATE — the window closed, idling until teardown
     TEARING_DOWN = "TearingDown"  # teardown started
-    TORN_DOWN = "TornDown"        # teardown finished; resources reclaimed
+    TORN_DOWN = "TornDown"        # teardown finished. Resources reclaimed
     FAILED = "Failed"             # a phase raised
 
 
@@ -57,9 +32,7 @@ class EnvironmentLifecycle:
                  on_emit: Optional[Callable[[EnvironmentSignal, Optional[str]], None]] = None,
                  on_command: Optional[Callable[[EnvironmentCommand], None]] = None,
                  on_request: Optional[Callable[[dict], None]] = None):
-        # on_emit persists each env->arena signal; on_command records each arena->env command;
-        # on_request records each serviced defender->env mutation event. All called synchronously
-        # (the environment is driven in-process by the arena).
+        # on_emit persists each signal, on_command records each command, on_request records each mutation event.
         self._on_emit = on_emit
         self._on_command = on_command
         self._on_request = on_request
@@ -83,10 +56,7 @@ class EnvironmentLifecycle:
 
     @property
     def requests(self) -> list[dict]:
-        """The trace of defender->env mutation events serviced in the SERVING window (one entry per
-        EnvActionRequest), so the recorded experiment shows exactly what the defender asked the
-        environment to do and when — e.g. "AddHost decoy0 -> ok at T+5m". Experiment data, like the
-        command/signal history."""
+        """The trace of defender->env mutation events serviced in the SERVING window (one entry per EnvActionRequest)."""
         return list(self._requests)
 
     @property
@@ -94,16 +64,13 @@ class EnvironmentLifecycle:
         return self._error
 
     def record_request(self, entry: dict) -> None:
-        """Arena -> lifecycle: record one serviced env-mutation event. `entry` is a small plain dict
-        (kind, target/name, ok, ip, error, ts) the arena builds from the EnvActionRequest + its result —
-        kept dependency-free (no env_requests import) so the lifecycle stays a pure signal channel."""
+        """Arena -> lifecycle: record one serviced env-mutation event (a small plain dict)."""
         self._requests.append(entry)
         if self._on_request is not None:
             self._on_request(entry)
 
     def send(self, command: EnvironmentCommand) -> None:
-        """Arena -> environment: record the command that drives the next phase (in-process the arena
-        then invokes the matching plugin method)."""
+        """Arena -> environment: record the command that drives the next phase."""
         self._commands.append(command)
         if self._on_command is not None:
             self._on_command(command)
@@ -118,10 +85,7 @@ class EnvironmentLifecycle:
 
 
 def signal_recorder(experiment):
-    """on_emit callback that records each environment signal onto the experiment (environment_status),
-    mirroring attacker/lifecycle.py and defender/lifecycle.py's signal_recorder. Sync (no I/O) — the
-    arena persists to disk at phase boundaries. Simpler than the other two: the environment has no
-    per-phase timestamp fields, only the status."""
+    """on_emit callback that records each environment signal onto the experiment (environment_status)."""
     def _on_emit(signal: EnvironmentSignal, error) -> None:
         experiment.environment_status = signal.value
 

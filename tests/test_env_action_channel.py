@@ -1,12 +1,4 @@
-"""Slice 4: the token'd TCP control-plane channel (env_action_server).
-
-A box-resident defender (uses_env_actions) reaches the env-action channel over TCP, not the harness UDS, so
-the per-experiment token is restored. These are pure handler tests (no sockets): they assert the token
-gate (trusted_transport=False) accepts the right token and rejects anything else, and that the UDS path
-(trusted_transport=True) is unchanged (token-free). handle_env_action checks the token right after
-existence, before the serving window — so a passing token with the window closed surfaces as 409, which
-is how we prove the token was accepted without needing a full EnvActionRequest.
-"""
+"""The token'd TCP control-plane channel (env_action_server): token gate on TCP, token-free on UDS."""
 from __future__ import annotations
 
 import asyncio
@@ -49,7 +41,7 @@ def test_tcp_missing_token_forbidden():
 
 
 def test_tcp_correct_token_passes_gate():
-    # Correct token -> past the gate; window closed -> 409 (proves the token was accepted).
+    # Correct token -> past the gate. Window closed -> 409 (proves the handler accepted the token).
     res = _call(_exp(token="secret"), token="secret", trusted_transport=False)
     assert res["status"] == 409
 
@@ -63,7 +55,7 @@ def test_tcp_rejected_when_experiment_has_no_token():
 # --------------------------------------------------------------------------- UDS path (token-free, unchanged)
 
 def test_uds_needs_no_token():
-    # trusted_transport=True (the UDS default): no token required; window closed -> 409, not 403.
+    # trusted_transport=True (the UDS default): no token required. Window closed -> 409, not 403.
     res = _call(_exp(token=None), trusted_transport=True)
     assert res["status"] == 409
 

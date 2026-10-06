@@ -1,23 +1,4 @@
-"""Runs on the foothold box. Drives harbor's Terminus-2 agent against a LOCAL shell (this box) with
-the attack objective — so the shell the agent types into has east-west access to the victims.
-
-Terminus-2 (harbor) normally runs inside a Docker task container it creates. Here we instead give it
-a minimal BaseEnvironment whose exec() runs commands locally on the foothold, so no container is
-needed and the agent operates the real attacker box (in-context execution as the granted principal —
-no nested shell / DinD). The agent flow is:
-    Terminus2(logs_dir, model_name, api_base, max_turns, record_terminal_session=False)
-    await agent.setup(env)                      # builds a TmuxSession bound to env (execs tmux locally)
-    await agent.run(instruction, env, context)  # read-terminal -> LLM -> type-command loop
-
-The LocalShellEnvironment <-> Terminus-2 contract is checked by an on-box probe
-(tests/README_live_smoke.md) that runs agent.setup(env) and drives one command through the tmux
-session WITHOUT the LLM. harbor's BaseEnvironment is a large abstract class, but Terminus-2/TmuxSession
-only touch a small slice of it: default_user, exec(), and (skills/recording only)
-is_dir()/upload_file()/trial_paths. We override __init__ to skip the container/resource/network
-machinery and implement exactly that slice. Recording is disabled (it would additionally need a
-TrialPaths + asciinema on the box); the tmux pane log and the agent context still capture the full
-session.
-"""
+"""Runs on the foothold box: drives harbor's Terminus-2 agent against a local shell."""
 import asyncio
 import json
 import os
@@ -33,26 +14,18 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 
 class LocalShellEnvironment(BaseEnvironment):
-    """Minimal harbor environment whose exec() runs on THIS host (the foothold). No Docker, no
-    container — the agent operates the real attacker box directly, as the granted principal.
-    Overrides __init__ so none of the base container/resource/network machinery is needed; the
-    concrete BaseEnvironment helpers Terminus-2 uses (e.g. is_dir) are inherited and route through
-    exec()."""
+    """Minimal harbor environment whose exec() runs on the foothold host directly."""
 
     def __init__(self, default_user: str | None = None):
         import logging
         self._logger = logging.getLogger("terminus.local_env")
-        # attributes Terminus-2 / TmuxSession / inherited helpers may read:
-        self.default_user = default_user       # None -> run as the current (login) principal
-        self.trial_paths = None                # only read when record_terminal_session=True
+        self.default_user = default_user
+        self.trial_paths = None
         self.environment_name = "local-foothold"
         self.session_id = "local-foothold__attacker"
         self._env_id = "local-foothold"
 
-    # --- the slice Terminus-2 / TmuxSession actually use ----------------------------------
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None) -> ExecResult:
-        # `user` is intentionally ignored: in-context execution — we already run AS the granted
-        # principal (root on the foothold via `ssh root@foothold`), so there is no user to switch to.
         merged = {**os.environ, **(env or {})}
         try:
             p = subprocess.run(["bash", "-lc", command], capture_output=True, text=True,
@@ -77,8 +50,6 @@ class LocalShellEnvironment(BaseEnvironment):
         shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
 
     async def start(self, force_build=False):
-        # TmuxSession pipes the pane into EnvironmentPaths.agent_dir; create the in-env log dirs so
-        # that redirect (`cat > /logs/agent/terminus_2.pane`) succeeds. Nothing to build otherwise.
         for d in (EnvironmentPaths.agent_dir, EnvironmentPaths.verifier_dir):
             subprocess.run(["bash", "-lc", f"mkdir -p {d} && chmod 777 {d}"],
                            capture_output=True, text=True)
@@ -104,7 +75,6 @@ async def main() -> int:
     out = Path(cfg["output_dir"])
     out.mkdir(parents=True, exist_ok=True)
 
-    # Credentials / model routing for litellm (harbor's terminus-2 backend).
     if cfg.get("api_key"):
         _anthropic = "claude" in cfg["model"] or "anthropic" in cfg["model"]
         os.environ["ANTHROPIC_API_KEY" if _anthropic else "OPENAI_API_KEY"] = cfg["api_key"]
@@ -117,7 +87,7 @@ async def main() -> int:
         model_name=cfg["model"],
         api_base=cfg.get("api_base"),
         max_turns=cfg.get("max_turns", 1000),
-        record_terminal_session=False,  # recording also needs TrialPaths + asciinema
+        record_terminal_session=False,
     )
     env = LocalShellEnvironment(default_user=None)
     context = AgentContext()
@@ -128,7 +98,6 @@ async def main() -> int:
     finally:
         await env.stop()
 
-    # Persist usage + a short summary in the same layout the other attackers use.
     (out / "token_usage.json").write_text(json.dumps({
         "input_tokens": context.n_input_tokens or 0,
         "output_tokens": context.n_output_tokens or 0,

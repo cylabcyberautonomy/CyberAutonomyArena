@@ -5,7 +5,7 @@ from pathlib import Path
 
 _loggers: dict[str, logging.Logger] = {}
 _attacker_loggers: dict[str, logging.Logger] = {}
-_output_roots: dict[str, Path] = {}  # experiment_name -> per-experiment output base (overrides cfg.output_dir)
+_output_roots: dict[str, Path] = {}
 _fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 

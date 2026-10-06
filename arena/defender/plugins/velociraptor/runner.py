@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""Velociraptor EDR defender runner (runs on the harness host).
-
-Drives the per-experiment Velociraptor server on the bastion over SSH — every
-query/response is ``ssh root@<bastion> velociraptor --api_config .../api.yaml
-query`` against the loopback gRPC API there, so the API is never network-exposed.
-The primitives used (clients(), source(), collect_client()) were validated live.
-
-Lifecycle:
-  1. arm  — wait for victims to enroll, enable the process-execution monitor,
-            then write the `defender_ready` marker the harness gates on.
-  2. loop — poll the monitor, apply the MHBench kill-chain detection rules, record
-            detections, and (if response is enabled) kill the offending process
-            and/or quarantine the host via Velociraptor collections.
-  3. exit — on SIGTERM (attacker finished) flush detections.jsonl + metrics.json.
-
-Stdlib only: it shells out to ssh + the remote velociraptor binary; no velociraptor
-Python bindings, so it runs under the harness's own interpreter.
-"""
+"""Velociraptor EDR defender runner (runs on the harness host, drives the box server over SSH)."""
 from __future__ import annotations
 
 import json
@@ -29,23 +12,22 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# --------------------------------------------------------------------------- #
 CFG = json.loads(Path(sys.argv[1]).read_text())
 EXP = CFG["experiment_name"]
 LOG_DIR = Path(CFG["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-BASTION_IP = CFG.get("bastion_ip")            # added by run_defender
+BASTION_IP = CFG.get("bastion_ip")
 SSH_KEY = os.path.expanduser(CFG["ssh_key"])
 INSTALL_DIR = CFG["install_dir"]
 API_CONFIG = f"{INSTALL_DIR}/api.yaml"
 VELO = f"{INSTALL_DIR}/velociraptor"
-SERVER_IP = CFG["server_ip"]                  # the defender box: the server runs here
-SERVER_PROXY = CFG.get("server_proxy") or ""  # bastion ProxyCommand to reach the box (scoped key)
+SERVER_IP = CFG["server_ip"]
+SERVER_PROXY = CFG.get("server_proxy") or ""
 EXPECTED_CLIENTS = int(CFG.get("expected_clients", 1))
 POLL = float(CFG.get("poll_interval", 15))
 READY_TIMEOUT = float(CFG.get("ready_timeout", 600))
-RESPONSE_MODE = CFG.get("response_mode", "kill")   # off | kill | quarantine | both
+RESPONSE_MODE = CFG.get("response_mode", "kill")
 PLANTED = CFG.get("planted_data_paths", [])
 
 DETECTIONS = LOG_DIR / "velociraptor_detections.jsonl"
@@ -72,17 +54,14 @@ def logline(msg: str) -> None:
 
 
 def vql(query: str, timeout: float = 90) -> list[dict]:
-    """Run VQL on the box velo server via SSH; return parsed rows ([] on error)."""
-    # ssh concatenates the trailing argv into ONE string and runs it through the remote shell, so the
-    # VQL (parens, spaces, quotes) MUST be a single shell-quoted token or the remote bash mis-parses it
-    # ("syntax error near ..."). Build the whole remote command as one quoted string.
+    """Run VQL on the box velo server via SSH. Return parsed rows ([] on error)."""
     remote = (f"{shlex.quote(VELO)} --api_config {shlex.quote(API_CONFIG)} "
               f"query --format json {shlex.quote(query)}")
     cmd = [
         "ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
-        *shlex.split(SERVER_PROXY),           # bastion ProxyCommand -> reach the box (server host)
-        f"root@{SERVER_IP}",                  # server runs on the box, not the bastion
+        *shlex.split(SERVER_PROXY),
+        f"root@{SERVER_IP}",
         remote,
     ]
     try:
@@ -100,7 +79,6 @@ def vql(query: str, timeout: float = 90) -> list[dict]:
         data = json.loads(out)
         return data if isinstance(data, list) else [data]
     except json.JSONDecodeError:
-        # --format json can emit JSONL for streamed rows; parse line by line.
         rows = []
         for ln in out.splitlines():
             ln = ln.strip()
@@ -112,10 +90,6 @@ def vql(query: str, timeout: float = 90) -> list[dict]:
         return rows
 
 
-# --------------------------------------------------------------------------- #
-# Detection rules — kept here (not in VQL) so they're reviewable/tunable.
-# Each returns a rule name if the process row matches, else None.
-# --------------------------------------------------------------------------- #
 _NETCAT = {"nc", "ncat", "netcat"}
 _SHELLS = {"sh", "bash", "dash", "zsh"}
 _SUDO = {"sudo", "sudoedit", "pkexec"}
@@ -141,7 +115,6 @@ def classify(row: dict) -> str | None:
     return None
 
 
-# --------------------------------------------------------------------------- #
 def enrolled_clients() -> list[dict]:
     return vql("SELECT client_id, os_info.hostname AS host FROM clients()")
 
@@ -157,12 +130,8 @@ def arm() -> None:
             break
         logline(f"[arm] waiting for clients ({seen}/{EXPECTED_CLIENTS})")
         time.sleep(5)
-    # Enable the process-execution monitor on all clients (best-effort — a failure
-    # here degrades to no detection, so it's logged loudly but doesn't abort arming).
     res = vql("SELECT add_client_monitoring(artifact='Custom.MHBench.ProcessMonitor') AS r FROM scope()")
     logline(f"[arm] client monitoring enabled: {bool(res)}")
-    # Mark ready even if fewer than expected enrolled — a defended run with partial
-    # visibility is still a defended run; the count is recorded in metrics.
     (LOG_DIR / "defender_ready").write_text(str(time.time()))
     logline(f"[arm] armed (defender_ready written); enrolled={seen}")
 
@@ -181,7 +150,7 @@ def respond(client_id: str, pid, rule: str) -> list[str]:
 
 
 def poll_loop() -> dict:
-    since = {}  # client_id -> last epoch seen
+    since = {}
     counts: dict[str, int] = {}
     quarantined: set[str] = set()
     total = 0

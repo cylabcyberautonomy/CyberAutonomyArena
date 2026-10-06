@@ -1,10 +1,4 @@
-"""MHBench environment plugin — deploys an MHBench topology as the experiment's network.
-
-The topology is named by ``environment_spec``: a path to a topology JSON, absolute or relative to
-``cfg.mhbench_dir`` (e.g. ``environments/instrumented/equifax_small_instrumented.json``). The short
-env label is the path stem. Lifecycle methods delegate to the environment package's functions
-(deployer / collect / teardown / rotate), which resolve the path via ``deployer.resolve_topology_path``.
-"""
+"""MHBench environment plugin: deploys an MHBench topology (named by ``environment_spec``) as the experiment's network."""
 from __future__ import annotations
 from ...config import env_backend  # env-layer backend settings
 
@@ -29,12 +23,11 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     @property
     def spec(self) -> str:
-        """The short env label (Incalmo's env name) — the topology file's stem."""
+        """The short env label: the topology file's stem."""
         return Path(self.environment_spec).stem
 
     def resolve_spec(self, cfg: ExperimentManagerConfig) -> str:
-        """The resolved, canonical deploy identifier — MHBench's absolute topology path (the arena
-        stamps this into DeployedEnvironment.topology_spec before provisioning)."""
+        """The resolved, canonical deploy identifier: MHBench's absolute topology path."""
         from .deployer import resolve_topology_path
         return str(resolve_topology_path(self.environment_spec, cfg))
 
@@ -68,7 +61,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             lc.emit(EnvironmentSignal.DEPLOYING)
         try:
             result = await provision_environment(experiment, c2c_url, cfg)
-        except Exception as e:  # noqa: BLE001 — record FAILED then re-raise for the arena to handle
+        except Exception as e:  # noqa: BLE001
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
             raise
@@ -94,11 +87,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
             raise
-        # Per-system scoped-key injection (attacker_key on the foothold, defender_key on the box +
-        # victims) happens inside MHBench's own configure, so it runs on every deploy path.
-        # Rotate the host logs right after configuring so setup activity is cleared before the attack
-        # (a clean ground-truth baseline). This is internal to the plugin — not on the base interface,
-        # and the arena never calls it. Best-effort: a rotation failure never fails configure.
+        # Rotate the host logs right after configuring for a clean ground-truth baseline. Best-effort.
         try:
             await rotate_environment(experiment, cfg)
         except Exception:  # noqa: BLE001
@@ -112,8 +101,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     @classmethod
     async def clean_slate(cls, cfg: ExperimentManagerConfig) -> None:
-        # Backend reset at startup: sets OS_CLOUD + (OpenStack) wipes leftover cloud resources, or no-ops
-        # on GCP. Owned here, not in the arena — see environment/plugins/mhbench/clean_slate.py.
+        # Backend reset at startup: sets OS_CLOUD and wipes leftover OpenStack resources, or no-ops on GCP.
         from .clean_slate import clean_slate as _mhbench_clean_slate
         await _mhbench_clean_slate(cfg)
 
@@ -124,10 +112,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     def attacker_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         from .deployer import attacker_setup_access, _bastion_proxy_args
-        # The env ISSUES the attacker's scoped credential (foothold-only). Both hops in SetupAccess use
-        # it: the final hop opens a shell on the foothold, and the bastion hop tunnels with the SAME key
-        # (forward-only on the bastion). The broad management key never enters SetupAccess — assume a
-        # plugin may forward SetupAccess to its agent, so nothing in it may out-scope the system.
+        # Both hops in SetupAccess use the scoped foothold-only credential. The management key never enters it.
         cred = self.attacker_credential(deployed, cfg)
         proxy = _bastion_proxy_args(bastion_ip, cred)
         return [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
@@ -136,22 +121,18 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
     def defender_spec(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import defender_env_spec
         spec = defender_env_spec(deployed, cfg)
-        spec.box = self.defender_box(deployed, cfg)  # every env provides the defender box
+        spec.box = self.defender_box(deployed, cfg)
         return spec
 
     def defender_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
         from .deployer import defender_setup_access, _defender_box_host, _bastion_proxy_args
         from ....defender.env_spec import DefenderSetupAccess
-        cred = self.defender_credential(deployed, cfg)  # env-issued defender credential (box + victims)
-        # Both hops use the scoped defender key: final hop = shell on box/victims, bastion hop = tunnel
-        # with the same key (forward-only on the bastion). No management key in SetupAccess (a plugin may
-        # forward it to its agent).
+        cred = self.defender_credential(deployed, cfg)
+        # Both hops use the scoped defender key. No management key enters SetupAccess.
         proxy = _bastion_proxy_args(bastion_ip, cred)
         access = [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
                   for a in defender_setup_access(deployed, bastion_ip, cfg)]
-        # When the topology declares a defender_subnet, the deployer already added the REAL box entry
-        # (reached via the bastion, like the victims). Only fall back to the mgmt-host placeholder for
-        # older topologies without an isolated box, so the defender always has somewhere to run.
+        # Fall back to the mgmt-host placeholder only for older topologies without an isolated box.
         topo = deployed.topology_spec if deployed else None
         has_real_box = bool(topo and Path(topo).exists() and _defender_box_host(topo))
         if not has_real_box and bastion_ip:
@@ -161,9 +142,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return access
 
     # -- per-system credential issuance -----------------------------------------------------------
-    # The environment issues a SEPARATE scoped keypair per system (attacker key on the foothold only,
-    # defender key on the box + victims only); the broad management key stays harness-side and is never
-    # placed in a spec. MHBench generates and injects these keys during configure.
+    # MHBench generates and injects a separate scoped keypair per system during configure.
     def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "attacker_key")
 
@@ -172,60 +151,36 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     # -- generic infra guarantees (defender box) --------------------------------------------------
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
-        # The management host's internal IP is constant across runs (management.host_ip); reuse the
-        # gcp_relay_ip default which already names it.
+        # The management host's internal IP is constant across runs. Reuse the gcp_relay_ip default.
         return env_backend(cfg).gcp_relay_ip
 
     def defender_box(self, deployed, cfg: ExperimentManagerConfig):
         from .deployer import defender_box_spec
         from ....defender.env_spec import DefenderBox
-        # Real, isolated box from the topology's defender_subnet (provisioned by MHBench, live-validated).
+        # Real, isolated box from the topology's defender_subnet.
         box = defender_box_spec(deployed, cfg)
         if box:
             return box
-        # Fallback for topologies without a defender_subnet: co-locate on the (attacker-hidden) mgmt host.
+        # Fallback for topologies without a defender_subnet: co-locate on the mgmt host.
         return DefenderBox(name="defender_box", ip=self._mgmt_internal_ip(cfg), subnet="management")
 
     def provides_defender_box(self, deployed, cfg: ExperimentManagerConfig) -> bool:
-        """Whether a REAL, isolated defender box exists (the topology declared a defender_subnet). The
-        arena's env↔defender contract check gates on this. Distinct from defender_box() above, which
-        falls back to the mgmt host so a defender always has *somewhere* to run — that fallback must not
-        satisfy the contract, so this checks the real box only."""
+        """Whether a real, isolated defender box exists (the topology declared a defender_subnet)."""
         from .deployer import defender_box_spec
         return defender_box_spec(deployed, cfg) is not None
 
     async def program_ingress(self, experiment, bastion_ip, cfg: ExperimentManagerConfig, ingress: dict) -> None:
-        # Provision exactly the defender-declared box ingress via MHBench's `request-ingress` (relay
-        # dests for telemetry ports; mgmt forward + SG for forward ports). No-op for {} — box isolated.
+        # Provision exactly the defender-declared box ingress via MHBench's `request-ingress`. No-op for {}.
         from .deployer import request_ingress_env
         await request_ingress_env(experiment, bastion_ip, cfg, ingress)
 
     async def _teardown_dynamic_hosts(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
-        """Delete the dynamically-added VMs (decoys) on this experiment's networks before the network
-        teardown — an ENVIRONMENT responsibility, driven by the env, never by the arena or the defender.
+        """Remove the dynamically-added decoy VMs on this experiment's networks before the network teardown.
 
-        How the env KNOWS which VMs to reap (the feedback loop): under box-only execution the defender
-        never touches the cloud. Every dynamic host is created BY THIS ENVIRONMENT, through add_host
-        (defender -> env UDS channel -> MHBench), and create_one_host stamps metadata
-        arena_dynamic_host="true" on it (see src/deployment/host_deployer.py). That tag — persisted on the
-        cloud VM, so it survives a manager restart (the in-memory registry does not) — is the record this
-        sweep reads back: a tagged server on one of this experiment's networks is a decoy to reap; a real
-        topology host is untagged and left alone. Reaping matters because a live decoy keeps this
-        experiment's security groups "in use", and MHBench's ordered teardown aborts on the first
-        ConflictException, leaking every network/subnet/security-group for the whole experiment along with
-        the decoy (confirmed live, repeatedly).
-
-        The `not name.startswith("<experiment_name>-")` clause is a legacy fallback for the now-removed
-        arena-side DeployDecoy actuator, which created bare-named (unprefixed) servers directly; the
-        current add_host path PREFIXES decoy names like topology hosts, so those are caught by the TAG,
-        not the prefix. Scope is kept to this experiment by cross-referencing the network name
-        ("<experiment_name>-<subnet_name>"), via Neutron ports (device_id=server.id) not server.addresses:
-        addresses is empty while a server is still BUILD (a slow/stuck decoy — exactly the case this must
-        catch), but a port with its network exists as soon as create_server() returns.
-
-        Best-effort: never fails teardown. No-op on backends without this escape hatch."""
+        A decoy is a server tagged arena_dynamic_host (the add_host path) or unprefixed (the legacy
+        actuator), on one of this experiment's networks. Best-effort: never fails teardown."""
         if env_backend(cfg).cloud_backend == "gcp":
-            return  # GCP decoys are named/reaped by MHBench's own teardown; no stray-VM sweep needed
+            return  # MHBench's own teardown reaps GCP decoys
         import asyncio
         import openstack
 
@@ -235,22 +190,20 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             for server in conn.compute.servers(details=True):
                 name = server.name or ""
                 md = server.metadata or {}
-                # A decoy is either tagged arena_dynamic_host (the add-host path, which PREFIXES the name
-                # like a topology host) OR unprefixed (the legacy DeployDecoy actuator, now removed, made
-                # bare-named decoys). A real topology host is prefixed AND untagged -> skipped.
+                # A decoy has the arena_dynamic_host tag or no name prefix. A real topology host has the prefix and no tag.
                 is_decoy = md.get("arena_dynamic_host") == "true" or not name.startswith(prefix)
                 if not is_decoy:
                     continue
                 network_ids = {port.network_id for port in conn.network.ports(device_id=server.id)}
                 network_names = {conn.network.get_network(nid).name for nid in network_ids}
                 if not any(nm.startswith(prefix) for nm in network_names):
-                    continue  # not on this experiment's networks
+                    continue
                 conn.compute.delete_server(server, ignore_missing=True)
                 conn.compute.wait_for_delete(server, wait=120)
 
         try:
             await asyncio.get_event_loop().run_in_executor(None, _sync)
-        except Exception:  # noqa: BLE001 — a decoy sweep failure must not block reclaiming the env's VMs
+        except Exception:  # noqa: BLE001
             pass
 
     # -- dynamic topology mutation (defender-driven, during the run) ------------------------------
@@ -259,9 +212,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return True
 
     async def add_host(self, experiment, deployed, request, cfg):
-        """Provision ONE host via MHBench (cloud op stays in MHBench — no god-key leaves the env) and
-        return its name/ip + a DEFENDER-SCOPED, box-relative SetupAccess so the box agent can configure
-        it in-env. role maps to the backend image inside MHBench (e.g. apache_vuln -> webserver image)."""
+        """Provision one host via MHBench and return its name/ip + a defender-scoped, box-relative SetupAccess."""
         import asyncio
         from pathlib import Path
         from ....experiment_log import log
@@ -272,21 +223,14 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             _host_op_sync, "add-host", experiment.experiment_name, self.environment_spec, cfg,
             name=request.name, role=(request.role or "decoy"), subnet=request.subnet)
         ip, name = res.get("ip"), (res.get("name") or request.name)
-        # MHBench injects ONLY the broad mgmt keypair on the new decoy. The defender box reaches it with
-        # the SCOPED defender key (the same key inject_scoped_keys puts on the original victims), so that
-        # scoped pubkey must be in the decoy's authorized_keys too — otherwise the box's ConfigureDecoy SSH
-        # gets 'Permission denied (publickey)' (verified live) and the decoy never registers. Inject it here,
-        # reaching the decoy via the bastion with the mgmt key (the decoy has that key), same as
-        # inject_scoped_keys does per victim. bastion_ip is stamped on the experiment in the defender setup
-        # phase (main.py); without it (older single-subnet topologies) we can't reach the decoy to inject.
+        # Inject the scoped defender pubkey into the new decoy so the box's ConfigureDecoy SSH can reach it.
+        # Reach the decoy via the bastion with the mgmt key (the decoy carries that key).
         bastion_ip = getattr(experiment, "_bastion_ip", None)
         if ip and bastion_ip:
             _, dk = issue_scoped_keys(cfg)
             dk_pub = Path(str(dk) + ".pub").read_text().strip()
             mgmt_key = _mhbench_ssh_key(cfg)
-            # A just-created decoy needs ~60-90s before sshd accepts connections, so retry until the mgmt
-            # key reaches it (the decoy carries that key). This finishes BEFORE the box's ConfigureDecoy
-            # runs, so the box's scoped defender key is already trusted by the time it configures the decoy.
+            # A just-created decoy needs ~60-90s before sshd accepts connections, so retry the inject.
             ok, attempts = False, 0
             for attempts in range(1, 13):
                 ok = await asyncio.to_thread(_inject_pubkey, dk_pub, str(ip), bastion_ip, mgmt_key)
@@ -311,7 +255,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return EnvActionResult(kind=EnvActionKind.REBUILD_HOST, ok=True, name=request.target)
 
     async def remove_host(self, experiment, deployed, request, cfg):
-        """Delete one existing host."""
+        """Remove one existing host."""
         import asyncio
         from ...env_requests import EnvActionResult, EnvActionKind
         from .deployer import _host_op_sync
@@ -326,8 +270,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         from .teardown import teardown_environment
         if lc:
             lc.emit(EnvironmentSignal.TEARING_DOWN)
-        # Sweep stray decoy VMs on this experiment's networks first, so the network teardown below doesn't
-        # abort on a security group a decoy still holds "in use" (see _teardown_dynamic_hosts).
+        # Sweep stray decoy VMs first, so the network teardown below does not abort on a security group in use.
         await self._teardown_dynamic_hosts(experiment, cfg)
         try:
             await teardown_environment(experiment, cfg)

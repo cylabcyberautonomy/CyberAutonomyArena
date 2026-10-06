@@ -1,29 +1,4 @@
-"""OpenShell attacker runner — runs on the foothold. Drives NVIDIA OpenShell to launch the chosen
-coding agent (claude/codex/opencode) in a sandbox whose shell can reach the victims east-west.
-
-Reads attacker_config.json (path = argv[1]), produced by OpenShellAttacker.build_config(), with keys:
-    agent, model, provider_type, cred_envs[], creds{env:val}, image, agent_cmd_template,
-    policy ("permissive"|"restrictive"), http_cidrs[], http_ports[], tcp_hosts[{name,ip}], tcp_ports[],
-    objective, sandbox_name, output_dir.
-
-Flow (verified against the NVIDIA/OpenShell repo — providers/*.yaml + examples/agent-driven-policy-
-management/demo.sh, the authoritative real invocation):
-  1. create the provider from the built-in type, injecting each present credential env var
-     (openshell provider create --type <t> --credential <ENV> ...). Stock types need no profile import.
-  2. permissive: write a policy with two egress planes — http_egress (hostless allowed_ips CIDRs on the
-     HTTP ports, forward proxy) and tcp_egress (one host: endpoint per tcp_hosts, native TCP); restrictive:
-     no --policy, so OpenShell's default-deny stands (a containment study).
-  3. openshell sandbox create --name <s> --provider <t> [--from <img>] [--policy p] [--approval-mode auto]
-     --no-tty -- <agent cmd>
-The sandbox's foreground exit code is the attack verdict.
-
-Stdlib only, run with the system python3 (OpenShell is a CLI, not a pip package — no venv).
-
-VALIDATION NOTE (see the module docstring): the command surface matches the repo's example scripts.
-What still needs an on-foothold pass: (a) OpenShell forbids raw-IP native TCP, so ssh/nc lateral movement
-only reaches the hosts declared in tcp_hosts, by name; (b) the provider type's binary paths must match
-the image layout or the agent's LLM credential is not injected; (c) codex needs CODEX_AUTH_* tokens.
-"""
+"""OpenShell attacker runner — runs on the foothold, driving OpenShell to launch the coding agent in a sandbox."""
 from __future__ import annotations
 
 import json
@@ -44,7 +19,6 @@ def _build_policy(cfg: dict) -> tuple[str, bool]:
         "landlock:",
         "  compatibility: best_effort",
         "network_policies:",
-        # HTTP/forward-proxy plane: hostless allowed_ips CIDRs (valid) on the HTTP ports.
         "  http_egress:",
         "    name: http_egress",
         "    endpoints:",
@@ -54,8 +28,6 @@ def _build_policy(cfg: dict) -> tuple[str, bool]:
             lines.append(f'      - {{ allowed_ips: ["{cidr}"], port: {port} }}')
     lines += ["    binaries:", '      - { path: "/**" }']
 
-    # Native-TCP plane: one host: endpoint per declared tcp_hosts entry. OpenShell forbids raw-IP TCP,
-    # so lateral movement is ONLY to these named hosts.
     tcp_hosts = cfg.get("tcp_hosts", [])
     if tcp_hosts:
         lines += ["  tcp_egress:", "    name: tcp_egress", "    endpoints:"]
@@ -87,8 +59,6 @@ def main() -> int:
     log(f"[openshell-runner] agent={agent} model={cfg['model']} provider={provider} "
         f"policy={cfg['policy']} sandbox={cfg['sandbox_name']} image={cfg['image'] or '<default>'}")
 
-    # Inject the agent's credentials into the environment, then pass each present one to `provider
-    # create` as --credential <ENV> (openshell reads the value from the env).
     creds = cfg.get("creds", {})
     for k, v in creds.items():
         os.environ[k] = v
@@ -103,12 +73,10 @@ def main() -> int:
         log("[openshell-runner] gateway not reachable")
         return 1
 
-    # 1: create the provider from the built-in type with the injected credentials.
     run(["openshell", "provider", "delete", provider],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     run(["openshell", "provider", "create", "--name", provider, "--type", provider, *cred_args])
 
-    # 2: permissive policy + auto-approval; restrictive leaves OpenShell's default-deny in place.
     policy_args: list[str] = []
     if cfg["policy"] == "permissive":
         policy_text, has_tcp = _build_policy(cfg)
@@ -120,11 +88,8 @@ def main() -> int:
                 "is not possible under OpenShell without hostname endpoints; HTTP egress only.")
         policy_args = ["--policy", str(policy_file), "--approval-mode", "auto"]
 
-    # --from <image> only when one is configured (claude/codex use the agent's default image).
     from_args = ["--from", cfg["image"]] if cfg["image"] else []
 
-    # 3: run the agent in the sandbox to completion. The headless per-agent template gets the model +
-    # objective substituted, then split into argv after `--`. --no-tty: headless, no interactive terminal.
     agent_cmd = cfg["agent_cmd_template"].format(
         model=shlex.quote(cfg["model"]), objective=shlex.quote(cfg["objective"]))
     create = (["openshell", "sandbox", "create", "--name", cfg["sandbox_name"], "--provider", provider]

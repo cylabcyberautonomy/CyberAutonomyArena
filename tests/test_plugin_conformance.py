@@ -1,41 +1,4 @@
-"""
-Registry-driven plugin conformance smoke tests — the GENERIC companion to test_arena_contract.py.
-
-WHY THIS EXISTS (and how it differs from test_arena_contract.py)
-    test_arena_contract.py pins the *content* each specific plugin's build_config / spec production
-    must emit (terminus needs foothold_ip, llm_soc omits topology_spec, …). Those tests only bind the
-    plugins named in them: a NEW plugin that silently violates the shared interface passes CI, because
-    nothing iterates the registry.
-
-    This file iterates EVERY registered plugin of each system type (attacker / defender /
-    environment) and holds it to the SHARED contract its base class promises. A new plugin is subjected
-    to it the moment it registers — no edit here needed. When a plugin is non-conformant the failure
-    (a) names the plugin (parametrize id, e.g. test_attacker_plugin_conforms[sliver_llm]) and (b) lists
-    EVERY problem found for it at once, so a new-plugin author sees the whole checklist in one run
-    instead of fix-rerun-repeat.
-
-    Fast, cloud-free, no LLM credits — same tier as test_arena_contract.py:
-        <venv>/bin/python -m pytest tests/test_plugin_conformance.py -q
-
-WHAT IS CHECKED (per plugin, generically)
-    - discovery:     every config_type declared in a plugin file is actually in the registry (catches a
-                     plugin module that failed to import, so it silently never registered).
-    - instantiable:  the plugin builds from {"type": <name>} (+ synthesized placeholders for any other
-                     required field), so the arena/dashboard can construct it.
-    - type identity: instance.type == the registry key.
-    - ui_schema:     well-formed PluginUISchema (config_type matches, has label/fields/cartesian_product,
-                     each field has field_type/label/key, every show_when references a sibling field key),
-                     AND every REQUIRED model field (no default) is exposed as a ui_schema field so the
-                     dashboard can supply it.
-    - lifecycle:     the methods the arena drives exist and have the right async-ness.
-    - build_config:  (attacker/defender) returns a JSON-serializable dict that leaks no SSH/management
-                     credential or routing (the agent config is handed to the agent process), and for an
-                     attacker never blacklists a victim subnet.
-
-WHAT IS DELIBERATELY NOT HERE
-    Per-plugin build_config *content* (which keys a given runner reads) stays in test_arena_contract.py —
-    that is legitimately plugin-specific. This file only asserts the shape every plugin must share.
-"""
+"""Registry-driven plugin conformance smoke tests — the generic companion to test_arena_contract.py."""
 from __future__ import annotations
 
 import inspect
@@ -46,7 +9,6 @@ from typing import Union, get_args, get_origin
 
 import pytest
 
-# Importing the plugin packages triggers auto-registration of every plugin subclass.
 import arena.attacker.plugins   # noqa: F401
 import arena.defender.plugins   # noqa: F401
 import arena.environment.plugins  # noqa: F401
@@ -60,38 +22,27 @@ _ARENA_ROOT = Path(__file__).resolve().parent.parent / "arena"
 
 
 def _real_plugins(registry: dict) -> list[str]:
-    """Registry keys for shipped plugins, sorted. Excludes test doubles (e.g. the _FakeAttacker in
-    test_attacker_lifecycle.py registers a '_fake_lifecycle_test' config_type into the real registry);
-    shipped plugins never start with '_', and dropping them keeps parametrization order-independent."""
+    """Registry keys for shipped plugins (excluding '_'-prefixed test doubles), sorted."""
     return sorted(name for name in registry if not name.startswith("_"))
 
-# A canonical adversary-safe spec + deployed env that build_config consumes (no cloud needed).
 _FAKE_ATTACKER_SPEC = AttackerEnvSpec(
     objective="conformance",
     box=AttackerBox(name="kali", ip="192.168.202.100", user="root"),
 )
 
-# A credential/routing leak in an agent-facing config is exactly what the adversary-safe vs harness-only
-# split forbids (see docs/security-model.md). These target SSH/management material specifically — an LLM
-# api_key in an agent config is intentional (the agent calls the model), so it is NOT banned here.
 _BANNED_CONFIG_KEYS = {"ssh_key", "ssh_common_args", "ssh_private_key", "private_key", "mgmt_key", "jump", "bastion"}
 _BANNED_VALUE_SUBSTRINGS = ("id_ed25519", "BEGIN OPENSSH PRIVATE KEY", "ProxyCommand")
 
-# Plugins whose build_config() still carries an SSH/management credential, with the fix tracked
-# elsewhere. test_no_god_key.py is the OWNER of tightening these (it fails if the entry goes stale);
-# the leak sub-check here defers to it so the two guards agree instead of double-reporting.
+# Plugins whose build_config() still carries an SSH credential. test_no_god_key.py owns tightening these.
 _BUILD_CONFIG_LEAK_BASELINE = {
     "velociraptor": "deferred: server-on-bastion reads the mgmt key; see test_no_god_key.py baseline",
 }
 
 
-# --------------------------------------------------------------------------- generic helpers
-
 def _placeholder(annotation):
-    """A throwaway value of the right shape for a required field, so a plugin with required config
-    (e.g. incalmo_llm.planning_llm) can still be instantiated for structural checks."""
+    """A throwaway value of the right shape for a required field, so a plugin can be instantiated."""
     origin = get_origin(annotation)
-    if origin is Union:  # Optional[X] / X | None
+    if origin is Union:
         args = [a for a in get_args(annotation) if a is not type(None)]
         return _placeholder(args[0]) if args else "placeholder"
     if annotation is int:
@@ -108,8 +59,7 @@ def _placeholder(annotation):
 
 
 def _minimal_instance(cls, type_name: str):
-    """Build a plugin from {"type": name} plus synthesized placeholders for any OTHER required field.
-    Returns (instance, required_extra_field_names)."""
+    """Build a plugin from {"type": name} + placeholders for other required fields. Return (instance, extra)."""
     kwargs = {"type": type_name}
     required_extra: list[str] = []
     for fname, finfo in cls.model_fields.items():
@@ -122,12 +72,11 @@ def _minimal_instance(cls, type_name: str):
 
 
 def _ui_schema_problems(cls, type_name: str, required_extra: list[str]) -> list[str]:
-    """Every problem with a plugin's ui_schema() — the dashboard renders forms from these with no
-    plugin-specific knowledge, so a malformed one must fail CI, not the UI at runtime."""
+    """Every problem with a plugin's ui_schema() (the dashboard renders forms from these)."""
     problems: list[str] = []
     try:
         schema = cls.ui_schema()
-    except Exception as e:  # noqa: BLE001 — a plugin that can't produce a schema is the finding
+    except Exception as e:  # noqa: BLE001
         return [f"ui_schema() raised {type(e).__name__}: {e}"]
     if not isinstance(schema, dict):
         return [f"ui_schema() returned {type(schema).__name__}, not a dict"]
@@ -150,7 +99,6 @@ def _ui_schema_problems(cls, type_name: str, required_extra: list[str]) -> list[
                 problems.append(f"fields[{i}] ({field.get('key', '?')}) missing {required_key!r}")
         if "key" in field:
             field_keys.add(field["key"])
-    # every show_when must reference a sibling field key that exists (else the condition is dead)
     for field in fields:
         if isinstance(field, dict):
             for controlling_key in (field.get("show_when") or {}):
@@ -158,7 +106,6 @@ def _ui_schema_problems(cls, type_name: str, required_extra: list[str]) -> list[
                     problems.append(
                         f"field {field.get('key')!r} show_when references {controlling_key!r}, "
                         f"which is not a field key in this schema")
-    # a required model field (no default) MUST be supplyable by the dashboard -> must be a ui_schema field
     for field_name in required_extra:
         if field_name not in field_keys:
             problems.append(
@@ -168,8 +115,7 @@ def _ui_schema_problems(cls, type_name: str, required_extra: list[str]) -> list[
 
 
 def _lifecycle_problems(instance, methods: dict[str, bool]) -> list[str]:
-    """`methods` maps method name -> whether it must be a coroutine function. Checks presence,
-    callability, and async-ness (a sync method where the arena awaits one, or vice versa, is a break)."""
+    """Check each method's presence, callability, and async-ness (methods maps name -> must_be_async)."""
     problems: list[str] = []
     for name, must_be_async in methods.items():
         method = getattr(instance, name, None)
@@ -185,8 +131,7 @@ def _lifecycle_problems(instance, methods: dict[str, bool]) -> list[str]:
 
 
 def _config_leak_problems(built: dict, where: str) -> list[str]:
-    """A build_config() output is written to a file the agent/runner process reads. It must be a
-    JSON-serializable dict carrying no SSH/management credential or routing."""
+    """build_config() output must be a JSON-serializable dict with no SSH/management credential or routing."""
     problems: list[str] = []
     if not isinstance(built, dict):
         return [f"{where} returned {type(built).__name__}, not a dict"]
@@ -204,33 +149,29 @@ def _config_leak_problems(built: dict, where: str) -> list[str]:
 
 
 def _declared_keys_problems(cls, built) -> list[str]:
-    """The plugin↔runner contract: build_config() must emit every key the plugin declares in
-    REQUIRED_CONFIG_KEYS. Exercises the SAME validator the arena runs before writing the config, so the
-    test and the runtime fail-fast agree. Also guards the declaration's type (a frozenset/set of str)."""
+    """build_config() must emit every key in REQUIRED_CONFIG_KEYS. This exercises the arena's own validator."""
     declared = getattr(cls, "REQUIRED_CONFIG_KEYS", frozenset())
     problems: list[str] = []
     if not isinstance(declared, (set, frozenset)) or not all(isinstance(k, str) for k in declared):
         problems.append(f"REQUIRED_CONFIG_KEYS must be a set/frozenset of str, got {declared!r}")
         return problems
     try:
-        cls.validate_built_config(built)  # the arena's own fail-fast check
+        cls.validate_built_config(built)
     except Exception as e:  # noqa: BLE001
         problems.append(str(e))
     return problems
 
 
 def _discovery_problems(plugins_subdir: str, registry: dict) -> list[str]:
-    """Every `config_type="..."` declared in a plugin file must appear in the registry. A plugin module
-    that fails to import is silently skipped by auto-discovery and just never registers — this turns
-    'my plugin isn't showing up' into a named failure."""
+    """Every `config_type="..."` declared in a plugin file must appear in the registry."""
     declared = {}
     pattern = re.compile(r"""config_type\s*=\s*["']([^"']+)["']""")
     for py in (_ARENA_ROOT / plugins_subdir).rglob("*.py"):
         if py.name == "base.py":
-            continue  # the base defines the mechanism (and shows `config_type="..."` in its docstring)
+            continue
         for m in pattern.finditer(py.read_text()):
             if m.group(1) == "...":
-                continue  # a docstring placeholder, not a real registration
+                continue
             declared[m.group(1)] = str(py.relative_to(_ARENA_ROOT))
     return [f"config_type {name!r} declared in {path} is not registered (import failure?)"
             for name, path in sorted(declared.items()) if name not in registry]
@@ -249,7 +190,7 @@ def test_every_declared_plugin_is_registered():
 
 
 def test_registries_are_non_empty():
-    """A totally empty registry means auto-discovery is broken (not that there are no plugins)."""
+    """A totally empty registry means auto-discovery is broken."""
     assert AttackerPlugin._registry, "no attacker plugins registered"
     assert DefenderPlugin._registry, "no defender plugins registered"
     assert EnvironmentPlugin._registry, "no environment plugins registered"
@@ -273,7 +214,6 @@ def test_attacker_plugin_conforms(name):
         problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
     problems += _ui_schema_problems(cls, name, required_extra)
     problems += _lifecycle_problems(instance, _ATTACKER_METHODS)
-    # build_config: offline-exercisable via the example_prepared() baton, well-formed, no leak
     try:
         built = instance.build_config("ci_conformance", _FAKE_ATTACKER_SPEC, cls.example_prepared())
         problems += _config_leak_problems(built, "build_config()")
@@ -306,7 +246,6 @@ def test_defender_plugin_conforms(name):
         problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
     problems += _ui_schema_problems(cls, name, required_extra)
     problems += _lifecycle_problems(instance, _DEFENDER_METHODS)
-    # box_ingress: the env opens exactly these ports, so the shape must be {kind: [int,...]}
     try:
         ingress = instance.box_ingress()
         if not isinstance(ingress, dict):
@@ -319,10 +258,9 @@ def test_defender_plugin_conforms(name):
                     problems.append(f"box_ingress()[{kind!r}] must be a list[int], got {ports!r}")
     except Exception as e:  # noqa: BLE001
         problems.append(f"box_ingress() raised {type(e).__name__}: {e}")
-    # build_config: well-formed, echoes the experiment name, leaks no SSH credential/routing
     try:
         built = instance.build_config("ci_conformance", None, cls.example_prepared())
-        if name not in _BUILD_CONFIG_LEAK_BASELINE:  # the leak guard for baselined plugins lives in test_no_god_key.py
+        if name not in _BUILD_CONFIG_LEAK_BASELINE:
             problems += _config_leak_problems(built, "build_config()")
         problems += _declared_keys_problems(cls, built)
         if isinstance(built, dict) and built.get("experiment_name") != "ci_conformance":
@@ -344,9 +282,7 @@ _ENV_SYNC_METHODS = {"resolve_spec": False, "attacker_spec": False, "defender_sp
 
 @pytest.mark.parametrize("name", _real_plugins(EnvironmentPlugin._registry), ids=lambda n: n)
 def test_environment_plugin_conforms(name):
-    """Every registered environment meets the shared EnvironmentPlugin contract. (The deep security
-    invariants — scoped keys, adversary-safe specs — are parametrized over the registry in
-    test_arena_contract.py; this covers construction, ui_schema, and the lifecycle surface.)"""
+    """Every registered environment meets the shared EnvironmentPlugin contract."""
     problems: list[str] = []
     try:
         instance = build_environment({"environment_plugin": name, "environment_spec": "placeholder"})
@@ -354,7 +290,6 @@ def test_environment_plugin_conforms(name):
         pytest.fail(f"[{name}] not buildable via build_environment(): {type(e).__name__}: {e}")
     if instance.type != name:
         problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
-    # environment plugins may declare required fields (environment_spec); ui_schema must expose them
     required_extra = [f for f, fi in type(instance).model_fields.items()
                       if f != "type" and fi.is_required()]
     problems += _ui_schema_problems(type(instance), name, required_extra)
@@ -364,11 +299,7 @@ def test_environment_plugin_conforms(name):
 
 # --------------------------------------------------------------------------- declared runner contract
 
-# The plugin↔runner contract as ONE data table: each plugin's REQUIRED_CONFIG_KEYS — the keys its runner
-# reads that build_config() must always emit. This replaces scattered per-plugin `assert "foo" in built`
-# presence checks: a new plugin declares its set here (and on the class), and the generic conformance
-# tests above enforce build_config() honors it. (Per-plugin VALUE assertions — foothold_ip == the kali IP
-# — stay in test_arena_contract.py; this table is about presence/shape only.)
+# The plugin↔runner contract as one data table: each plugin's REQUIRED_CONFIG_KEYS build_config() must emit.
 _EXPECTED_ATTACKER_CONFIG_KEYS = {
     "incalmo_strategy": {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"},
     "incalmo_llm":      {"name", "strategy", "environment", "c2c_server", "agent_c2c_server", "blacklist_ips"},
@@ -380,7 +311,7 @@ _EXPECTED_ATTACKER_CONFIG_KEYS = {
 _EXPECTED_DEFENDER_CONFIG_KEYS = {
     "canary":           {"experiment_name", "checks", "fail_closed"},
     "llm_soc":          {"experiment_name", "strategy", "llm_model"},
-    "llm_soc_box":      {"experiment_name", "strategy", "llm_model"},  # box-resident engine; same runner contract
+    "llm_soc_box":      {"experiment_name", "strategy", "llm_model"},
     "deception":        {"experiment_name", "strategy"},
     "prompt_injection": {"experiment_name", "strategy"},
     "velociraptor":     {"experiment_name", "response_mode"},
@@ -389,8 +320,7 @@ _EXPECTED_DEFENDER_CONFIG_KEYS = {
 
 @pytest.mark.parametrize("name", _real_plugins(AttackerPlugin._registry), ids=lambda n: n)
 def test_attacker_declared_config_keys_match_table(name):
-    """Every shipped attacker is in the contract table, and its class declaration matches it. A new
-    attacker fails here until its REQUIRED_CONFIG_KEYS is recorded — forcing the contract to be explicit."""
+    """Every shipped attacker is in the contract table and its class declaration matches it."""
     assert name in _EXPECTED_ATTACKER_CONFIG_KEYS, (
         f"attacker {name!r} has no entry in _EXPECTED_ATTACKER_CONFIG_KEYS — declare its runner contract")
     assert set(AttackerPlugin._registry[name].REQUIRED_CONFIG_KEYS) == _EXPECTED_ATTACKER_CONFIG_KEYS[name]

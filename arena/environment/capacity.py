@@ -1,11 +1,4 @@
-"""Admission control for the arena — backend-neutral.
-
-`CapacityTracker` is the arena's admission/queueing gate (the VM-count cap, and on GCP the
-CPUS_ALL_REGIONS budget). It knows nothing about MHBench or any topology format: it derives the live
-count from the experiment registry and reads the cluster's totals once at startup only for an
-over-commit warning. The MHBench-specific sizing that turns a topology into per-VM specs lives in the
-mhbench plugin (`plugins/mhbench/capacity.py:count_vm_specs`), fed to `reserve()` as `vm_specs`.
-"""
+"""Admission control for the arena — backend-neutral VM-count/CPU admission gate."""
 from __future__ import annotations
 
 import asyncio
@@ -15,15 +8,11 @@ from typing import Any, Callable, Iterable, NamedTuple
 
 logger = logging.getLogger(__name__)
 
-# Disk headroom assumed in the over-commit WARNING (not a gate): nova schedules per-node, so packing
-# aggregate disk to ~100% leaves each node too full to fit the next VM even when aggregate looks fine
-# → "No valid host". The warning fires when harness-reserved disk exceeds total minus this.
 _DISK_HEADROOM_GB = 800
 
 
 async def _query_cluster_totals() -> tuple[int, int, int]:
-    """Return the cluster's TOTAL (vcpus, ram_mb, disk_gb). Read exactly once, at startup, for
-    the over-commit warning - never on the admission path."""
+    """Return the cluster's TOTAL (vcpus, ram_mb, disk_gb), read once at startup."""
     proc = await asyncio.create_subprocess_exec(
         "openstack", "hypervisor", "stats", "show", "-f", "json",
         stdout=asyncio.subprocess.PIPE,
@@ -34,18 +23,11 @@ async def _query_cluster_totals() -> tuple[int, int, int]:
     return int(data["vcpus"]), int(data["memory_mb"]), int(data["local_gb"])
 
 
-# A waiter re-evaluates at least this often even if no release() ever notifies it. The
-# re-evaluation is a sum over the in-memory registry - no I/O, no nova - so this costs nothing;
-# it just guarantees a lost notification can delay admission but never wedge it.
 _RECHECK_SECONDS = 30.0
 
 
 class Reservation(NamedTuple):
-    """What reserve() admitted for one experiment. The caller records it ON THE EXPERIMENT
-    (via reserve()'s on_admit, under the tracker's lock) so that the registry - not this
-    object and not any ledger inside the tracker - is the single source of truth. vcpus /
-    ram_mb / disk_gb are recorded for the over-commit warning and the run record; only
-    n_vms gates admission."""
+    """What reserve() admitted for one experiment. Only n_vms gates admission."""
     vcpus: int
     ram_mb: int
     disk_gb: int
@@ -53,74 +35,31 @@ class Reservation(NamedTuple):
 
 
 def _holds_vms(e) -> bool:
-    """THE rule for whether an experiment currently occupies VMs. It is evaluated against
-    live experiment state on every check, not against a paired reserve/release ledger, so
-    no code path (finish, failure, retry, timeout, cancel, provider refusal) can leak a
-    count or double-count one:
-
-      * it holds VMs from the instant reserve() admits it (vms_reserved is set under the
-        tracker's lock, before any other reserve() can be evaluated)
-      * until its teardown has actually COMPLETED (teardown_finished_at set).
-
-    Status is deliberately not consulted. An ERROR whose teardown failed still has VMs on
-    the cluster and keeps holding them; a FINISHED / TIMEDOUT / BLOCKED / ERROR one whose
-    teardown succeeded released them the moment it finished. A QUEUED experiment has no
-    reservation yet, so it never holds. A retry clears vms_reserved (and
-    teardown_finished_at) before re-reserving, so the failed attempt's VMs never count
-    alongside the new attempt's. An experiment removed from the registry (DELETE) stops
-    holding once it is gone."""
+    """Whether an experiment currently occupies VMs (reserved but teardown not finished)."""
     return (getattr(e, "vms_reserved", None) is not None
             and getattr(e, "teardown_finished_at", None) is None)
 
 
 class CapacityTracker:
-    """Admission control for experiments: ONE rule, the VM-count cap (max_active_vms).
-
-    The count is derived on EVERY check from the experiments themselves via `active_source`
-    (the registry's load()): the sum of vms_reserved over those for which _holds_vms() is
-    true. There is no internal ledger to keep in step with call sites and no nova query on
-    the admission path - the registry IS the ledger, and _holds_vms() is the only thing
-    that decides.
-
-    Nova is read exactly once, at startup, for the cluster's TOTAL vCPU/RAM/disk. Those are
-    used only to log a warning when an admission would push the harness's own reserved
-    totals past what the cluster physically has (i.e. the cap is set too high for the
-    flavors in play - the "No valid host" failure mode). It is a log line, never a gate:
-    the operator sizes max_active_vms; the harness just tells them if it looks wrong.
-
-    Waiters re-evaluate on every release() and, as a free backstop, every _RECHECK_SECONDS.
-    """
+    """Admission control for experiments, gated on the VM-count cap and (GCP) a CPU budget."""
 
     def __init__(self, max_active_vms: int | None = None,
                  active_source: Callable[[], Iterable[Any]] | None = None,
                  max_active_cpus: int | None = None) -> None:
         self._max_active_vms: int | None = max_active_vms
-        # GCP-only CPU budget (the global CPUS_ALL_REGIONS quota). None = no CPU gate, so on
-        # OpenStack admission is decided by the VM-count rule alone, exactly as before.
         self._max_active_cpus: int | None = max_active_cpus
-        # Returns every experiment the harness knows about; the tracker filters with
-        # _holds_vms(). Defaults to "none" so a tracker with no registry acts uncapped.
         self._active_source: Callable[[], Iterable[Any]] = active_source or (lambda: ())
-        # Cluster totals from the one startup read; None if nova was unreachable then, in
-        # which case the over-commit warning is simply skipped (admission is unaffected).
         self._totals: tuple[int, int, int] | None = None
         self._condition = asyncio.Condition()
-        # Priority-ordered admission. Currently-waiting reservers:
-        #   experiment_name -> (neg_priority, seq, n_vms, total_vcpus)
-        # A waiter admits only when it fits AND no higher-ranked waiter that ALSO currently fits is
-        # queued — so a labeled-priority experiment jumps ahead, while a priority run too big for the
-        # free capacity still lets smaller lower-priority runs fill the gap ("whoever fits"). Rank is
-        # (neg_priority, seq): lower = served first (neg_priority = -priority; seq = FIFO tiebreak).
         self._waiting: dict[str, tuple] = {}
         self._wait_seq: int = 0
 
-    # ----------------------------------------------------------- state-derived views
     def _holders(self) -> list:
         return [e for e in self._active_source() if _holds_vms(e)]
 
     @property
     def active_vms(self) -> int:
-        """VMs currently held across all experiments - the authoritative count."""
+        """VMs currently held across all experiments."""
         return sum(int(e.vms_reserved) for e in self._holders())
 
     def _reserved_totals(self) -> tuple[int, int, int]:
@@ -150,13 +89,11 @@ class CapacityTracker:
         )
 
     def _warn_if_overcommitted(self, experiment_name: str, res: Reservation) -> None:
-        """Log (never block) if, with this admission, the harness's own reservations exceed
-        the cluster. Exact rather than a flavor guess: it uses the real flavors of everything
-        currently held plus this experiment's."""
+        """Log (never block) if this admission pushes harness reservations past the cluster totals."""
         if self._totals is None:
             return
         t_vcpus, t_ram, t_disk = self._totals
-        r_vcpus, r_ram, r_disk = self._reserved_totals()   # already includes `res` (on_admit ran)
+        r_vcpus, r_ram, r_disk = self._reserved_totals()
         over = []
         if r_vcpus > t_vcpus:
             over.append(f"vCPUs {r_vcpus}/{t_vcpus}")
@@ -173,9 +110,7 @@ class CapacityTracker:
             )
 
     def _fits(self, n_vms: int, total_vcpus: int, active: int, active_cpus: int) -> bool:
-        """Whether a demand of (n_vms, total_vcpus) can be admitted against the current active totals.
-        Mirrors the vm_ok/cpu_ok rules in reserve() (incl. the active==0 lone-oversized escape) so the
-        priority outranking check uses the exact same admission logic."""
+        """Whether a demand of (n_vms, total_vcpus) can be admitted against the active totals."""
         vm_ok = (self._max_active_vms is None
                  or active + n_vms <= self._max_active_vms
                  or active == 0)
@@ -184,30 +119,19 @@ class CapacityTracker:
         return vm_ok and cpu_ok
 
     async def reprioritize(self, experiment_name: str, priority: int) -> bool:
-        """Change a still-QUEUED experiment's scheduling priority on the fly. Returns True if it was
-        currently waiting (and got re-ranked + everyone re-woken), False if it isn't waiting anymore
-        (already admitted / unknown). Higher priority = sooner."""
+        """Change a still-QUEUED experiment's scheduling priority. Return True if it was waiting."""
         async with self._condition:
             w = self._waiting.get(experiment_name)
             if w is None:
                 return False
-            self._waiting[experiment_name] = (-priority, w[1], w[2], w[3])  # keep seq/n_vms/vcpus
+            self._waiting[experiment_name] = (-priority, w[1], w[2], w[3])
             self._condition.notify_all()
             return True
 
     async def reserve(self, vm_specs: list[tuple[int, int, int]], experiment_name: str,
                       on_admit: Callable[[Reservation], None] | None = None,
                       priority: int = 0) -> Reservation:
-        """Block until the VM-count cap AND (on GCP) the CPU budget allow this experiment.
-
-        Admission counts ONLY the topology VMs in vm_specs (the environment's real footprint,
-        incl. the management host). VMs a plugin may deploy later (e.g. defender decoys) are NOT
-        pre-reserved here.
-
-        on_admit(reservation) is invoked INSIDE the lock the moment admission is decided. The
-        caller must use it to set vms_reserved / vcpus_reserved / ram_mb_reserved /
-        disk_gb_reserved on the experiment, so that the registry already shows this experiment
-        as holding VMs before any other reserve() can evaluate the count."""
+        """Block until the VM-count cap and (GCP) CPU budget allow this experiment, then admit it."""
         total_vcpus = sum(v for v, _, _ in vm_specs)
         total_ram = sum(r for _, r, _ in vm_specs)
         total_disk = sum(dk for _, _, dk in vm_specs)
@@ -219,23 +143,11 @@ class CapacityTracker:
               while True:
                 active = self.active_vms
                 active_cpus = self._reserved_totals()[0]
-                # VM-count rule: admit if under the cap, OR if nothing else holds VMs - the
-                # latter lets a single env larger than the cap still run (alone) instead of
-                # deadlocking forever waiting for room that can never free up.
                 vm_ok = (self._max_active_vms is None
                          or active + n_vms <= self._max_active_vms
                          or active == 0)
-                # CPU budget (GCP): the global CPUS_ALL_REGIONS quota is a HARD ceiling - it
-                # cannot be exceeded even by a lone experiment (that just strands mid-provision
-                # with QUOTA_EXCEEDED), so there is deliberately no active==0 escape here. An
-                # env whose own CPU cost exceeds the budget waits in QUEUED instead. None (the
-                # OpenStack default) makes this always true, leaving admission to the VM rule.
                 cpu_ok = (self._max_active_cpus is None
                           or active_cpus + total_vcpus <= self._max_active_cpus)
-                # Priority gate: yield to any higher-ranked waiter that ALSO fits right now, so
-                # labeled-priority experiments are admitted first. A higher-priority run that is
-                # too big to fit does NOT block us (it isn't counted as outranking), so smaller
-                # lower-priority runs still fill the gap.
                 my_rank = self._waiting[experiment_name][:2]
                 outranked = any(
                     (w[0], w[1]) < my_rank and self._fits(w[2], w[3], active, active_cpus)
@@ -245,7 +157,7 @@ class CapacityTracker:
                     reservation = Reservation(total_vcpus, total_ram, total_disk, n_vms)
                     if on_admit is not None:
                         on_admit(reservation)
-                    self._condition.notify_all()  # let any waiters that yielded to us re-check now
+                    self._condition.notify_all()
                     logger.info(
                         "[%s] Admitted: %d topology VMs (%d vCPUs / %d MB RAM / %d GB disk); "
                         "active VMs now %d%s%s",
@@ -262,23 +174,14 @@ class CapacityTracker:
                     (f"/{self._max_active_cpus}" if self._max_active_cpus is not None else ""),
                 )
                 try:
-                    # Condition.wait() re-acquires the lock in its finally even when cancelled
-                    # (the timeout), so we hold the lock again on either exit path.
                     await asyncio.wait_for(self._condition.wait(), timeout=_RECHECK_SECONDS)
                 except asyncio.TimeoutError:
-                    pass  # backstop: loop and re-derive the count from state (free; no I/O)
+                    pass
             finally:
-                # Deregister from the priority queue on EVERY exit (admit, cancel/eviction, error) so a
-                # departed waiter never keeps outranking the others. Runs with the condition lock held
-                # (the async-with hasn't exited), and before the post-admit notify_all reaches anyone.
                 self._waiting.pop(experiment_name, None)
 
     def release(self, experiment_name: str) -> None:
-        """Call after an experiment's teardown has RUN - whether or not it succeeded - and
-        after a DELETE removed it from the registry. Whether it still holds VMs is decided
-        entirely by its state (_holds_vms), not by this call: this only wakes the waiters so
-        they re-derive the count. No nova. Fire-and-forget, idempotent, and safe for an
-        experiment that never reserved."""
+        """Wake the waiters to re-derive the count after a teardown or DELETE. This call is idempotent."""
         async def _release() -> None:
             async with self._condition:
                 logger.info("[%s] Released; active VMs now %d%s",

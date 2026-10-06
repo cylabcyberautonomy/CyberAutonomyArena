@@ -11,7 +11,7 @@ from . import plugins  # noqa: F401 — triggers auto-discovery
 
 
 class AttackerConfig:
-    """Dynamic type — validated against whichever plugins are registered."""
+    """Dynamic type. Pydantic validates it against the registered plugins."""
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any):
@@ -44,8 +44,6 @@ async def run_attacker(
     cfg: ExperimentManagerConfig,
     prepared: PreparedAttacker,
 ) -> asyncio.subprocess.Process:
-    # RUN phase — just launch. setup() produced `prepared` and build_config + write already ran in
-    # run_setup (symmetric with the defender), so this only starts the attack process.
     experiment_name = experiment.experiment_name
     config_path = output_root(experiment_name, cfg) / experiment_name / "attacker" / "attacker_config.json"
     log(experiment_name, f"Starting attacker ({attacker.type}), config: {config_path}")

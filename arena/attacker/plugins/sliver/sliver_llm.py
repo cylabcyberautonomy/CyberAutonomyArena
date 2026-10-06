@@ -1,15 +1,4 @@
-"""A bare LLM driving a Sliver C2 — the Sliver counterpart of c2_llm.
-
-Same identity as c2_llm (a minimal LLM + a run-command primitive, no framework/abstractions), but the
-C2 is Sliver instead of Incalmo's sandcat/Caldera. It does NOT subclass _IncalmoAttacker — Sliver has
-its own server, implant, and operator API, so it brings up its own C2 via sliver_c2.py. Everything above
-the C2 is the shared arena contract: the opaque baton, build_config(prepared), teardown by name, no god
-key.
-
-NOT LIVE-VALIDATED — the sliver_c2 lifecycle + the runner's sliver-py loop need a pass against an
-installed Sliver (same bar as terminus). The arena-contract surface here (fields, ui_schema,
-build_config, registration) IS unit-tested.
-"""
+"""A bare LLM driving a Sliver C2 — the Sliver counterpart of c2_llm."""
 from __future__ import annotations
 
 import asyncio
@@ -38,11 +27,7 @@ _OBJECTIVE = (
 
 
 def _preflight_sliver_venv(cfg: ExperimentManagerConfig) -> None:
-    """Build the dedicated sliver venv (operator client + LLM SDK) if it's missing — the isolated
-    harness-host venv both sliver_c2's helper and the runner use. Idempotent.
-
-    VALIDATE: the sliver-py PyPI name/version pin against the installed sliver-server, and that building
-    at setup (network + pip) is acceptable vs a documented one-time build step."""
+    """Build the dedicated sliver venv (operator client + LLM SDK) if it's missing."""
     py = cfg.get_sliver_python()
     if py.exists():
         return
@@ -60,15 +45,11 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
     api_key_env: str = "OPENAI_API_KEY"
     max_turns: int = 100
     objective: Optional[str] = None
-    # Sliver is a single binary — no Docker on the harness. NOTE: its setup IS bastion-heavy (SSH install
-    # + tunnel), like Incalmo's, but the arena's setup-concurrency gate keys on requires_docker, so Sliver
-    # setups currently run ungated. Revisit if concurrent Sliver bring-ups storm the bastion (the gate
-    # should key on a "bastion-heavy setup" flag, not requires_docker).
     requires_docker: ClassVar[bool] = False
 
     @classmethod
     def example_prepared(cls) -> PreparedAttacker:
-        """build_config() reads the Sliver C2 coordinates off its own baton — fill one in for offline tests."""
+        """A sample baton with Sliver C2 coordinates for offline tests."""
         return SliverPreparedC2(operator_cfg="/tmp/operator.cfg", listener_addr="192.0.2.1:8443")
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip, access=None) -> PreparedAttacker:
@@ -79,7 +60,7 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
         try:
             return await sliver_c2.setup_c2(experiment.experiment_name, cfg, foothold_access, bastion_ip)
         except Exception:
-            await self.teardown(experiment.experiment_name, cfg)  # tear down a partial C2 (keyed by name)
+            await self.teardown(experiment.experiment_name, cfg)
             raise
 
     async def teardown(self, experiment_name: str, cfg: ExperimentManagerConfig) -> None:
@@ -101,8 +82,6 @@ class SliverLLMAttacker(AttackerPlugin, config_type="sliver_llm"):
         }
 
     def build_config(self, experiment_name: str, env_spec: AttackerEnvSpec, prepared: PreparedAttacker) -> dict:
-        # The C2 coordinates come from Sliver's OWN setup handle: operator_cfg = the (tunnel-pointed)
-        # operator config the runner connects with; listener_addr = where victims session in.
         return {
             "operator_cfg": getattr(prepared, "operator_cfg", None),
             "listener_addr": getattr(prepared, "listener_addr", None),

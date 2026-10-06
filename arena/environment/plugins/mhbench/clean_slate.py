@@ -1,16 +1,4 @@
-"""Backend reset ("clean slate") for the MHBench environment — ENV-LAYER OWNED.
-
-Moved out of arena/main.py so the arena core never touches the backend directly. The arena calls every
-registered EnvironmentPlugin's `clean_slate(cfg)` classmethod at startup (plugin-agnostically, the same way
-it calls each attacker's `sweep_stale_state`); the MHBench plugin routes that here.
-
-OpenStack: wipe all servers/FIPs/routers/ports/subnets/networks/SGs (except external networks + the default
-SG), via the `openstack` CLI (which reads OS_CLOUD). GCP: no-op — a GCP-backed manager must NOT run the
-OpenStack wipe (it would nuke the shared OpenStack cloud + the other manager's in-flight work); GCP leftovers
-are reaped per-experiment via MHBench (config.gcp.yaml). OS_CLOUD is set HERE (from the env-backend config),
-so the arena no longer owns it; set once at startup, it is inherited by every later openstack CLI / MHBench
-subprocess in this process.
-"""
+"""Backend reset ("clean slate") for the MHBench environment — env-layer owned."""
 from __future__ import annotations
 
 import asyncio
@@ -21,17 +9,16 @@ from ...config import env_backend
 
 logger = logging.getLogger(__name__)
 
-_NUKE_BATCH = 20  # delete servers this many at a time — a whole-cluster batch overwhelmed nova/neutron
+_NUKE_BATCH = 20
 
 
 def ensure_os_cloud(cfg) -> None:
-    """Set OS_CLOUD from the env-backend config, so the openstack CLI + MHBench subprocesses target the
-    right cloud. Owned by the env layer (the arena no longer sets it)."""
+    """Set OS_CLOUD from the env-backend config so the openstack CLI + MHBench target the right cloud."""
     os.environ["OS_CLOUD"] = env_backend(cfg).os_cloud
 
 
 async def clean_slate(cfg) -> None:
-    """Reset the deployment backend this manager targets. OpenStack -> full wipe; GCP -> no-op."""
+    """Reset the deployment backend this manager targets. OpenStack -> full wipe. GCP -> no-op."""
     ensure_os_cloud(cfg)
     backend = env_backend(cfg).cloud_backend
     if backend == "openstack":
@@ -70,10 +57,6 @@ async def openstack_clean_slate() -> None:
     logger.info("=== Deleting servers ===")
     sids = [s for s in (await _run("server", "list", "--all-projects", "-f", "value", "-c", "ID")).splitlines() if s]
     if sids:
-        # Delete in chunks of _NUKE_BATCH, each `server delete ... --wait` blocking until that chunk is gone
-        # before the next starts — so nova/neutron tear down at most _NUKE_BATCH VMs at once. A single
-        # whole-cluster batch overwhelmed them (VIF-unplug + volume-detach storm). The CLI attempts every ID
-        # in the chunk and reports failures at the end, so a straggler doesn't abort the rest of its chunk.
         logger.info("Deleting %d servers in batches of %d", len(sids), _NUKE_BATCH)
         for i in range(0, len(sids), _NUKE_BATCH):
             batch = sids[i:i + _NUKE_BATCH]
