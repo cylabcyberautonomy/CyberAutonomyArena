@@ -16,6 +16,15 @@ if ! python3 -c "import ansible_runner" >/dev/null 2>&1; then
     python3 -m pip install --user --quiet "ansible-core<2.14" "ansible-runner<2.4"
 fi
 
+# ansible-core bundles only ansible.builtin; the honey-cred ssh-key playbook (setup_ssh_keys.yml) uses the
+# authorized_key module from the ansible.posix collection, so install it (to ~/.ansible/collections, which
+# is on ansible's default collection path). Without it AddHoneyCredentials fails with "couldn't resolve
+# module/action 'authorized_key'". Pinned for ansible-core<2.14 / py3.8. Idempotent.
+if ! ansible-galaxy collection list 2>/dev/null | grep -q "ansible.posix"; then
+    ansible-galaxy collection install "ansible.posix:>=1.5.0,<2.0.0" >/dev/null 2>&1 \
+        || ansible-galaxy collection install ansible.posix >/dev/null 2>&1 || true
+fi
+
 pkill -f "box_agent_agent.py" 2>/dev/null || true
 sleep 1
 # ansible_runner shells to the ansible-playbook binary via PATH (installed to ~/.local/bin by pip --user),
