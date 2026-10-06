@@ -3,16 +3,14 @@
 run_demo_matrix.py — the NoHat demo: a small, self-contained driver for the ARENA
 (arena.main) that showcases the deploy -> PAUSE -> attack gate.
 
-Run bare, it's a two-step wizard:
+Run bare, setup is AUTOMATIC and quiet — it writes any missing LLM keys, checks the
+cloud backend, and auto-starts the OpenStack arena manager (no prompts). Then, for
+EACH cell, it submits PAUSED, lets the environment deploy + configure, LISTS the live
+VMs (openstack/gcloud), and asks the ONE question —
 
-    Set up the experiment?        [Y/n]   -> writes any missing LLM keys into the
-                                             plugin repos' .env, checks the cloud
-                                             backend, and spins up the arena manager
-    Run the experiment matrix now? [Y/n]  -> for EACH cell: submit it PAUSED, let
-                                             the environment deploy + configure, then
-                                             LIST the live VMs (openstack/gcloud) and
-                                             wait; on your yes it fires start-attack,
-                                             streams the attacker LLM log, and moves on
+    Launch the attack on <name>? [Y/n]
+
+— on your yes it fires start-attack, streams the attacker LLM log, and moves on.
 
 The gate is a real, opt-in arena-lifecycle feature on this branch: a submit with
 `pause_before_attack: true` holds at the new `AwaitingAttack` status until
@@ -298,7 +296,8 @@ def _prompt_and_write(var, targets, force, secret=True):
 
     if have and (not force or not sys.stdin.isatty()):
         # Keep what's there when not forcing, or when forcing but unable to prompt.
-        log(f"{var}: already set in {', '.join(sorted(_repo_label(p) for p in have))} — keeping.")
+        if force:  # quiet on the automatic path; only note it during an explicit --setup review
+            log(f"{var}: already set in {', '.join(sorted(_repo_label(p) for p in have))} — keeping.")
         value = next(iter(have.values()))
     else:
         if not sys.stdin.isatty():
@@ -324,42 +323,28 @@ def _prompt_and_write(var, targets, force, secret=True):
 
 
 def ensure_keys(force=False):
-    """Interactively make sure every key the current matrix needs is in place."""
+    """Make sure every LLM key the current matrix needs is in place. Quiet on the
+    automatic path: only prompts (and logs) when a key is missing or force=True."""
     reqs = required_keys()
-    if not reqs:
-        log("API keys: none required for this matrix "
-            "(deterministic attacker(s) + no-LLM defender(s)).")
-    else:
-        log("API-key setup — writing keys the chosen plugins need into repo .env files.")
-        for var in sorted(reqs):
-            _prompt_and_write(var, sorted(reqs[var]), force, secret=True)
-            if var == "LITELLM_API_KEY":   # the gateway also needs a base URL
-                _prompt_and_write("LITELLM_BASE_URL", sorted(reqs[var]), force, secret=False)
-    log(f"MHBench ({MHBENCH_DIR.name}): no LLM API key required; nothing written there.")
-    if reqs and any(INCALMO_ENV in t for t in reqs.values()):
-        log("NOTE: incalmo_llm_dir/.env is loaded by the arena manager at STARTUP — "
-            "(re)start the manager AFTER setup so it picks up the key.")
+    if force and not reqs:
+        log("API keys: none required for this matrix.")
+    for var in sorted(reqs):
+        _prompt_and_write(var, sorted(reqs[var]), force, secret=True)
+        if var == "LITELLM_API_KEY":   # the gateway also needs a base URL
+            _prompt_and_write("LITELLM_BASE_URL", sorted(reqs[var]), force, secret=False)
 
 
 # ---------------------------------------------------------------------------
 # Backend readiness + live VM listing (backend-aware: OpenStack / GCP)
 # ---------------------------------------------------------------------------
 def check_backend():
-    """Light sanity check of the configured cloud backend. Returns (ok, [problems])."""
+    """Quiet sanity check of the configured cloud backend. Returns (ok, [problems])."""
     problems = []
-    log(f"cloud backend: {CLOUD_BACKEND}  (config {HARNESS_CONFIG_PATH})")
     if not MHBENCH_DIR.exists():
         problems.append(f"mhbench_dir does not exist: {MHBENCH_DIR}")
-    if CLOUD_BACKEND == "openstack":
-        if shutil.which("openstack") is None:
-            problems.append("openstack CLI not found on PATH (needed to list VMs)")
-        else:
-            log(f"OpenStack cloud: {OS_CLOUD} (openstack --os-cloud {OS_CLOUD})")
-    elif CLOUD_BACKEND == "gcp":
-        if shutil.which("gcloud") is None:
-            problems.append("gcloud CLI not found on PATH (needed to list VMs)")
-    for p in problems:
-        log(f"  BACKEND NOT READY: {p}")
+    cli = "openstack" if CLOUD_BACKEND == "openstack" else "gcloud"
+    if shutil.which(cli) is None:
+        problems.append(f"{cli} CLI not found on PATH (needed to list VMs)")
     return (not problems), problems
 
 
@@ -442,14 +427,18 @@ def api_reachable():
 def wait_for_api(max_seconds=None):
     """Block until the manager API answers. Returns True, or False on timeout."""
     deadline = None if max_seconds is None else time.time() + max_seconds
+    announced = False
     while True:
         if api_reachable():
-            log("manager API is up")
+            if announced:
+                log("manager is up")
             return True
         if deadline and time.time() > deadline:
-            log(f"manager API still not reachable after {max_seconds}s")
+            log(f"manager not reachable after {max_seconds}s")
             return False
-        log(f"waiting for manager API at {API_URL}… ")
+        if not announced:
+            log("waiting for the manager to come up…")   # once, not every poll
+            announced = True
         time.sleep(10)
 
 
@@ -731,36 +720,28 @@ def start_manager_background():
     NOTE (OpenStack): a fresh start clean-slates the cloud — it deletes ALL VMs across
     projects and wipes the registry. Only start it when the cloud is free."""
     log_path = _HARNESS_DIR / "demo_arena_manager.log"
-    cmd = _manager_cmd()
-    log(f"starting arena manager: EXPERIMENT_MANAGER_CONFIG={HARNESS_CONFIG_PATH} {' '.join(cmd)}")
-    log(f"  (cwd={_HARNESS_DIR}, log={log_path})")
     with open(log_path, "ab") as f:
-        subprocess.Popen(cmd, cwd=str(_HARNESS_DIR), env=_manager_env(),
+        subprocess.Popen(_manager_cmd(), cwd=str(_HARNESS_DIR), env=_manager_env(),
                          stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
-    log("arena manager launching (a fresh start clean-slates the cloud; can take a few minutes)…")
+    log(f"starting arena manager on {API_URL} (clean-slates the cloud; log: {log_path.name})…")
     return wait_for_api(max_seconds=420)
 
 
 def step_setup(args):
-    """STEP 1 — 'set up': write any missing LLM keys, check the backend, bring up the manager."""
-    log(f">>> STEP 1: set up (arena, {CLOUD_BACKEND} backend)")
+    """Set up automatically (quietly): write any missing LLM keys, check the backend,
+    and AUTO-START the arena manager if it isn't already up. No prompts."""
     if not args.skip_setup:
         ensure_keys(force=False)
-    ok, _ = check_backend()
+    ok, problems = check_backend()
     if not ok:
-        log("backend not ready — fix the items above and re-run.")
+        for p in problems:
+            log(f"backend not ready: {p}")
         return False
     if api_reachable():
-        log(f"arena manager already running at {API_URL}.")
+        log(f"using arena manager at {API_URL}")
         return True
-    log(f"arena manager is NOT reachable at {API_URL}.")
-    if ask_yes_no("Spin up the arena manager now in the background? "
-                  "(WARNING on OpenStack: a fresh start clears the cloud + registry)",
-                  default=True, assume_yes=args.yes):
-        return start_manager_background()
-    log("OK — start it yourself, then re-run:")
-    log(f"    cd {_HARNESS_DIR} && EXPERIMENT_MANAGER_CONFIG={HARNESS_CONFIG_PATH} {' '.join(_manager_cmd())}")
-    return False
+    # Auto-start — no prompt. On OpenStack this clean-slates the cloud.
+    return start_manager_background()
 
 
 def start_attack(name):
@@ -791,7 +772,7 @@ def step_run(jobs, args, results_dir):
     """STEP 2 — 'run' with the NoHat deploy -> pause -> attack gate. For each cell:
     submit (paused) -> wait until the environment is deployed+configured (AwaitingAttack)
     -> LIST the live VMs -> ask to launch -> start-attack -> stream the attacker -> next."""
-    log(">>> STEP 2: run (deploy -> pause -> list VMs -> launch)")
+    log("running (deploy -> pause -> list VMs -> launch)")
     if not wait_for_api(max_seconds=60):
         log("manager not reachable; aborting run.")
         return
@@ -997,21 +978,19 @@ def main():
     jobs = build_jobs()
     results_dir = Path(args.results_dir)
 
-    log(f"matrix = {len(ATTACKERS)} attackers x {len(ENVIRONMENTS)} envs x "
-        f"{len(DEFENDERS)} defenders x {len(TRIALS)} trial(s) = {len(jobs)} experiments")
-    for name, cell in jobs:
-        d = "none" if DEFENDERS[cell["dcode"]] is None else cell["dcode"]
-        log(f"  {name:<28} att={cell['acode']:<7} env={cell['ecode']:<6} def={d}")
+    log(f"demo: {len(jobs)} experiment(s) — " + ", ".join(n for n, _ in jobs))
 
     if args.dry_run:
+        for name, cell in jobs:
+            d = "none" if DEFENDERS[cell["dcode"]] is None else cell["dcode"]
+            log(f"  {name:<28} att={cell['acode']:<7} env={cell['ecode']:<6} def={d}")
         return
     if args.setup:
         ensure_keys(force=True)
         check_backend()
         return
     if args.follow_attacker or args.follow_defender:
-        # Standalone followers attach to whatever the targeted manager is running
-        # (names=None), so they work for any run, GCP or OpenStack.
+        # Standalone followers attach to whatever the targeted manager is running.
         follow_logs("defender" if args.follow_defender else "attacker",
                     names=None, poll_seconds=args.poll_seconds)
         return
@@ -1019,23 +998,16 @@ def main():
         report(jobs, results_dir)
         return
 
-    # Safety: never submit to a (possibly live) manager from a non-interactive
-    # context unless the user explicitly opted in with --yes.
+    # Safety: starting the OpenStack manager clean-slates the cloud, so never do it
+    # unattended unless the user explicitly opted in with --yes.
     if not sys.stdin.isatty() and not args.yes:
-        log("Non-interactive session: refusing to run the matrix without confirmation.")
-        log("Re-run in a terminal to use the wizard, or pass -y/--yes to auto-confirm.")
-        log(f"(This would submit to the manager at {API_URL} — make sure that's YOUR demo manager.)")
+        log("Non-interactive session: pass -y/--yes to run "
+            f"(it auto-starts the manager at {API_URL}, which clean-slates the cloud).")
         return
 
-    # Stepwise wizard: two gates, "set up" then "run".
-    if not ask_yes_no("\nSet up the experiment?", default=True, assume_yes=args.yes):
-        log("stopped before setup.")
-        return
+    # Set up (keys + backend + arena manager) automatically — no prompts. The only
+    # interaction is the per-cell "Launch the attack?" gate inside step_run.
     if not step_setup(args):
-        return
-    if not ask_yes_no("\nRun the experiment matrix now?", default=True, assume_yes=args.yes):
-        log("set up only; re-run and answer yes at 'Run the experiment matrix' when ready "
-            "(or use --collect-only later).")
         return
     step_run(jobs, args, results_dir)
 
