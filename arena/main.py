@@ -457,6 +457,19 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Attacker-log collection failed for '%s'", experiment.experiment_name)
 
+    # Defender log collection (box-resident logs, e.g. the box agent's /root/box_agent.log). Mirrors the
+    # attacker block above and runs while the box is still up (before defender/environment teardown). The
+    # defender's harness-local logs (perry_log/defender.log) need no collection; this pulls the REMOTE box
+    # log via collect_logs()'s own bastion ssh. Best-effort — a collection failure must not block teardown.
+    if experiment.defender:
+        try:
+            await experiment.defender.run_collect_logs(
+                experiment, cfg,
+                output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "defender",
+            )
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Defender-log collection failed for '%s'", experiment.experiment_name)
+
     # Defender teardown (harness-side cleanup, e.g. the box ES tunnel) runs before the environment
     # teardown. Best-effort, like the log collection above: a defender teardown failure must not block
     # reclaiming the environment's VMs. (Stray decoy VMs are reaped by the environment's own teardown -
