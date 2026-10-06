@@ -30,11 +30,11 @@ trials) — plus a full per-run table and results.csv / results.json. The exfil 
 MHBench's per-file-hash scorer (MHBench/scripts/expected_data_hashes.py): matched
 planted-file hashes / total planted files.
 
-By default it is a 2 x 2 x 2 matrix (8 experiments):
+By default it runs a SINGLE experiment (edit the CONFIG block to add more):
 
-    attackers    : GraphSearch        ,  Incalmo(Kimi K3)   <- deterministic vs LLM
-    environments : equifax_small_inst. ,  chain_instrumented
-    defenders    : none                ,  FalcoLLM (llm_soc) <- no defense vs SOC
+    attacker    : Incalmo(Kimi K3)              <- LLM attacker, shell abstraction
+    environment : equifax_small_instrumented    <- arena instrumented env (defender box)
+    defender    : FalcoLLM (llm_soc)            <- the SOC: detect + restore
 
 --------------------------------------------------------------------------------
 Arena notes (read before running)
@@ -159,7 +159,6 @@ OVERWRITE = True       # re-run a name even if a previous result exists
 #   k3  = Incalmo LLM driven by Kimi K3 over OpenRouter (needs OPENROUTER_API_KEY
 #         in incalmo_llm_dir/.env). Swap planning_llm for another model.
 ATTACKERS = {
-    "gs": {"plugin": "incalmo_strategy", "spec": {"strategy": "GraphSearch"}},
     "k3": {"plugin": "incalmo_llm", "spec": {"planning_llm": "kimi-k3", "abstraction": "shell"}},
 }
 
@@ -170,7 +169,6 @@ ATTACKERS = {
 # the box lives in the arena MHBench checkout — see mhbench_dir note above).
 ENVIRONMENTS = {
     "eqs":   "environments/instrumented/equifax_small_instrumented.json",
-    "chain": "environments/instrumented/chain_instrumented.json",
 }
 
 # --- Two defenders -----------------------------------------------------------
@@ -180,7 +178,6 @@ ENVIRONMENTS = {
 #   own per-experiment ES on the defender box, detects via Falco/Sysflow, and
 #   restores compromised hosts. Needs OPENROUTER_API_KEY in llm_soc_dir/.env.
 DEFENDERS = {
-    "none": None,
     "fll":  {"type": "llm_soc", "strategy": "FalcoLLM", "llm_model": "openrouter/anthropic/claude-sonnet-5"},
 }
 
