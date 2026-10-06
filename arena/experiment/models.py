@@ -46,6 +46,7 @@ class ExperimentStatus(str, Enum):
     DEPLOYED = "Deployed"          # VMs up; holding a deploy slot, waiting for a configure slot (back-pressure buffer)
     CONFIGURING = "Configuring"    # ansible playbooks running on the hosts
     CONFIGURED = "Configured"      # configure done; waiting to start the attack
+    AWAITING_ATTACK = "AwaitingAttack"  # NoHat demo: deployed+configured, paused at the gate until POST /experiments/{name}/start-attack (opt-in pause_before_attack)
     RUNNING = "Running"
     RETRYING = "Retrying"   # non-terminal: an attempt failed but the harness is auto-retrying it in place
     ERROR = "Error"
@@ -73,6 +74,7 @@ class ExperimentSpecs(BaseModel):
     teardown: bool = True  # set False to leave the env + C2 standing (success AND failure) to run an exploit by hand
     overwrite: bool = False  # if an output folder with this name already exists: false (default) → reject the request (409); true → replace it
     priority: int = 0  # scheduling priority: higher = admitted from the queue sooner; 0 (default) = normal "whoever fits". Ties break FIFO.
+    pause_before_attack: bool = False  # NoHat demo: deploy+configure, then HOLD at AwaitingAttack until POST /experiments/{name}/start-attack. Opt-in; default off leaves the lifecycle unchanged.
 
     @field_validator("environment", mode="before")
     @classmethod
