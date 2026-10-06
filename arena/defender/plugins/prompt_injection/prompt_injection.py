@@ -392,6 +392,48 @@ class PromptInjectionDefenderPlugin(DefenderPlugin, config_type="prompt_injectio
         # 7. inject the reachable host/port/token into the config the runner reads.
         return {"box_agent_host": "127.0.0.1", "box_agent_port": lport, "box_agent_token": token}
 
+    # Copied per box-using defender (self-contained, like prepare_box_agent/prepare_box_es): pull the box
+    # agent's log off the box so a box-side failure (e.g. an AddHoneyCredentials rc=4) is diagnosable after
+    # teardown. Reaches the box the SAME way prepare_box_agent does — box ip from the persisted config's
+    # defender_env_spec.box.ip, its scoped-access entry from defender_setup_access. NOT primary_access: for a
+    # defender access[0] is a VICTIM (victims-first/box-last), so the passed `access` can't reach the box.
+    async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
+        """Best-effort: copy /root/box_agent.log off the defender box into dest/box_agent.log. Never raises —
+        a missing box/log/tunnel must not fail the run's teardown."""
+        import json as _json
+        import os as _os
+        import shlex
+        try:
+            exp = experiment.experiment_name
+            cfg_path = output_root(exp, cfg) / exp / "defender" / "defender_config.json"
+            if not cfg_path.exists():
+                return
+            built = _json.loads(cfg_path.read_text())
+            box_ip = ((built.get("defender_env_spec") or {}).get("box") or {}).get("ip")
+            if not box_ip:
+                return
+            box_acc = next((a for a in built.get("defender_setup_access", [])
+                            if a.get("host") == box_ip), None)
+            if not box_acc or not box_acc.get("ssh_key"):
+                return
+            key = _os.path.expanduser(box_acc["ssh_key"])
+            common = shlex.split(box_acc.get("ssh_common_args") or "")
+            user = box_acc.get("user", "root")
+            port = str(box_acc.get("port", 22))
+            ssh = ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                   "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-p", port, *common,
+                   f"{user}@{box_ip}", "cat /root/box_agent.log"]
+            dest.mkdir(parents=True, exist_ok=True)
+            with (dest / "box_agent.log").open("wb") as out:
+                proc = await asyncio.create_subprocess_exec(
+                    *ssh, stdout=out, stderr=asyncio.subprocess.DEVNULL)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    proc.kill()
+        except Exception:  # noqa: BLE001 — box-log collection is best-effort; never fail teardown
+            pass
+
     def prepare_box_es(self, box_cfg: dict, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
         """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.
         Writes es_url + falco_index/sysflow_index into the config JSON the runner reads, drops an

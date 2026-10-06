@@ -20,9 +20,27 @@ fi
 # authorized_key module from the ansible.posix collection, so install it (to ~/.ansible/collections, which
 # is on ansible's default collection path). Without it AddHoneyCredentials fails with "couldn't resolve
 # module/action 'authorized_key'". Pinned for ansible-core<2.14 / py3.8. Idempotent.
+#
+# GATE: this install MUST succeed before the agent starts. A silently-skipped install (galaxy flakiness)
+# used to leave the agent serving AddHoneyCredentials that fail rc=4 mid-run. Retry the fetch for transient
+# galaxy errors, then HARD-VERIFY the collection is present and exit non-zero if not — the box bootstrap
+# then fails loudly (prepare_box_agent raises), so the defender fails to arm instead of arming half-broken.
 if ! ansible-galaxy collection list 2>/dev/null | grep -q "ansible.posix"; then
-    ansible-galaxy collection install "ansible.posix:>=1.5.0,<2.0.0" >/dev/null 2>&1 \
-        || ansible-galaxy collection install ansible.posix >/dev/null 2>&1 || true
+    attempt=0
+    while [ "$attempt" -lt 3 ]; do
+        attempt=$((attempt + 1))
+        if ansible-galaxy collection install "ansible.posix:>=1.5.0,<2.0.0" >/dev/null 2>&1 \
+           || ansible-galaxy collection install ansible.posix >/dev/null 2>&1; then
+            break
+        fi
+        echo "ansible.posix install attempt $attempt failed; retrying" >&2
+        sleep 5
+    done
+fi
+if ! ansible-galaxy collection list 2>/dev/null | grep -q "ansible.posix"; then
+    echo "FATAL: ansible.posix collection not installed after retries; refusing to start the box agent" >&2
+    echo "       (AddHoneyCredentials would fail rc=4). Check the box's egress to Ansible Galaxy." >&2
+    exit 1
 fi
 
 pkill -f "box_agent_agent.py" 2>/dev/null || true
