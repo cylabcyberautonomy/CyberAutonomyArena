@@ -26,7 +26,7 @@ from pydantic import PrivateAttr
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
-from ..base import DefenderPlugin
+from ..base import DefenderPlugin, PreparedDefender
 from . import deploy
 
 # The mgmt-host address Velo clients beacon to (where the env's mgmt:8000->box:8000 forward listens);
@@ -64,14 +64,17 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
     _server_proxy: Optional[str] = PrivateAttr(default=None)  # bastion ProxyCommand to reach the box
 
     # -- lifecycle ---------------------------------------------------------
-    async def setup(
+    async def provision_box(
         self,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
         bastion_ip: Optional[str] = None,
         defender_env_spec=None,
         defender_access=None,
-    ) -> None:
+        needs_agent: bool = False,
+    ) -> "PreparedDefender":
+        # Velociraptor stands its server (box) + clients (victims) up here — the provision_box HOOK the base
+        # setup() template calls. No box ES / box agent, so it returns an empty baton.
         if bastion_ip is None:
             raise RuntimeError("Velociraptor defender needs the experiment bastion IP (bastion_ip).")
         velo_dir = self._code_dir(cfg)
@@ -129,6 +132,7 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
                 log_path=log_path,
             ),
         )
+        return PreparedDefender()
 
     def box_ingress(self) -> dict[str, list[int]]:
         # Server-mediated EDR: clients beacon in via the victim->mgmt->box:8000 forward. No box ES.

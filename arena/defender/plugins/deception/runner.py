@@ -207,34 +207,23 @@ if telemetry_hosts:
     print(f"[{experiment_name}] Box mode: telemetry ships to the defender box via the env relay; "
           f"skipping sysflow-repoint.", flush=True)
 
-# mode is argv[2]: "prepare" (external arming only, then exit) or "run" (the reactive loop). The arena
-# runs a "prepare" pass first (DefenderPlugin.prepare -> _run_prepare_and_wait) so the slow decoy deploy
-# COMPLETES before the attacker starts, then a "run" pass (DefenderPlugin.run). See base.PreparedDefender.
-mode = sys.argv[2] if len(sys.argv) > 2 else "run"
+# SINGLE-PROCESS ARM-THEN-LOOP (mirror of the box-resident runner — no prepare/run split). Do the FULL
+# arming in THIS process, then loop. defender.start(prepared=False) runs Strategy.initialize() in full:
+# for a static strategy it deploys decoys/plants honey-creds; for a REACTIVE strategy it deploys AND wires
+# the in-process tracking maps (honeycred_origin/honeycred_decoy/last_restored) that run() later consumes.
+# Keeping arming in the SAME process as the loop is why those maps survive — a throwaway prepare process
+# would leave the loop with empty maps (armed-on-paper, inert), the exact failure the mirror prevents.
+# The plugin's setup() launched this process and BLOCKS on the readiness marker written below, so READY
+# (and the attacker's release) follows arming.
+print(f"[{experiment_name}] Defender arming (strategy={config['strategy']})", flush=True)
+defender.start(prepared=False)
 
-if mode == "prepare":
-    # EXTERNAL arming ONLY. For a static/naive strategy (Perry Strategy.ARMS_IN_SETUP) this deploys the
-    # decoys + plants honey-creds/fake data and exits; for a reactive strategy it is a no-op (it arms in
-    # its loop). Write the PreparedDefender baton the arena reads back, then exit so the arming is COMPLETE
-    # (and any failure is a non-zero exit the arena raises on) before the attacker is released.
-    print(f"[{experiment_name}] Defender preparing (strategy={config['strategy']})", flush=True)
-    defender.prepare()
-    (log_dir / "defender_prepared.json").write_text(
-        json.dumps({}))  # empty baton; the arena reads it back as PreparedDefender
-    print(f"[{experiment_name}] Defender prepared "
-          f"(armed_in_setup={defender.strategy.ARMS_IN_SETUP})", flush=True)
-    sys.exit(0)
-
-print(f"[{experiment_name}] Defender starting (strategy={config['strategy']})", flush=True)
-# prepared=True: the arena already ran prepare() (external arming for ARMS_IN_SETUP strategies), so
-# start() does NOT re-deploy those; a reactive/in-process strategy still does its full arming here.
-defender.start(prepared=True)
-
-# Signal the harness that this strategy is armed. For a reactive strategy its decoy/cred deploy +
-# subscriptions happened here in start(); for a static strategy they happened in the prepare pass and
-# start() only began monitoring. Either way the marker means "armed" and gates the attacker (see
-# DefenderPlugin.wait_until_ready). Written after start() returns, in the harness's own log_dir.
-(log_dir / "defender_ready").write_text(str(time.time()))
+# ARMED: Strategy.initialize() has returned (decoys placed, honey-creds planted, telemetry subscribed,
+# begin_monitoring set). Touch the readiness marker the plugin's setup() polls (_wait_local_ready) — the
+# plugin-internal arm signal, analogous to a C2 attacker's first agent beacon. If arming raised above, the
+# process exits non-zero before this and setup() surfaces it as a failed arm, so an undefended environment
+# never reaches the attacker.
+(log_dir / "defender_ready").write_text("armed\n")
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:

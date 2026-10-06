@@ -21,24 +21,19 @@ from .defender.lifecycle import (
 )
 
 
-async def _stop_defender_process(experiment, process) -> None:
-    """Terminate the defender subprocess and record the STOPPING/STOPPED lifecycle signals (unless the
-    defender already reached a terminal FAILED). Used everywhere the arena tears the defender down, so
-    the defender's lifecycle mirrors the attacker's regardless of which path stops it."""
-    lc = getattr(experiment, "_defender_lifecycle", None)
-    if lc is not None and lc.status not in (DefenderSignal.STOPPED, DefenderSignal.FAILED):
-        await lc.emit(DefenderSignal.STOPPING)
+async def _stop_defender_process(experiment, process, cfg) -> None:
+    """Drive the defender plugin's run_stop (STOPPING/STOPPED + SIGTERM) and reap the subprocess. The
+    lifecycle emission + signalling now live on the plugin (DefenderPlugin.run_stop/stop), symmetric with
+    AttackerPlugin.run_stop; only the reap stays here because the arena holds the Process object (the
+    attacker's reap is likewise arena-side). Called from every path that tears the defender down."""
+    await experiment.defender.run_stop(experiment, cfg)
     try:
-        process.terminate()
         await process.wait()
     except Exception:
         pass
-    if lc is not None and lc.status != DefenderSignal.FAILED:
-        await lc.emit(DefenderSignal.STOPPED)
 from .defender import run_defender
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
-from .env_action_server import resolve_socket_path, serve_env_actions
 from .environment.capacity import CapacityTracker
 from .config import ExperimentManagerConfig
 from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
@@ -230,23 +225,14 @@ async def lifespan(app: FastAPI):
     _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
                                 max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
-    # Defender→environment action channel: a UDS-only listener (no TCP port, so no in-env VM can reach
-    # it) that services EnvActionRequest events from a running defender. Per-manager socket path keeps the
-    # two managers one host may run from colliding. Inert unless a defender arms the serving window.
-    _env_action_socket_path = resolve_socket_path(cfg)
-    _env_action_task = asyncio.create_task(
-        serve_env_actions(_env_action_socket_path, registry, cfg, _openstack_lock)
-    )
-    logger.warning("env-action channel listening on UDS %s", _env_action_socket_path)
+    # Defender→environment action channel: there is NO always-on UDS listener any more. It is armed
+    # per-experiment as a TOKEN'd TCP endpoint on harness-loopback when a defender uses env actions (see the
+    # run loop) — a harness-run runner POSTs to 127.0.0.1:port directly, a box-resident one tunnels to the
+    # same port. ONE channel; the plugin just bakes the endpoint, it doesn't pick a transport.
     try:
         yield
     finally:
-        _env_action_task.cancel()
-        try:
-            await _env_action_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — never let channel teardown mask shutdown
-            pass
-    await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
+        await _shutdown_cleanup()  # Ctrl-C / SIGTERM → nuke the tester's infra + flush logs before exit
 
 
 def _proc_cmdline(pid: int) -> str:
@@ -894,9 +880,6 @@ async def _run_experiment(experiment: Experiment) -> None:
         # _handle_failure inside the block cannot deadlock; the lock releases on return.
         async with _configure_lock.acquire(_gate_priority(experiment)):
             try:
-                # Drop any marker left by a previous run of this experiment name
-                # (overwrite=true reuses the output dir) before the gate below.
-                experiment.defender.clear_ready_marker(experiment.experiment_name, cfg)
                 # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the
                 # arena records each phase so an observer sees where the defender is and a hang shows
                 # as a stalled status, not one opaque "failed to arm".
@@ -920,27 +903,48 @@ async def _run_experiment(experiment: Experiment) -> None:
                 _ingress = getattr(experiment.defender, "box_ingress", lambda: {})()
                 if _ingress:
                     await experiment.environment.program_ingress(experiment, bastion_ip, cfg, _ingress)
-                # Arm the dynamic topology-mutation window. Box-only execution: a defender that
-                # executes_from_box ALWAYS gets the box agent + env channel — there is no arena-execution
-                # path. The VM budget only sets how many hosts add_host may create (0 is fine for a
-                # block/restore-only defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a
-                # decoy-deploying defender mutates topology during ARMING (static decoy deploy in prepare),
-                # not only during the attack. It stays open through the attack and closes at DEACTIVATE
-                # (finally). No token: the env channel is a UDS unreachable from in-env.
+                # Arm the dynamic topology-mutation window for a defender that issues ENV ACTIONS
+                # (restore/BlockIP/decoy): either a HARNESS-RUN controller (executes_from_box — box agent +
+                # UDS channel) or a BOX-RESIDENT engine (uses_env_actions — token'd TCP channel). The VM
+                # budget only sets how many hosts add_host may create (0 is fine for a block/restore-only
+                # defender). OPEN THE WINDOW NOW, before run_defender → prepare(): a decoy-deploying defender
+                # mutates topology during ARMING (static decoy deploy in prepare), not only during the attack.
+                # It stays open through the attack and closes at DEACTIVATE (finally).
                 _budget_specs = getattr(experiment.defender, "defender_vm_budget", lambda: [])()
-                _env_dynamic = getattr(type(experiment.defender), "executes_from_box", False)
-                if _env_dynamic:
+                _uses_env_actions = getattr(type(experiment.defender), "uses_env_actions", False)
+                if _uses_env_actions:
                     experiment._env_dynamic = True
                     experiment._env_budget_remaining = len(_budget_specs)
                     experiment._env_lifecycle = _env_lc(experiment)
                     experiment._env_serving = True
                     experiment._env_lifecycle.send(EnvironmentCommand.ACTIVATE)
                     experiment._env_lifecycle.emit(EnvironmentSignal.SERVING)
+                    # Arm the ONE env-action channel: a per-experiment token'd TCP server on harness-loopback.
+                    # The base/arena are agnostic to WHERE the runner runs (executes_from_box is gone) — a
+                    # harness-run runner POSTs to 127.0.0.1:port directly, a box-resident one opens its OWN
+                    # ssh -R tunnel to the same port (like the Incalmo attacker owns its ssh -L C2 tunnel). The
+                    # plugin's setup() just bakes env_action_url+token into its config. Set the token/port
+                    # BEFORE run_setup so a box-resident ARMING can already reach it.
+                    from .env_action_server import (new_env_action_token, pick_free_tcp_port,
+                                                    serve_env_actions_tcp)
+                    _tcp_port = pick_free_tcp_port()  # ephemeral, per-experiment: no harness collision
+                    experiment._env_action_token = new_env_action_token()
+                    experiment._env_action_tcp_port = _tcp_port
+                    experiment._env_action_box_port = _tcp_port  # box-loopback; distinct box/exp, no collision
+                    experiment._env_action_tcp_task = asyncio.create_task(
+                        serve_env_actions_tcp("127.0.0.1", _tcp_port, registry, cfg, _openstack_lock))
+                    exp_log.info("env-action channel armed for '%s' (UDS always-on + token'd TCP 127.0.0.1:%d; "
+                                 "the plugin picks its door)", experiment.experiment_name, _tcp_port)
                 # SETUP phase: fully ARM the defender (setup + box ES/agent + build_config + write + decoy/
                 # honey-cred deploy), mirroring the attacker's `await experiment.attacker.run_setup(...)`.
                 # run_defender then only launches the reactive loop (the defender analog of run_attacker).
-                await experiment.defender.run_setup(experiment, cfg)
-                defender_process = await run_defender(experiment.defender, experiment, cfg)
+                _prepared = await experiment.defender.run_setup(experiment, cfg)  # ARMS, emits SETUP_STARTED -> READY
+                # arena -> defender: launch the reactive loop (run_defender -> run_start emits RUNNING). No
+                # readiness marker: run_setup() already blocked until armed and emitted READY (symmetric with
+                # the attacker — see docs/agent-symmetry.md).
+                await defender_lc.send(DefenderCommand.START)
+                defender_process = await run_defender(experiment.defender, experiment, cfg, _prepared)
+                experiment.defender_pid = defender_process.pid
                 experiment.defender_started_at = datetime.now(timezone.utc)
                 await registry.update(experiment)
             except Exception as e:
@@ -955,31 +959,13 @@ async def _run_experiment(experiment: Experiment) -> None:
                 await _handle_failure(experiment, f"Failed to start defender — {e}")
                 return
 
-            # Wait for the defender to actually arm before letting the attacker in.
-            # run_defender() only spawns the process; the strategy's initialize()
-            # (deploying decoys, planting fake data and honey credentials) runs
-            # inside it and takes minutes. Without this the attacker could complete
-            # its entire chain against an environment that had no deception in it
-            # yet - which produced a "defense held / did not hold" result that
-            # measured nothing. Failing here is deliberate: a defense that never
-            # armed must not be reported as a defended run.
-            try:
-                await experiment.defender.wait_until_ready(
-                    experiment.experiment_name, cfg, defender_process, log
-                )
-                # Armed: the detection loop is up and reading telemetry. A passive detector is live
-                # from the moment it arms, so READY is immediately followed by RUNNING (the attacker
-                # is gated on READY above; RUNNING marks "defender actively defending").
-                await defender_lc.emit(DefenderSignal.READY)
-                await defender_lc.send(DefenderCommand.START)
-                await defender_lc.emit(DefenderSignal.RUNNING)
-                await registry.update(experiment)
-            except Exception as e:
-                exp_log.exception("Defender failed to arm for '%s'", experiment.experiment_name)
-                await defender_lc.emit(DefenderSignal.FAILED, str(e))
-                await _stop_defender_process(experiment, defender_process)
-                await _handle_failure(experiment, f"Defender failed to arm — {e}")
-                return
+            # No readiness handshake: run_setup() above fully ARMED the defender — setup() stands up the
+            # box infra and deploys decoys / plants honey-creds, blocking until armed, then emits READY —
+            # and run_defender() -> run_start() launched the reactive loop and emitted RUNNING. The defender
+            # is live and defending; the attacker (gated below) can start. An arming failure raised out of
+            # run_setup() and was handled by the "Failed to start defender" block above, exactly as the
+            # attacker's setup failure is. (Symmetric with the attacker; the old marker/wait_until_ready gate
+            # existed only because arming used to happen inside the run loop — see docs/agent-symmetry.md.)
 
     # Host-log rotation is now an MHBench wrapper detail run inside mhbench.configure() (right after
     # configuring), NOT an arena step — so there is no rotate call here.
@@ -993,7 +979,7 @@ async def _run_experiment(experiment: Experiment) -> None:
     except Exception as e:
         exp_log.exception("Failed to start attacker for '%s'", experiment.experiment_name)
         if defender_process:
-            await _stop_defender_process(experiment, defender_process)
+            await _stop_defender_process(experiment, defender_process, cfg)
         await _handle_failure(experiment, f"Failed to start attacker — {e}")
         return
 
@@ -1046,9 +1032,16 @@ async def _run_experiment(experiment: Experiment) -> None:
             experiment._env_serving = False
             experiment._env_lifecycle.send(EnvironmentCommand.DEACTIVATE)
             experiment._env_lifecycle.emit(EnvironmentSignal.IDLE)
+            # Cancel the per-experiment env-action TCP server (the arena owns it). The ssh -R tunnel to the
+            # box is the DEFENDER PLUGIN's own and is closed in its stop() (driven below via
+            # _stop_defender_process → run_stop → stop), mirroring the Incalmo attacker reaping its ssh -L.
+            # Best-effort; the VMs get reclaimed regardless.
+            _tcp_task = getattr(experiment, "_env_action_tcp_task", None)
+            if _tcp_task is not None:
+                _tcp_task.cancel()
         if defender_process:
             try:
-                await _stop_defender_process(experiment, defender_process)
+                await _stop_defender_process(experiment, defender_process, cfg)
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)

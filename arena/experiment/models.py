@@ -196,6 +196,7 @@ class Experiment:
     attacker_stopped_at = _Field("attacker", "stopped_at")
     # --- defender ---
     defender = _Field("defender", "config")
+    defender_pid = _Field("defender", "pid")           # pid of the defender run-loop process (mirrors attacker `pid`)
     defender_started_at = _Field("defender", "started_at")
     defender_finished_at = _Field("defender", "finished_at")
     # Lifecycle handshake (see defender/lifecycle.py), symmetric with the attacker: the arena records
@@ -235,7 +236,7 @@ class Experiment:
                 "ready_at": None, "stopping_at": None, "stopped_at": None,
             },
             "defender": {
-                "config": defender, "started_at": None, "finished_at": None,
+                "config": defender, "pid": None, "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
                 "stopping_at": None, "stopped_at": None,
             },

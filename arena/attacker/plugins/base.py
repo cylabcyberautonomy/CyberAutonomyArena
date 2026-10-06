@@ -78,7 +78,7 @@ class AttackerPlugin(BaseModel):
     def __init_subclass__(cls, config_type: str = None, **kwargs):  # FRAMEWORK: plugin registration
         super().__init_subclass__(**kwargs)
         if config_type is not None:
-            AttackerPlugin._registry[config_type] = cls
+            cls._registry[config_type] = cls
 
     # ========================================================================
     # PLUGIN SURFACE — implement / override these. (Required: build_config, ui_schema, and run() or start().)
@@ -206,10 +206,12 @@ class AttackerPlugin(BaseModel):
         return access[0]
 
     # ------------------------------------------------------------------ foothold access recovery
-    # setup() receives the scoped `access` (a AttackerSetupAccess list) as a parameter, but start()/stop()/
+    # setup() receives the scoped `access` (an AttackerSetupAccess list) as a parameter, but start()/stop()/
     # collect_logs() run later, in contexts where it isn't in scope — a failure path, or a clean-slate
-    # stop after an arena restart that reloaded the experiment from disk. So run_setup() persists the
-    # primary access, and the run_start/run_stop/run_collect_logs wrappers load it back and pass it in.
+    # stop after an arena restart that reloaded the experiment from disk. So run_setup() persists the access
+    # LIST (symmetric with DefenderPlugin — an attacker whose env grants several footholds keeps them all),
+    # and the run_start/run_stop/run_collect_logs wrappers load it back and hand the plugin its PRIMARY
+    # foothold (self.primary_access) — the common single-foothold case, unchanged for existing plugins.
     # Plugins never call persist/load themselves; they just use the `access` they are handed.
     _ACCESS_FILE: ClassVar[str] = "setup_access.json"
 
@@ -219,17 +221,18 @@ class AttackerPlugin(BaseModel):
 
     def _persist_access(self, experiment_name: str, cfg: ExperimentManagerConfig,
                         access: Optional[list[AttackerSetupAccess]]) -> None:
-        """Internal (run_setup): write the primary foothold access so the run_* wrappers can recover it."""
-        fa = self.primary_access(access)
+        """Internal (run_setup): write the scoped foothold access LIST so the run_* wrappers can recover it
+        (symmetric with DefenderPlugin._persist_access; supports an env that grants several footholds)."""
         path = self._access_path(experiment_name, cfg)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(fa.model_dump()))
+        path.write_text(json.dumps([a.model_dump() for a in (access or [])]))
 
-    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Optional[AttackerSetupAccess]:
-        """Internal (run_* wrappers): recover the persisted foothold access, or None if none was
-        persisted (an attacker with no foothold) or it can't be read."""
+    def _load_access(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Optional[list[AttackerSetupAccess]]:
+        """Internal (run_* wrappers): recover the persisted foothold access LIST, or None if none was
+        persisted (an attacker with no foothold) or it can't be read (symmetric with DefenderPlugin)."""
         try:
-            return AttackerSetupAccess.model_validate(json.loads(self._access_path(experiment_name, cfg).read_text()))
+            raw = json.loads(self._access_path(experiment_name, cfg).read_text())
+            return [AttackerSetupAccess.model_validate(a) for a in raw]
         except Exception:  # noqa: BLE001 — no file / unreadable / no cfg -> nothing to thread through
             return None
 
@@ -273,7 +276,8 @@ class AttackerPlugin(BaseModel):
                         cfg: ExperimentManagerConfig) -> "asyncio.subprocess.Process":
         """Launch the attack process, then emit RUNNING — the attacker telling the arena its process
         is up. The arena waits for RUNNING (it does not emit it), same as READY."""
-        access = self._load_access(experiment.experiment_name, cfg)
+        access_list = self._load_access(experiment.experiment_name, cfg)
+        access = self.primary_access(access_list) if access_list else None
         process = await self.start(prepared, config_path, experiment.experiment_name, cfg, access=access)
         lc = self._lifecycle(experiment)
         if lc is not None:
@@ -281,17 +285,22 @@ class AttackerPlugin(BaseModel):
         return process
 
     async def run_stop(self, experiment: "Experiment", cfg: ExperimentManagerConfig) -> None:
+        """Emit STOPPING/STOPPED around stop() (twin of DefenderPlugin.run_stop). Guarded against a prior
+        terminal FAILED and double-stop, since the arena may reach it from more than one path (graceful
+        stop, timeout, teardown)."""
         lc = self._lifecycle(experiment)
-        if lc is not None:
+        if lc is not None and lc.status not in (AttackerSignal.STOPPED, AttackerSignal.FAILED):
             await lc.emit(AttackerSignal.STOPPING)
-        access = self._load_access(experiment.experiment_name, cfg)
+        access_list = self._load_access(experiment.experiment_name, cfg)
+        access = self.primary_access(access_list) if access_list else None
         try:
             await self.stop(experiment, cfg, access=access)
         finally:
-            if lc is not None:
+            if lc is not None and lc.status != AttackerSignal.FAILED:
                 await lc.emit(AttackerSignal.STOPPED)
 
     async def run_collect_logs(self, experiment: "Experiment", cfg: ExperimentManagerConfig, dest: Path) -> None:
-        """Load the persisted foothold access and hand it to collect_logs()."""
-        access = self._load_access(experiment.experiment_name, cfg)
+        """Load the persisted foothold access list and hand the primary foothold to collect_logs()."""
+        access_list = self._load_access(experiment.experiment_name, cfg)
+        access = self.primary_access(access_list) if access_list else None
         await self.collect_logs(experiment, cfg, dest, access=access)

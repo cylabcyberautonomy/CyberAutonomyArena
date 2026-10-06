@@ -241,33 +241,22 @@ def _sigkill_watchdog():
 
 threading.Thread(target=_sigkill_watchdog, daemon=True, name="sigkill-watchdog").start()
 
-# mode is argv[2]: "prepare" (external arming only, then exit) or "run" (the reactive loop). The arena
-# runs a "prepare" pass first (DefenderPlugin.prepare -> _run_prepare_and_wait) so any external arming
-# COMPLETES before the attacker starts, then a "run" pass (DefenderPlugin.run). See base.PreparedDefender.
-mode = sys.argv[2] if len(sys.argv) > 2 else "run"
+# SINGLE-PROCESS ARM-THEN-LOOP (mirror of the box-resident runner — no prepare/run split). Do the FULL
+# arming in THIS process, then loop. defender.start(prepared=False) runs Strategy.initialize() in full:
+# the static StaticLayered* channels deploy their decoys + plant payloads; AIAttackerDetection (reactive)
+# deploys AND wires the in-process state its loop consumes. Keeping arming in the SAME process as the loop
+# is why that state survives — a throwaway prepare process would leave the loop inert. The plugin's setup()
+# launched this process and BLOCKS on the readiness marker written below, so READY (and the attacker's
+# release) follows arming.
+print(f"[{experiment_name}] Defender arming (strategy={strategy_name})", flush=True)
+defender.start(prepared=False)
 
-if mode == "prepare":
-    # EXTERNAL arming ONLY. The static StaticLayered* channels (Perry Strategy.ARMS_IN_SETUP) deploy their
-    # decoys + plant payloads and exit; AIAttackerDetection is reactive, so for it this is a no-op (it arms
-    # in its loop). Write the PreparedDefender baton the arena reads back, then exit so the arming is
-    # COMPLETE (a failure is a non-zero exit the arena raises on) before the attacker is released.
-    print(f"[{experiment_name}] Defender preparing (strategy={strategy_name})", flush=True)
-    defender.prepare()
-    (log_dir / "defender_prepared.json").write_text(
-        json.dumps({}))  # empty baton; the arena reads it back as PreparedDefender
-    print(f"[{experiment_name}] Defender prepared "
-          f"(armed_in_setup={defender.strategy.ARMS_IN_SETUP})", flush=True)
-    sys.exit(0)
-
-print(f"[{experiment_name}] Defender starting (strategy={strategy_name})", flush=True)
-# prepared=True: the arena already ran prepare() (external arming for ARMS_IN_SETUP strategies), so
-# start() does NOT re-deploy those; AIAttackerDetection (reactive) still does its full arming here.
-defender.start(prepared=True)
-
-# Signal the harness that this strategy is armed. main.py blocks on this file before starting the
-# attacker - see DefenderPlugin.wait_until_ready. Written after start() returns, so it means "armed",
-# not merely "process alive"; the harness's own log_dir is used so no extra config key is needed.
-(log_dir / "defender_ready").write_text(str(time.time()))
+# ARMED: Strategy.initialize() has returned (decoys placed, payloads planted, any telemetry subscribed,
+# begin_monitoring set). Touch the readiness marker the plugin's setup() polls (_wait_local_ready) — the
+# plugin-internal arm signal, analogous to a C2 attacker's first agent beacon. If arming raised above, the
+# process exits non-zero before this and setup() surfaces it as a failed arm, so an undefended environment
+# never reaches the attacker.
+(log_dir / "defender_ready").write_text("armed\n")
 print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:

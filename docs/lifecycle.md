@@ -43,29 +43,26 @@ Terminal states: `Finished`, `Error`, `TimedOut`, `Blocked`. The environment emi
 (`DEPLOYING/DEPLOYED/CONFIGURING/CONFIGURED/TEARING_DOWN/TORN_DOWN` + failed-with-reason) so the arena can
 track and surface per-stage status.
 
-## The defender-readiness handshake
+## Defender readiness — armed in `setup()`
 
-This is the one timing subtlety. A defender's `run()` returns as soon as its process exists — long before
-the defense is actually armed. Letting the attacker in at that point was a real bug: on one measured run
-the defender took 3m45s to arm while the attacker finished its whole chain in 1m38s, so the detection loop
-never executed once.
+This is the one timing subtlety, and the defender handles it exactly the way the attacker does. A naive
+`run()` returns as soon as its process exists — long before the defense is actually armed. Letting the
+attacker in at that point was a real bug: on one measured run the defender took 3m45s to arm while the
+attacker finished its whole chain in 1m38s, so the detection loop never executed once.
 
-So arming is gated on an explicit marker:
-
-- The defender runner **touches `DefenderPlugin.ready_marker_path(...)`** once it is actually armed.
-- The arena calls **`wait_until_ready(...)`**, which blocks until that marker appears, and **fails the
-  experiment** if the defender process dies first or arming exceeds the timeout. An undefended run must
-  never be reported as defended — if the runner crashes before writing the marker, the experiment fails
-  rather than quietly handing an undefended range to the attacker.
-
-A re-run with `overwrite=true` reuses the output dir, so the arena clears any stale marker before
-launching the defender.
+The fix mirrors the attacker: **all arming happens in `setup()`, which blocks until the defense is
+actually armed** (stand up the box ES, deploy decoys, plant honey-creds; a box-resident defender
+SSH-polls its own box). `run_setup` emits **READY only after `setup()` returns**, and the arena holds
+the attacker behind that READY. There is no separate marker file and no `wait_until_ready` gate —
+**`setup()` returning IS armed == READY**, the same contract as a C2 attacker that blocks on its first
+agent beacon. If `setup()` raises, run_setup emits FAILED and the experiment fails rather than quietly
+handing an undefended range to the attacker — an undefended run is never reported as defended.
 
 ## Where this lives
 
 - Lifecycle signals: `arena/environment/lifecycle.py` (`EnvironmentSignal`).
-- Readiness handshake: `arena/defender/plugins/base.py`
-  (`ready_marker_path` / `clear_ready_marker` / `wait_until_ready`).
+- Defender lifecycle (SETUP_STARTED → READY → RUNNING → STOPPING → STOPPED, arming in `setup()`):
+  `arena/defender/plugins/base.py` (`run_setup` / `run_start`), a mirror of `AttackerPlugin`.
 - The driver that sequences all of it: `arena/main.py`.
 
 See [plugins.md](plugins.md) for what each plugin must implement at each stage, and

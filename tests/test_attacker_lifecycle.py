@@ -140,3 +140,22 @@ async def test_run_setup_threads_scoped_access_as_a_parameter():
     import inspect
     from arena.attacker.plugins import base
     assert "_attacker_access" not in inspect.getsource(base)
+
+
+def test_access_persist_load_roundtrips_as_list(tmp_path):
+    """run_setup persists the scoped access LIST and the run_* wrappers load it back (symmetric with
+    DefenderPlugin; supports an env that grants several footholds). primary_access() yields the first."""
+    from types import SimpleNamespace
+    from arena.attacker.env_spec import AttackerSetupAccess
+
+    class _P(AttackerPlugin, config_type="_persist_roundtrip"):
+        def build_config(self, *a): return {}
+
+    cfg = SimpleNamespace(output_dir=tmp_path)
+    acc = [AttackerSetupAccess(name="kali", host="10.0.0.9", user="root", ssh_key="/k"),
+           AttackerSetupAccess(name="fh2", host="10.0.0.10", user="root", ssh_key="/k")]
+    p = _P(type="_persist_roundtrip")
+    p._persist_access("exp", cfg, acc)
+    back = p._load_access("exp", cfg)
+    assert back is not None and [a.host for a in back] == ["10.0.0.9", "10.0.0.10"]
+    assert p.primary_access(back).host == "10.0.0.9"

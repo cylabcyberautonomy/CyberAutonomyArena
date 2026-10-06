@@ -25,17 +25,24 @@ parse the topology itself.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
+import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 from ....config import ExperimentManagerConfig
 from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
-from ..base import DefenderPlugin
+from ..base import DefenderPlugin, PreparedDefender
 
 _ALL_CHECKS = ["ssh", "resolve", "telemetry", "canary_event"]
+# The box runner process, launched in setup() (box-resident mirror), handed to run_start via start().
+# Keyed by experiment_name — the plugin is a stateless pydantic model, so the process lives here.
+_BOX_PROCS: dict = {}
 
 
 class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
@@ -43,6 +50,12 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
 
     type: Literal["canary"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "checks", "fail_closed"})
+    # Run ON THE BOX: the canary is the control-plane-free, stdlib-only proof of the box launch — it ships
+    # its runner to the box and runs it under the box's own python3, reaching victims with the box-threaded
+    # scoped key. No uv, no engine tree, no env-action channel. The box-launch machinery is the STDLIB
+    # SUBSET of the box-launch unit, copied onto this plugin (per the self-containment rule — the base no
+    # longer carries it); uses_env_actions stays False (base default), so the arena arms no env channel.
+    _BOX_DIR: ClassVar[str] = "/opt/arena-defender"  # where the runner + config live on the box
     checks: list[str] = list(_ALL_CHECKS)
     canary_host: Optional[str] = None       # victim name/role for the canary_event read; None = first victim
     telemetry_port: int = 9200
@@ -113,3 +126,175 @@ class CanaryDefenderPlugin(DefenderPlugin, config_type="canary"):
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
+
+    async def setup(self, experiment, cfg: ExperimentManagerConfig,
+                    bastion_ip: Optional[str] = None, access=None) -> PreparedDefender:
+        """ARM (mirror of AttackerPlugin.setup): write the runner config, LAUNCH the canary ON the box over
+        SSH, and SSH-poll until it arms. The launched process is stashed in _BOX_PROCS and handed to run_start
+        via start(), so READY (emitted by run_setup) follows the box arming. Canary is checks-only (no env
+        channel, no decoys) — arming is just 'the runner is up and its checks loop started'."""
+        experiment_name = experiment.experiment_name
+        env_spec = experiment._defender_env_spec
+        config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        built = self.build_config(experiment_name, env_spec, PreparedDefender())
+        if env_spec is not None:
+            built["defender_env_spec"] = env_spec.model_dump()
+        built["defender_setup_access"] = [a.model_dump() for a in (access or [])]
+        built["management_ip"] = cfg.arena_host_ip
+        built["bastion_ip"] = bastion_ip
+        built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
+        config_path.write_text(json.dumps(built, indent=2))
+        _BOX_PROCS[experiment_name] = await self._launch_on_box(
+            PreparedDefender(), config_path, experiment_name, cfg, access)
+        return PreparedDefender()
+
+    async def start(
+        self,
+        prepared: "PreparedDefender",
+        config_path: Path,
+        experiment_name: str,
+        cfg: ExperimentManagerConfig,
+        access=None,
+    ) -> asyncio.subprocess.Process:
+        """Hand run_start the canary process launched + armed in setup() (box-resident mirror). Fallback:
+        launch now (ships the stdlib runner + box-local config, threads the scoped keys, runs under the box's
+        python3) if setup() didn't run for this experiment."""
+        proc = _BOX_PROCS.pop(experiment_name, None)
+        if proc is not None:
+            return proc
+        return await self._launch_on_box(prepared, config_path, experiment_name, cfg, access)
+
+    # ------------------------------------------------------------------ box launch (stdlib subset)
+    # The control-plane-free subset of the box-launch unit (the full unit — uv venv + engine ship + the
+    # ssh -R env channel — lives on llm_soc_box). Command construction is PURE (unit-testable); only the
+    # ship/ssh round-trips need a live box. Creds ride in `access` (threaded at launch), NEVER in the
+    # shipped config; the config's log_dir is rewritten to a box path so the runner's readiness marker lands
+    # on the box, which _wait_box_ready then bridges to the local marker the arena's wait_until_ready polls.
+    def _box_runner_src(self) -> Path:
+        """This plugin's own runner.py, shipped to the box (kept next to the module, per self-containment)."""
+        return Path(inspect.getfile(type(self))).parent / "runner.py"
+
+    def _box_paths(self) -> dict:
+        d = self._BOX_DIR
+        return {"dir": d, "runner": f"{d}/runner.py", "config": f"{d}/defender_config.json",
+                "log_dir": f"{d}/logs", "ready": f"{d}/logs/defender_ready"}
+
+    def _box_run_command(self) -> str:
+        """PURE (no I/O — unit-testable): the remote shell command run over SSH to launch the box runner
+        under the box's own python3 (the canary runner is stdlib-only). `exec` so the runner replaces the
+        shell as the ssh session's process; with `ssh -tt` the local ssh pid proxies it, so stop()'s local
+        SIGTERM tears the box process down too."""
+        p = self._box_paths()
+        prelude = f"set -e; mkdir -p {shlex.quote(p['dir'])} {shlex.quote(p['log_dir'])}"
+        return f"{prelude}; exec python3 {shlex.quote(p['runner'])} {shlex.quote(p['config'])}"
+
+    @staticmethod
+    def _tty_ssh(base: list[str]) -> list[str]:
+        """Insert `-tt` right after `ssh` so the remote process is bound to the ssh session: the LOCAL ssh
+        pid proxies the remote runner, so stop()'s SIGTERM to the local pid tears the box process down too."""
+        return [base[0], "-tt", *base[1:]]
+
+    async def _box_push(self, base: list[str], remote_path: str, content: str, mode: Optional[str] = None) -> None:
+        """Write `content` to `remote_path` on the box over the box's ssh access (no scp dependency). `mode`
+        (e.g. "600") chmods it after — used for shipped key files."""
+        chmod = f" && chmod {mode} {shlex.quote(remote_path)}" if mode else ""
+        proc = await asyncio.create_subprocess_exec(
+            *base,
+            f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && cat > {shlex.quote(remote_path)}{chmod}",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(proc.communicate(content.encode()), timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"shipping {remote_path} to the box failed: {err.decode()[-400:]}")
+
+    @staticmethod
+    def _rewrite_access_keys(access_entries: list, key_map: dict) -> list:
+        """PURE (unit-testable): return access entries with ssh_key AND the `-i <key>` path inside
+        ssh_common_args (the bastion ProxyCommand) rewritten per key_map (harness path -> box path), so a
+        box-resident runner reaches victims with keys that exist on the box."""
+        out = []
+        for entry in access_entries:
+            e = dict(entry)
+            k = e.get("ssh_key")
+            if k in key_map:
+                e["ssh_key"] = key_map[k]
+                if e.get("ssh_common_args"):
+                    e["ssh_common_args"] = e["ssh_common_args"].replace(k, key_map[k])
+            out.append(e)
+        return out
+
+    async def _thread_box_credentials(self, base: list[str], paths: dict, access_entries: list) -> list:
+        """Thread the scoped creds to the box: ship each UNIQUE key the access entries reference to a
+        box-local path (chmod 600), then return the entries rewritten to reference the box-local keys. The
+        box runner then reaches victims/box with keys that exist ON THE BOX, not harness paths."""
+        import os as _os
+        key_dir = f"{paths['dir']}/keys"
+        key_map: dict = {}
+        for entry in access_entries:
+            k = entry.get("ssh_key")
+            if k and k not in key_map:
+                src = Path(_os.path.expanduser(k))
+                box_key = f"{key_dir}/{src.name}"
+                await self._box_push(base, box_key, src.read_text(), mode="600")
+                key_map[k] = box_key
+        return self._rewrite_access_keys(access_entries, key_map)
+
+    async def _launch_on_box(self, prepared: "PreparedDefender", config_path: Path, experiment_name: str,
+                             cfg: ExperimentManagerConfig, access) -> "asyncio.subprocess.Process":
+        """Launch the runner FROM THE BOX over SSH and return the ssh process (local pid proxies the remote).
+        Mirrors the attacker's foothold bring-up: ship the runner + config, then run it over `ssh -tt`."""
+        built = json.loads(Path(config_path).read_text())
+        # Reach the DEFENDER BOX specifically — the access list is victims-first, box-last, so primary_access
+        # ([0]) is a VICTIM. Select the box by its ip (already in the config's defender_env_spec); fall back
+        # to primary_access only if the box ip is somehow absent (older single-subnet topologies).
+        _box_ip = ((built.get("defender_env_spec") or {}).get("box") or {}).get("ip")
+        box = next((a for a in access if str(getattr(a, "host", None)) == str(_box_ip)), None) if _box_ip else None
+        if box is None:
+            box = self.primary_access(access)
+        base = box.ssh_base()
+        p = self._box_paths()
+        built["log_dir"] = p["log_dir"]
+        # thread the scoped creds to the box (ship keys + rewrite the access paths to box-local copies) so
+        # the box runner reaches victims with keys that exist on the box, not harness paths.
+        if built.get("defender_setup_access"):
+            built["defender_setup_access"] = await self._thread_box_credentials(
+                base, p, built["defender_setup_access"])
+        await self._box_push(base, p["runner"], self._box_runner_src().read_text())
+        await self._box_push(base, p["config"], json.dumps(built))
+        log_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "a")  # noqa: SIM115 — handed to the long-running subprocess
+        proc = await asyncio.create_subprocess_exec(
+            *self._tty_ssh(base), self._box_run_command(),
+            stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+        # block until the box runner arms, then bridge its box marker to the local one (main.py's
+        # wait_until_ready stays untouched — it keeps polling the local marker).
+        await self._wait_box_ready(experiment_name, cfg, box, proc)
+        return proc
+
+    async def _wait_box_ready(self, experiment_name: str, cfg: ExperimentManagerConfig, box, process,
+                              timeout_s: float = 600.0, poll_s: float = 5.0) -> float:
+        """Poll the box over SSH until the runner writes its readiness marker, then TOUCH the local marker so
+        the arena's wait_until_ready passes unchanged. Raises if the box process dies first or the wait times
+        out — an undefended run must never be reported defended. Returns seconds waited."""
+        p = self._box_paths()
+        base = box.ssh_base()
+        start = time.monotonic()
+        while True:
+            if process.returncode is not None:
+                raise RuntimeError(
+                    f"box defender process exited (rc={process.returncode}) before arming — see defender.log")
+            check = await asyncio.create_subprocess_exec(
+                *base, f"test -f {shlex.quote(p['ready'])} && echo READY || true",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(check.communicate(), timeout=poll_s * 4)
+            if b"READY" in out:
+                break
+            if time.monotonic() - start > timeout_s:
+                raise RuntimeError(f"box defender did not arm within {timeout_s:.0f}s (no {p['ready']})")
+            await asyncio.sleep(poll_s)
+        # The box runner is armed. No local-marker bridge any more (the arena's readiness handshake is gone —
+        # run_setup emits READY once this returns). FOLLOW-UP: this launch+wait should move into setup() so
+        # READY is emitted after the box arms; today it still runs in start() (acceptable on the set-aside
+        # box-resident line).
+        return time.monotonic() - start

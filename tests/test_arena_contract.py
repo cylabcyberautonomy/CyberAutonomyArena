@@ -440,13 +440,15 @@ def test_attacker_lifecycle_methods_present():
 
 def test_defender_lifecycle_methods_present():
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
-    for m in ("setup", "prepare", "run", "teardown", "build_config"):
+    # Mirror of the attacker surface: setup() ARMS (blocks until armed) + build_config/start/stop/
+    # collect_logs/teardown + the framework run_* wrappers. ALL arming happens in setup(), so run_setup
+    # returning IS READY — there is NO prepare() and NO readiness handshake (see docs/agent-symmetry.md).
+    for m in ("setup", "start", "stop", "collect_logs", "teardown", "run", "build_config",
+              "run_setup", "run_start", "run_stop", "run_collect_logs"):
         assert callable(getattr(dfn, m)), f"defender missing {m}()"
-    # the arena blocks the attacker on this readiness gate
-    assert callable(getattr(DefenderPlugin, "wait_until_ready"))
-    # external arming (decoy/cred deploy) runs in prepare() and returns a PreparedDefender baton,
-    # mirroring the attacker's setup()->PreparedAttacker; run() then only launches the loop.
-    assert callable(getattr(DefenderPlugin, "prepare"))
+    for gone in ("prepare", "provision_box", "wait_until_ready", "ready_marker_path",
+                 "clear_ready_marker", "_write_runner_config", "executes_from_box"):
+        assert not hasattr(DefenderPlugin, gone), f"removed member {gone!r} is back on DefenderPlugin"
 
 
 def test_capacity_counts_only_topology_vms():
@@ -664,12 +666,12 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
     assert rem.ok and calls["remove-host"] == {"target": "192.168.0.12"}
 
 
-def test_defender_box_only_execution_enforced():
-    """ENFORCEMENT (box execution is the ONLY path): the box-executing defenders have NO arena-execution
-    code — a runner must not call openstack.connect(), construct OpenstackOrchestrator/GCPOrchestrator, or
-    build an AnsibleRunner to reach victims from the arena. And each declares executes_from_box so the
-    arena always deploys the box agent + arms the env channel. This turns "runs from the box" from a
-    convention into an invariant: re-introducing an arena-execution path fails this test."""
+def test_defender_no_arena_execution_path():
+    """ENFORCEMENT: the in-env defenders never reach victims FROM THE ARENA — a runner must not call
+    openstack.connect(), construct OpenstackOrchestrator/GCPOrchestrator, or build an AnsibleRunner on the
+    arena host. Host actions go to the box agent / box-resident engine; cloud ops go to the env over the
+    env-action channel. Re-introducing an arena-execution path fails this test. (The old executes_from_box
+    flag is gone — the base is agnostic to WHERE a defender executes; it only knows uses_env_actions.)"""
     import pathlib
     from arena.defender.plugins.base import DefenderPlugin
 
@@ -681,11 +683,10 @@ def test_defender_box_only_execution_enforced():
         for bad in forbidden:
             assert bad not in src, f"{plug}/runner.py has a re-introduced arena-execution path: {bad!r}"
 
+    # executes_from_box is gone from the base and the plugins (the base no longer keys on execution model).
+    assert not hasattr(DefenderPlugin, "executes_from_box")
     for ct in ("llm_soc", "deception", "prompt_injection"):
-        cls = DefenderPlugin._registry[ct]
-        assert getattr(cls, "executes_from_box", False) is True, f"{ct} must set executes_from_box=True"
-    # base default off — checks-only / self-contained defenders don't box-execute via this path
-    assert DefenderPlugin.executes_from_box is False
+        assert not hasattr(DefenderPlugin._registry[ct], "executes_from_box")
 
 
 def test_defender_vm_budget_optional_default():

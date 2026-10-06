@@ -51,7 +51,7 @@ import arena.attacker.plugins   # noqa: F401
 import arena.defender.plugins   # noqa: F401
 import arena.environment.plugins  # noqa: F401
 from arena.attacker.plugins.base import AttackerPlugin
-from arena.defender.plugins.base import DefenderPlugin, PreparedDefender
+from arena.defender.plugins.base import DefenderPlugin
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.environment import build_environment
 from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
@@ -289,7 +289,8 @@ def test_attacker_plugin_conforms(name):
 
 # --------------------------------------------------------------------------- defender conformance
 
-_DEFENDER_METHODS = {"build_config": False, "run": True, "setup": True, "teardown": True, "prepare": True}
+_DEFENDER_METHODS = {"build_config": False, "setup": True, "start": True, "stop": True,
+                     "collect_logs": True, "teardown": True}
 
 
 @pytest.mark.parametrize("name", _real_plugins(DefenderPlugin._registry), ids=lambda n: n)
@@ -320,7 +321,7 @@ def test_defender_plugin_conforms(name):
         problems.append(f"box_ingress() raised {type(e).__name__}: {e}")
     # build_config: well-formed, echoes the experiment name, leaks no SSH credential/routing
     try:
-        built = instance.build_config("ci_conformance", None, PreparedDefender())
+        built = instance.build_config("ci_conformance", None, cls.example_prepared())
         if name not in _BUILD_CONFIG_LEAK_BASELINE:  # the leak guard for baselined plugins lives in test_no_god_key.py
             problems += _config_leak_problems(built, "build_config()")
         problems += _declared_keys_problems(cls, built)
@@ -379,6 +380,7 @@ _EXPECTED_ATTACKER_CONFIG_KEYS = {
 _EXPECTED_DEFENDER_CONFIG_KEYS = {
     "canary":           {"experiment_name", "checks", "fail_closed"},
     "llm_soc":          {"experiment_name", "strategy", "llm_model"},
+    "llm_soc_box":      {"experiment_name", "strategy", "llm_model"},  # box-resident engine; same runner contract
     "deception":        {"experiment_name", "strategy"},
     "prompt_injection": {"experiment_name", "strategy"},
     "velociraptor":     {"experiment_name", "response_mode"},
