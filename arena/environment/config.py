@@ -38,7 +38,7 @@ class EnvBackendConfig(BaseModel):
     os_cloud: str = "openstack"               # clouds.yaml cloud name for the OpenStack CLI/SDK
     mhbench_config: Optional[str] = None       # MHBench cli --config (relative to mhbench_dir), e.g. "config/config.gcp.yaml"
     gcp_relay_ip: str = "10.0.1.10"           # mgmt/bastion internal IP on the victim-reachable CIDR (telemetry relay + defender-box fallback). Named gcp_* for historical reasons.
-    gcp_flavor_cpu_cost: Dict[str, int] = {}  # MHBench flavor -> GCP CPUS_ALL_REGIONS cost; feeds max_active_cpus + decoy CPU estimate
+    gcp_flavor_cpu_cost: Dict[str, int] = {}  # MHBench flavor -> GCP CPUS_ALL_REGIONS cost; feeds max_active_cpus
 
 
 def _resolve_config_path(path: Optional[Path] = None) -> Path:

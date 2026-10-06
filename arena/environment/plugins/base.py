@@ -184,8 +184,8 @@ class EnvironmentPlugin(BaseModel):
 
     async def handle_env_request(self, experiment, deployed, request, cfg):
         """Dispatch ONE EnvActionRequest to the matching primitive. Plugin-agnostic router so the arena
-        calls a single method; a plugin overrides the primitives, not this. Capacity accounting (the
-        AddHost budget check) and the request trace are the ARENA's job around this call, not here."""
+        calls a single method; a plugin overrides the primitives, not this. The request trace is the
+        ARENA's job around this call, not here."""
         from ..env_requests import EnvActionKind, EnvRequestUnsupported
         fn = {
             EnvActionKind.ADD_HOST: self.add_host,
@@ -208,13 +208,12 @@ class EnvironmentPlugin(BaseModel):
         raise EnvRequestUnsupported(f"{type(self).__name__} does not support add_host")
 
     async def remove_host(self, experiment, deployed, request, cfg):
-        """Delete one existing host (ShutdownServer). Returns its budget VM to the defender's pool."""
+        """Delete one existing host (ShutdownServer)."""
         from ..env_requests import EnvRequestUnsupported
         raise EnvRequestUnsupported(f"{type(self).__name__} does not support remove_host")
 
     async def rebuild_host(self, experiment, deployed, request, cfg):
-        """Rebuild one existing host from its base image (RestoreServer) — restore a compromised VM.
-        No budget change (the VM already exists)."""
+        """Rebuild one existing host from its base image (RestoreServer) — restore a compromised VM."""
         from ..env_requests import EnvRequestUnsupported
         raise EnvRequestUnsupported(f"{type(self).__name__} does not support rebuild_host")
 

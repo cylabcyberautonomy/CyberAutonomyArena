@@ -311,7 +311,7 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         return EnvActionResult(kind=EnvActionKind.REBUILD_HOST, ok=True, name=request.target)
 
     async def remove_host(self, experiment, deployed, request, cfg):
-        """Delete one existing host (returns its budget slot to the defender's pool)."""
+        """Delete one existing host."""
         import asyncio
         from ...env_requests import EnvActionResult, EnvActionKind
         from .deployer import _host_op_sync
