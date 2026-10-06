@@ -162,11 +162,18 @@ class AttackerPlugin(BaseModel):
 
     @classmethod
     def sweep_stale_state(cls, cfg: ExperimentManagerConfig) -> None:
-        """OPTIONAL. Best-effort: reclaim this attacker TYPE's GLOBAL host-side state that a crashed prior
-        manager may have orphaned (e.g. C2 `ssh -L` tunnels, Docker containers, temp dirs), BEFORE any
-        experiment runs. The arena calls it once per registered attacker plugin on clean-slate —
-        plugin-agnostically, so the core never imports a specific plugin to clean up after it. Default no-op;
-        a C2-based attacker (e.g. Incalmo) overrides it to reap its own leftovers."""
+        """OPTIONAL — most attackers do NOT implement this; the default is a no-op, and an attacker that
+        keeps no global host-side state (temp tunnels, containers, statefiles) simply omits it.
+
+        It matters ONLY on an ABNORMAL manager exit — a crash or SIGKILL. On a clean shutdown each run's
+        teardown() already reaped its own C2 state, so by the next clean-slate there is nothing left and
+        this is a no-op. Its sole job is crash recovery: reclaim this attacker TYPE's GLOBAL host-side state
+        that a crashed prior manager orphaned (e.g. C2 `ssh -L` tunnels, Docker containers, temp dirs) —
+        leftovers teardown() can't reach because the in-memory registry it keys on died with the manager.
+
+        The arena calls it once per registered attacker plugin on clean-slate, plugin-agnostically (the core
+        never imports a specific plugin to clean up after it), BEFORE any experiment runs. A C2-based
+        attacker (e.g. Incalmo) overrides it to reap its own leftovers; a plugin with no global state skips it."""
         return None
 
     @classmethod
