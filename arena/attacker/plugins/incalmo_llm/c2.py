@@ -201,11 +201,30 @@ def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip:
         time.sleep(5)
 
     # 2. Install docker on foothold if missing (foothold has apt egress + foothold repos; docker not baked).
+    #    A freshly-booted foothold usually still has cloud-init / unattended-upgrades / apt-daily holding the
+    #    dpkg lock, so a bare `apt-get` aborts immediately with exit 100 — a first-boot race (the bare
+    #    check=True install above failed live on this exact race). Mirror incalmo_strategy's C2: tell apt to
+    #    WAIT for the lock (DPkg::Lock::Timeout, a no-op on apt too old to know it) and retry a few times for a
+    #    transient lock/mirror blip; capture_output so the real apt error reaches the log.
     logger.info("[foothold-c2] ensuring docker on foothold %s", foothold_ip)
-    subprocess.run(ssh + [
-        "export DEBIAN_FRONTEND=noninteractive; command -v docker >/dev/null || "
-        "(apt-get -qq update && apt-get -y -qq install docker.io && systemctl enable --now docker)"],
-        check=True, timeout=600)
+    _docker_install = (
+        "export DEBIAN_FRONTEND=noninteractive; command -v docker >/dev/null || ("
+        "apt-get -o DPkg::Lock::Timeout=600 -qq update && "
+        "apt-get -o DPkg::Lock::Timeout=600 -y -qq install docker.io && "
+        "systemctl enable --now docker)")
+    _last = ""
+    for a in range(5):
+        r = subprocess.run(ssh + [_docker_install], capture_output=True, text=True, timeout=600)
+        if r.returncode == 0:
+            break
+        _last = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:300]
+        logger.warning("[foothold-c2] docker install on foothold %s try %d/5 rc=%d: %s",
+                       foothold_ip, a + 1, r.returncode, _last or "(no output)")
+        time.sleep(10)
+    else:
+        raise RuntimeError(
+            f"[foothold-c2] docker install on foothold {foothold_ip} failed after 5 tries; "
+            f"last rc!=0 output: {_last or '(none captured)'}")
 
     # 3. Ship the image (docker save | gzip | ssh 'gunzip | docker load').
     logger.info("[foothold-c2] shipping %s to foothold", _C2C_IMAGE)
