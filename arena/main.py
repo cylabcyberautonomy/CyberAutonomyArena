@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import signal
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -638,10 +639,31 @@ async def _run_experiment_gated(experiment: Experiment) -> None:
         # strand VMs. On the deadline, _run_experiment is cancelled mid-phase and we force the cleanup it
         # didn't reach. (CancelledError is a BaseException, so _run_experiment's own `except Exception`
         # handlers don't swallow it; its `finally`/`async with` still release the deploy slot + locks.)
-        try:
-            await asyncio.wait_for(_run_experiment(experiment), timeout)
-        except asyncio.TimeoutError:
-            await _handle_experiment_timeout(experiment)
+        #
+        # EXCLUDE time spent held at the NoHat pause gate (AwaitingAttack): a human-in-the-loop pause must
+        # NOT burn the lifecycle cap. We poll the run task and only count ACTIVE time (when the run is not
+        # flagged experiment._gate_paused) against the deadline. When pause_before_attack is off the flag
+        # is never set, so this behaves exactly like the old wait_for.
+        run_task = asyncio.create_task(_run_experiment(experiment))
+        remaining = float(timeout)
+        last = time.monotonic()
+        while True:
+            done, _ = await asyncio.wait({run_task}, timeout=max(0.5, min(remaining, 15)))
+            now = time.monotonic()
+            if run_task in done:
+                await run_task          # propagate normal completion / exception
+                return
+            if not getattr(experiment, "_gate_paused", False):
+                remaining -= (now - last)
+            last = now
+            if remaining <= 0:
+                run_task.cancel()
+                try:
+                    await run_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                await _handle_experiment_timeout(experiment)
+                return
 
 
 async def _handle_experiment_timeout(experiment: Experiment) -> None:
@@ -989,6 +1011,7 @@ async def _run_experiment(experiment: Experiment) -> None:
         exp_log.info("pause_before_attack: holding '%s' at AwaitingAttack (everything deployed; attack not "
                      "started); POST /experiments/%s/start-attack to launch (auto-launch after %ds)",
                      experiment.experiment_name, experiment.experiment_name, _PAUSE_BEFORE_ATTACK_TIMEOUT)
+        experiment._gate_paused = True   # tells the lifecycle watchdog NOT to count this wait against the cap
         try:
             await asyncio.wait_for(experiment._start_attack_event.wait(),
                                    timeout=_PAUSE_BEFORE_ATTACK_TIMEOUT)
@@ -996,6 +1019,8 @@ async def _run_experiment(experiment: Experiment) -> None:
         except asyncio.TimeoutError:
             exp_log.warning("pause_before_attack timed out after %ds for '%s' — launching anyway",
                             _PAUSE_BEFORE_ATTACK_TIMEOUT, experiment.experiment_name)
+        finally:
+            experiment._gate_paused = False   # resume counting active time against the lifecycle cap
 
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
