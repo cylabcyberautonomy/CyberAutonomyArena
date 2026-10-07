@@ -354,10 +354,10 @@ def check_backend():
     return (not problems), problems
 
 
-def list_servers(experiment_name):
-    """Print the live VMs for an experiment, using the configured backend's CLI.
-    MHBench names an experiment's VMs with the experiment name as a prefix, so we
-    filter on it. Best-effort: prints whatever the CLI returns (or a note)."""
+def list_servers(experiment_name, env_label=None):
+    """Print the live VMs of an experiment's environment, using the configured
+    backend's CLI. MHBench names an experiment's VMs with the experiment name as a
+    prefix, so we still FILTER on that; the header shows the environment name."""
     if CLOUD_BACKEND == "gcp":
         cmd = ["gcloud", "compute", "instances", "list",
                f"--filter=name~{experiment_name}",
@@ -366,7 +366,7 @@ def list_servers(experiment_name):
         cmd = ["openstack", "--os-cloud", OS_CLOUD, "server", "list",
                "--name", experiment_name, "-f", "table",
                "-c", "Name", "-c", "Status", "-c", "Networks"]
-    print(f"\n{'-' * 70}\nEnvironment VMs for {experiment_name}  ({CLOUD_BACKEND}):\n{'-' * 70}", flush=True)
+    print(f"\n{'-' * 70}\nEnvironment VMs for {env_label or experiment_name}  ({CLOUD_BACKEND}):\n{'-' * 70}", flush=True)
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         sys.stdout.write(out.stdout or "")
@@ -382,11 +382,14 @@ def list_servers(experiment_name):
 # ---------------------------------------------------------------------------
 def build_jobs():
     """Return a list of (name, cell) where cell carries the matrix coordinates."""
+    combos = list(itertools.product(
+        ATTACKERS.items(), ENVIRONMENTS.items(), DEFENDERS.items(), TRIALS))
+    single = len(combos) == 1
     jobs = []
-    for (acode, acfg), (ecode, espec), (dcode, dcfg), trial in itertools.product(
-        ATTACKERS.items(), ENVIRONMENTS.items(), DEFENDERS.items(), TRIALS
-    ):
-        name = f"{RUN_PREFIX}_{acode}_{ecode}_{dcode}_t{trial}"
+    for (acode, acfg), (ecode, espec), (dcode, dcfg), trial in combos:
+        # A single-cell demo submits as just "demo"; a multi-cell matrix uses unique
+        # composite names (so the cells don't collide).
+        name = RUN_PREFIX if single else f"{RUN_PREFIX}_{acode}_{ecode}_{dcode}_t{trial}"
         if len(name) > NAME_LIMIT:
             sys.exit(f"experiment_name '{name}' is {len(name)} chars (> {NAME_LIMIT}). "
                      "Shorten a code in the CONFIG block.")
@@ -798,7 +801,7 @@ def step_run(jobs, args, results_dir):
             log(f"  {name} reached {reached} without pausing (deploy/configure failed?) — skipping launch")
             continue
         # Environment is fully provisioned+configured and holding at the gate. Show it.
-        list_servers(name)
+        list_servers(name, env_label=Path(ENVIRONMENTS[cell["ecode"]]).stem)
         if args.no_wait:
             log("  --no-wait: leaving it paused at the gate (auto-launches after the manager's timeout).")
             continue
@@ -813,6 +816,26 @@ def step_run(jobs, args, results_dir):
         follow_logs("attacker", names=[name], poll_seconds=args.poll_seconds)
 
     report(jobs, results_dir)
+    # Clear the per-experiment output so a re-run of the same name starts clean (no
+    # overwrite/archive pile-up). The scored results already live in results_dir.
+    _clear_output([n for n, _ in jobs])
+
+
+def _clear_output(names):
+    """Remove each experiment's raw output tree (and any prior overwrite archives)
+    under OUTPUT_ROOT. Scored CSV/JSON in the results dir are kept."""
+    removed = []
+    for name in names:
+        d = OUTPUT_ROOT / name
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(name)
+        archdir = OUTPUT_ROOT / "replaced"
+        if archdir.exists():
+            for a in archdir.glob(f"{name}_*"):
+                shutil.rmtree(a, ignore_errors=True)
+    if removed:
+        log(f"cleared demo output under {OUTPUT_ROOT} ({', '.join(removed)}) — next run starts clean")
 
 
 def report(jobs, results_dir):
