@@ -62,7 +62,9 @@ How to run
     python3 run_demo_matrix.py --collect-only  # re-score + re-tabulate existing runs
 
 Standard library only, no extra deps. Each cell is a real attacker run and can
-take many minutes.
+take many minutes. Ctrl-C during a run cancels + tears down the experiment(s) it
+submitted (they live in the manager, so they'd otherwise keep running); the
+standalone --follow-*/--collect-only paths just detach on Ctrl-C.
 """
 
 import argparse
@@ -183,7 +185,7 @@ ENV_DISPLAY_NAMES = {
 #   own per-experiment ES on the defender box, detects via Falco/Sysflow, and
 #   restores compromised hosts. Needs OPENROUTER_API_KEY in llm_soc_dir/.env.
 DEFENDERS = {
-    "fll":  {"type": "llm_soc", "strategy": "FalcoLLM", "llm_model": "openrouter/anthropic/claude-sonnet-5"},
+    "fll":  {"type": "llm_soc", "strategy": "FalcoLLMC2Block", "llm_model": "openrouter/anthropic/claude-sonnet-5"},
 }
 
 # =============================================================================
@@ -807,6 +809,34 @@ def start_attack(name):
         return False, str(e)[:160]
 
 
+def delete_experiment(name):
+    """DELETE /experiments/{name} — cancels the run (stops attacker/defender/C2) and tears down its VMs."""
+    try:
+        _request("DELETE", f"/experiments/{name}", timeout=60)
+        return True, ""
+    except urllib.error.HTTPError as e:
+        return False, f"{e.code} {e.read().decode()[:120]}"
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def _cancel_submitted(names):
+    """Cancel + tear down the still-live experiments this run submitted (used on Ctrl-C). Skips any that
+    already finished. Best-effort and tolerant of a second Ctrl-C mid-cleanup."""
+    if not names:
+        return
+    st = statuses() or {}
+    for n in names:
+        if st.get(n) in TERMINAL:
+            log(f"  {n}: already {st.get(n)} — nothing to cancel")
+            continue
+        try:
+            ok, info = delete_experiment(n)
+            log(f"  {n}: {'cancelled + torn down' if ok else 'cancel FAILED: ' + info}")
+        except KeyboardInterrupt:
+            log(f"  {n}: cancel interrupted — it may still be running; DELETE it manually")
+
+
 def _phase_label(rec):
     """A human phase label from the full experiment record. The top-level status stays
     'Configured' while the ATTACKER C2 and DEFENDER are set up — those show up only in
@@ -870,38 +900,48 @@ def step_run(jobs, args, results_dir):
     # clearing at the end, this LEAVES the finished run's logs on disk afterward for inspection.
     _clear_output([n for n, _ in jobs])
 
-    for name, cell in jobs:
-        print()
-        log(f"=== {name} ===")
-        good, info = submit(name, cell["body"])
-        if not good:
-            log(f"  FAIL submit {name}: {info}")
-            continue
-        log("  submitted (paused before attack); deploying + configuring…")
-        reached = _await_status(name, "AwaitingAttack", args.poll_seconds)
-        if reached != "AwaitingAttack":
-            log(f"  {name} reached {reached} without pausing (deploy/configure failed?) — skipping launch")
-            continue
-        # Environment is fully provisioned+configured and holding at the gate. Show it.
-        list_servers(name, env_label=environment_name(cell["ecode"]))
-        if args.no_wait:
-            log("  --no-wait: leaving it paused at the gate (auto-launches after the manager's timeout).")
-            continue
-        if not ask_yes_no(f"Launch the attack on {name}?", default=True, assume_yes=args.yes):
-            log(f"  not launching {name}; left paused (auto-launches after the manager's gate timeout).")
-            continue
-        ok2, info2 = start_attack(name)
-        if not ok2:
-            log(f"  FAIL start-attack {name}: {info2}")
-            continue
-        log(f"  attack launched. Watch it live in another pane:  python3 {script} --follow-attacker")
-        log("  waiting for it to finish…")
-        _await_status(name, None, args.poll_seconds)   # returns when the run is terminal
+    # Ctrl-C during a run cancels + tears down whatever this script submitted (the experiment lives
+    # in the manager, so without this it would keep running after the script dies — see _cancel_submitted).
+    submitted = []
+    try:
+        for name, cell in jobs:
+            print()
+            log(f"=== {name} ===")
+            good, info = submit(name, cell["body"])
+            if not good:
+                log(f"  FAIL submit {name}: {info}")
+                continue
+            submitted.append(name)
+            log("  submitted (paused before attack); deploying + configuring…")
+            reached = _await_status(name, "AwaitingAttack", args.poll_seconds)
+            if reached != "AwaitingAttack":
+                log(f"  {name} reached {reached} without pausing (deploy/configure failed?) — skipping launch")
+                continue
+            # Environment is fully provisioned+configured and holding at the gate. Show it.
+            list_servers(name, env_label=environment_name(cell["ecode"]))
+            if args.no_wait:
+                log("  --no-wait: leaving it paused at the gate (auto-launches after the manager's timeout).")
+                continue
+            if not ask_yes_no(f"Launch the attack on {name}?", default=True, assume_yes=args.yes):
+                log(f"  not launching {name}; left paused (auto-launches after the manager's gate timeout).")
+                continue
+            ok2, info2 = start_attack(name)
+            if not ok2:
+                log(f"  FAIL start-attack {name}: {info2}")
+                continue
+            log(f"  attack launched. Watch it live in another pane:  python3 {script} --follow-attacker")
+            log("  waiting for it to finish…")
+            _await_status(name, None, args.poll_seconds)   # returns when the run is terminal
 
-    report(jobs, results_dir)
-    # NOTE: output is cleared at the START of the next run, not here — so the just-finished
-    # run's logs (attacker llm.log, defender perry_log.log, Falco/telemetry) stay on disk to
-    # inspect. The scored results also live in results_dir.
+        report(jobs, results_dir)
+        # NOTE: output is cleared at the START of the next run, not here — so the just-finished
+        # run's logs (attacker llm.log, defender perry_log.log, Falco/telemetry) stay on disk to
+        # inspect. The scored results also live in results_dir.
+    except KeyboardInterrupt:
+        print()
+        log("Interrupted (Ctrl-C) — cancelling + tearing down the experiment(s) this run submitted…")
+        _cancel_submitted(submitted)
+        sys.exit(130)
 
 
 def _clear_output(names):
