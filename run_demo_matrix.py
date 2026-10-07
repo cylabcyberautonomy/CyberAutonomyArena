@@ -412,6 +412,32 @@ def build_jobs():
     return jobs
 
 
+# --- Full display names (used in all printed output instead of the short codes) ---
+_DEFENDER_NAMES = {"llm_soc": "LLM SOC", "prompt_injection": "Prompt Injection",
+                   "deception": "Deception", "canary": "Canary"}
+
+
+def attacker_name(acode):
+    a = ATTACKERS.get(acode) or {}
+    spec = a.get("spec") or {}
+    if a.get("plugin") == "incalmo_llm":
+        return spec.get("planning_llm", acode)        # e.g. kimi-k3
+    if a.get("plugin") == "incalmo_strategy":
+        return spec.get("strategy", acode)            # e.g. GraphSearch
+    return a.get("plugin", acode)
+
+
+def environment_name(ecode):
+    return Path(ENVIRONMENTS[ecode]).stem if ecode in ENVIRONMENTS else ecode  # e.g. equifax_small_instrumented
+
+
+def defender_name(dcode):
+    d = DEFENDERS.get(dcode)
+    if d is None:
+        return "none"
+    return _DEFENDER_NAMES.get(d.get("type"), d.get("type", dcode))            # e.g. LLM SOC
+
+
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
@@ -650,16 +676,16 @@ def print_defender_tables(rows):
 
     att_codes = list(ATTACKERS)
     env_codes = list(ENVIRONMENTS)
-    lab_w = max(12, *(len(a) for a in att_codes))
-    col_w = max(9, *(len(e) for e in env_codes))
+    lab_w = max(14, *(len(attacker_name(a)) for a in att_codes))
+    col_w = max(11, *(len(environment_name(e)) + 1 for e in env_codes))
 
     print("\n" + "=" * 60)
     print("PERCENT OF DATA EXFILTRATED  (per defender; rows=attacker, cols=environment)")
     print("=" * 60)
     for dcode in DEFENDERS:
         tag = "  (no defender)" if DEFENDERS[dcode] is None else ""
-        print(f"\nDefender: {dcode}{tag}")
-        header = "attacker\\env".ljust(lab_w) + "".join(e.rjust(col_w) for e in env_codes)
+        print(f"\nDefender: {defender_name(dcode)}{tag}")
+        header = "attacker\\env".ljust(lab_w) + "".join(environment_name(e).rjust(col_w) for e in env_codes)
         print(header)
         print("-" * len(header))
         for ac in att_codes:
@@ -667,14 +693,18 @@ def print_defender_tables(rows):
             for ec in env_codes:
                 vals = acc.get((dcode, ac, ec))
                 cells.append((_fmt_pct(sum(vals) / len(vals)) if vals else "n/a").rjust(col_w))
-            print(ac.ljust(lab_w) + "".join(cells))
+            print(attacker_name(ac).ljust(lab_w) + "".join(cells))
     print()
 
 
 def print_table(rows):
     cols = ["name", "attacker", "environment", "defender", "trial",
             "status", "exfil_pct", "n_actions", "hosts_infected", "furthest_stage"]
-    disp = [{**r, "exfil_pct": _fmt_pct(r.get("exfil_pct"))} for r in rows]
+    disp = [{**r,
+             "attacker": attacker_name(r["attacker"]),
+             "environment": environment_name(r["environment"]),
+             "defender": defender_name(r["defender"]),
+             "exfil_pct": _fmt_pct(r.get("exfil_pct"))} for r in rows]
     widths = {c: max(len(c), *(len(str(r[c])) for r in disp)) for c in cols}
     line = "  ".join(c.ljust(widths[c]) for c in cols)
     print("\n" + line)
@@ -1109,8 +1139,8 @@ def main():
 
     if args.dry_run:
         for name, cell in jobs:
-            d = "none" if DEFENDERS[cell["dcode"]] is None else cell["dcode"]
-            log(f"  {name:<28} att={cell['acode']:<7} env={cell['ecode']:<6} def={d}")
+            log(f"  {name:<22} attacker={attacker_name(cell['acode'])}  "
+                f"environment={environment_name(cell['ecode'])}  defender={defender_name(cell['dcode'])}")
         return
     if args.setup:
         ensure_keys(force=True)
