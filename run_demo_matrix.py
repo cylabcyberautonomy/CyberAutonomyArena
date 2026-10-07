@@ -10,7 +10,9 @@ VMs (openstack/gcloud), and asks the ONE question —
 
     Launch the attack on <name>? [Y/n]
 
-— on your yes it fires start-attack, streams the attacker LLM log, and moves on.
+— on your yes it fires start-attack and waits for the run to finish. It does NOT
+stream the logs itself; attach to them from other panes with --follow-attacker /
+--follow-defender.
 
 The gate is a real, opt-in arena-lifecycle feature on this branch: a submit with
 `pause_before_attack: true` holds at the new `AwaitingAttack` status until
@@ -780,13 +782,16 @@ def _await_status(name, target, poll_seconds):
 def step_run(jobs, args, results_dir):
     """STEP 2 — 'run' with the NoHat deploy -> pause -> attack gate. For each cell:
     submit (paused) -> wait until the environment is deployed+configured (AwaitingAttack)
-    -> LIST the live VMs -> ask to launch -> start-attack -> stream the attacker -> next."""
+    -> LIST the live VMs -> ask to launch -> start-attack -> wait for it to finish.
+    The attacker/defender logs are NOT streamed here — attach to them from other panes
+    with --follow-attacker / --follow-defender."""
     log("running (deploy -> pause -> list VMs -> launch)")
     if not wait_for_api(max_seconds=60):
         log("manager not reachable; aborting run.")
         return
     script = Path(__file__).name
-    log(f"Tip — watch live in another terminal: python3 {script} --follow-defender  (and --follow-attacker)")
+    log(f"Tip — watch live in SEPARATE panes:  python3 {script} --follow-attacker   |   "
+        f"python3 {script} --follow-defender")
 
     for name, cell in jobs:
         print()
@@ -812,8 +817,9 @@ def step_run(jobs, args, results_dir):
         if not ok2:
             log(f"  FAIL start-attack {name}: {info2}")
             continue
-        log("  attack launched — streaming attacker log until it finishes:")
-        follow_logs("attacker", names=[name], poll_seconds=args.poll_seconds)
+        log(f"  attack launched. Watch it live in another pane:  python3 {script} --follow-attacker")
+        log("  waiting for it to finish…")
+        _await_status(name, None, args.poll_seconds)   # returns when the run is terminal
 
     report(jobs, results_dir)
     # Clear the per-experiment output so a re-run of the same name starts clean (no
