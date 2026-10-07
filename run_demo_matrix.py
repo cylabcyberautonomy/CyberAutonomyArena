@@ -163,13 +163,17 @@ ATTACKERS = {
     "k3": {"plugin": "incalmo_llm", "spec": {"planning_llm": "kimi-k3", "abstraction": "shell"}},
 }
 
-# --- Two environments --------------------------------------------------------
+# --- Environments ------------------------------------------------------------
 # short code -> arena environment_spec: a topology path RELATIVE TO mhbench_dir
 # (includes the environments/ prefix and the .json). Use *_instrumented topologies
 # when any cell has a defender (FalcoLLM needs the telemetry + the defender box;
 # the box lives in the arena MHBench checkout — see mhbench_dir note above).
 ENVIRONMENTS = {
-    "eqs":   "environments/instrumented/equifax_small_instrumented.json",
+    "ch4":   "environments/instrumented/chain_4hosts_instrumented.json",
+}
+# Optional pretty display names per env code (else the file name is auto-prettified).
+ENV_DISPLAY_NAMES = {
+    "ch4": "Chain (4 hosts)",
 }
 
 # --- Two defenders -----------------------------------------------------------
@@ -430,6 +434,8 @@ def attacker_name(acode):
 def environment_name(ecode):
     if ecode not in ENVIRONMENTS:
         return ecode
+    if ecode in ENV_DISPLAY_NAMES:                        # explicit override, e.g. "Chain (4 hosts)"
+        return ENV_DISPLAY_NAMES[ecode]
     stem = Path(ENVIRONMENTS[ecode]).stem                 # e.g. equifax_small_instrumented
     if stem.endswith("_instrumented"):
         stem = stem[: -len("_instrumented")]
