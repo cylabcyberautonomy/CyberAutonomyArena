@@ -1,7 +1,29 @@
+# Python
 **/__pycache__/
-__pycache__/
 *.pyc
-.venv/
-output/
 
+# Virtualenvs
+.venv/
+
+# Experiment output trees (base, plus per-backend / scratch: output_gcp, output_gcp_arena, ...)
+output/
+output_*/
+
+# Local configs — never committed. The base config.yaml plus every per-backend /
+# per-run variant (config.gcp.yaml, config.gcp.arena.yaml, config.openstack.arena.yaml, ...).
 config.yaml
+config.*.yaml
+
+# Runtime registry state (default experiment_registry.yaml + per-backend variants)
+experiment_registry*.yaml
+
+# Local ops artifacts: logs and editor/backup droppings
+*.log
+*.bak
+*.bak.*
+
+# Dashboard-written attacker spec files (submission-time artifacts)
+submitted_specs/
+
+# Offline scoring/analysis tools — parked locally, not shipped (for now!)
+/scoring/

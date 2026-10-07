@@ -1,0 +1,16 @@
+name: Custom.MHBench.KillProcess
+description: |
+  Active response: kill a process by PID on the endpoint (SIGKILL). Issued by the
+  defender runner when a kill-chain rule fires on that host.
+type: CLIENT
+parameters:
+  - name: Pid
+    type: int
+    description: PID to kill
+sources:
+  - query: |
+      SELECT Pid,
+             timestamp(epoch=now()) AS KilledAt,
+             stdout, stderr,
+             complete
+      FROM execve(argv=["kill", "-9", format(format="%d", args=Pid)])

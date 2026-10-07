@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Experiment Harness</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">Experiment Harness</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-panel="panel-experiments" role="tab">Experiments</button>
+      <button class="tab" data-panel="panel-submit" role="tab">Submit</button>
+      <button class="tab" data-panel="panel-usage" role="tab">API&nbsp;Usage</button>
+    </nav>
+    <div class="topbar-right">
+      <button id="theme-toggle" class="icon-btn" title="Toggle light / dark" aria-label="Toggle theme"></button>
+      <span id="conn-pill" class="pill pill-muted" title="Manager connection">
+        <span class="dot"></span><span id="conn-text">connecting…</span>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ───────────────────────── Experiments ───────────────────────── -->
+    <section id="panel-experiments" class="panel active" role="tabpanel">
+      <div id="statstrip" class="statstrip"></div>
+
+      <div class="toolbar">
+        <input id="exp-filter" class="filter-input" type="search"
+               placeholder="Filter by name, env, attacker, defender…" autocomplete="off">
+        <div id="status-filters" class="status-filters"></div>
+        <div class="toolbar-spacer"></div>
+        <span id="exp-meta" class="toolbar-meta"></span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="exp-table">
+          <thead>
+            <tr>
+              <th class="col-name" data-sort="experiment_name">Experiment</th>
+              <th class="col-status" data-sort="status">Status</th>
+              <th class="col-env" data-sort="environment_spec">Environment</th>
+              <th class="col-atk">Attacker</th>
+              <th class="col-def">Defender</th>
+              <th class="col-phases">Lifecycle</th>
+              <th class="col-time" data-sort="created_at">Created</th>
+              <th class="col-time" data-sort="updated_at">Updated</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="exp-rows"></tbody>
+        </table>
+        <div id="exp-empty" class="empty-state" hidden>No experiments match.</div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── Submit ───────────────────────── -->
+    <section id="panel-submit" class="panel" role="tabpanel">
+      <form id="submit-form" class="submit-grid">
+
+        <!-- Environments -->
+        <div class="card span-2">
+          <div class="card-head">
+            <h2>Environments</h2>
+            <span id="env-count" class="chip-count">0</span>
+          </div>
+          <div class="field-row">
+            <div class="form-group">
+              <label for="env-group-select">Group</label>
+              <select id="env-group-select"></select>
+            </div>
+            <div class="form-group grow">
+              <label>&nbsp;</label>
+              <div class="inline-btns">
+                <button type="button" id="env-select-all" class="btn btn-ghost">Select all in group</button>
+                <button type="button" id="env-clear" class="btn btn-ghost">Clear group</button>
+              </div>
+            </div>
+          </div>
+          <div id="env-grid" class="env-grid"></div>
+          <div class="selected-head">Selected</div>
+          <div id="env-chips" class="chips"></div>
+          <div id="env-chips-empty" class="chips-empty">No environments selected.</div>
+        </div>
+
+        <!-- Attackers -->
+        <div class="card">
+          <div class="card-head">
+            <h2>Attackers</h2>
+            <span id="atk-count" class="chip-count">0</span>
+          </div>
+          <div class="form-group">
+            <label for="atk-type-select">Type</label>
+            <select id="atk-type-select"></select>
+          </div>
+          <div id="atk-fields-container" class="fields-container"></div>
+          <button type="button" id="atk-add-btn" class="btn btn-accent">+ Add attacker config</button>
+          <div class="selected-head">Queued</div>
+          <div id="atk-chips" class="chips"></div>
+          <div id="atk-chips-empty" class="chips-empty">No attacker configs added.</div>
+        </div>
+
+        <!-- Defenders -->
+        <div class="card">
+          <div class="card-head">
+            <h2>Defenders</h2>
+            <span id="def-count" class="chip-count">0</span>
+          </div>
+          <div class="form-group">
+            <label for="def-type-select">Type</label>
+            <select id="def-type-select"></select>
+          </div>
+          <div id="def-fields-container" class="fields-container"></div>
+          <div class="inline-btns">
+            <button type="button" id="def-add-btn" class="btn btn-accent">+ Add defender config</button>
+            <button type="button" id="def-add-none-btn" class="btn btn-ghost">+ No defender</button>
+          </div>
+          <div class="selected-head">Queued</div>
+          <div id="def-chips" class="chips"></div>
+          <div id="def-chips-empty" class="chips-empty">No defender configs added.</div>
+        </div>
+
+        <!-- Run options + submit -->
+        <div class="card span-2 run-card">
+          <div class="card-head"><h2>Run</h2></div>
+          <div class="field-row">
+            <div class="form-group">
+              <label for="name-prefix">Name prefix</label>
+              <input id="name-prefix" type="text" placeholder="e.g. val" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="repeats">Repeats (trials)</label>
+              <input id="repeats" type="number" min="1" value="1">
+            </div>
+            <div class="form-group grow run-summary-group">
+              <label>Batch size</label>
+              <div id="combo-count" class="combo-count">0 experiments</div>
+            </div>
+            <div class="form-group run-submit-group">
+              <label>&nbsp;</label>
+              <button type="submit" class="btn btn-primary btn-lg">Submit batch</button>
+            </div>
+          </div>
+          <div id="results-box" class="results-box" hidden></div>
+        </div>
+      </form>
+    </section>
+
+    <!-- ───────────────────────── API Usage ───────────────────────── -->
+    <section id="panel-usage" class="panel" role="tabpanel">
+      <div id="usage-root" class="usage-grid"></div>
+    </section>
+  </main>
+
+  <!-- ───────────────────────── Log viewer overlay ───────────────────────── -->
+  <div id="log-overlay" class="overlay" hidden>
+    <div class="overlay-card">
+      <div class="overlay-head">
+        <div class="overlay-title">
+          <span id="log-exp-name" class="mono"></span>
+        </div>
+        <label class="live-toggle">
+          <input type="checkbox" id="log-autorefresh" checked> Live
+        </label>
+        <button id="log-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div class="overlay-body">
+        <aside id="log-file-list" class="log-file-list"></aside>
+        <pre id="log-content" class="log-content"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

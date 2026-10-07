@@ -1,4 +1,4 @@
-# Experiment Harness
+# CyberAutonomy Arena
 
 A dashboard and backend for running attacker/defender experiments across network environments.
 
@@ -6,7 +6,7 @@ A dashboard and backend for running attacker/defender experiments across network
 
 ```
 dashboard.py          — browser UI (port 8080 by default)
-experiment_manager/   — FastAPI backend (port 8000)
+arena/   — FastAPI backend (port 8000)
   main.py             — orchestrates experiment lifecycle
   config.py           — loads config.yaml
   attacker/plugins/   — attacker plugin implementations
@@ -24,16 +24,22 @@ The dashboard is a thin proxy: it reads `experiment_registry.yaml` for the live 
 **1. Install dependencies**
 
 ```bash
-cd experiment_harness
+cd cyberautonomy-arena
 uv sync
 ```
 
-**2. Edit `config.yaml`** (see [Config reference](#config-reference) below)
+**2. Create `config.yaml`** from the template, then edit the paths and `arena_host_ip`:
+
+```bash
+cp example_config.yaml config.yaml
+```
+
+[`example_config.yaml`](example_config.yaml) documents every field with its default; the [Config reference](#config-reference) below summarizes the common ones.
 
 **3. Start the experiment manager** (backend)
 
 ```bash
-uv run uvicorn experiment_manager.main:app --port 8000
+uv run uvicorn arena.main:app --port 8000
 ```
 
 On startup the manager tears down any leftover OpenStack resources and clears the registry, so start it before submitting anything.
@@ -48,20 +54,56 @@ Open `http://localhost:8080` in a browser.
 
 ---
 
+## Submitting an experiment (API)
+
+An experiment is submitted as a JSON body `POST`ed to the manager's `/experiments` endpoint (this is what
+the dashboard's Submit tab builds for you). [`example_experiment.json`](example_experiment.json) is a
+ready-to-edit template:
+
+```bash
+curl -X POST http://localhost:8000/experiments \
+     -H 'Content-Type: application/json' \
+     --data @example_experiment.json
+```
+
+The body pairs the four pluggable systems (see [`CLAUDE.md`](CLAUDE.md) for the plugin model):
+
+| Field | Required | What it is |
+|-------|----------|------------|
+| `experiment_name` | yes | Unique name; also the output-dir name. Re-submitting an existing name needs `overwrite: true`. |
+| `environment` | yes | `{environment_plugin, environment_spec}` — `environment_plugin` names a registered env plugin (`mhbench`); `environment_spec` is a topology path **relative to `mhbench_dir`** (e.g. `environments/instrumented/equifax_small_instrumented.json`). |
+| `attacker_plugin` + `attacker_spec` | yes | The attacker as a `(plugin, spec)` pair. `attacker_spec` is that plugin's fields — an inline object (as here) **or** a path to a JSON/YAML file. |
+| `defender` | no | Embedded `{type, ...}`; `type` names a registered defender (`llm_soc`, `deception`, `prompt_injection`, `velociraptor`, `canary`) and the rest are its fields. Omit for an undefended run. A defender needs an `*_instrumented` topology (it requires a defender box). |
+| `traffic` | no | Embedded `{type, ...}` benign background traffic (`caldera_human`). Omit for none. |
+| `trial`, `priority`, `teardown`, `overwrite`, `output_dir` | no | Scheduling / run options (`priority` higher = admitted sooner; `teardown: false` leaves the env standing; `overwrite: true` cancels+replaces a same-named run). |
+
+Each selected plugin must have its code path set in `config.yaml` (see the Config reference below) — e.g.
+the example above needs `incalmo_strategy_dir` (attacker) and `llm_soc_dir` (defender).
+
+---
+
 ## Config reference
 
-`config.yaml` is loaded once at startup by the experiment manager. The dashboard also reads a subset of it to find environment specs.
+`config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).
 
-**Repo paths** — point these at the relevant codebases on your machine:
+**Per-plugin code paths** — most plugins shell out to an external codebase (its own checkout + venv) that
+the arena does not vendor, so you point the arena at it here. There is **one `*_dir` per plugin** (plus an
+optional `*_python` override, defaulting to `<its_dir>/.venv/bin/python`). **Set only the paths for the
+plugins you plan to use.** Redundancy is intentional: plugins that share a repo each name it, so no single
+field silently backs several.
 
-| Key | What it points at |
-|---|---|
-| `incalmo_dir` | Incalmo repo (attacker framework) |
-| `incalmo_python` | Python interpreter for Incalmo. Defaults to `<incalmo_dir>/.venv/bin/python` if omitted. |
-| `mhbench_dir` | MHBench repo. Environment specs are resolved as `<mhbench_dir>/environments/<spec>.json`. |
-| `deception_dir` | Deception/defender repo |
-| `deception_python` | Python interpreter for the defender. Defaults to `<deception_dir>/.venv/bin/python` if omitted. |
-| `host_ip` | The host machine's IP address, passed to defender plugins as `management_ip`. |
+| Key | Needed by | What it points at |
+|---|---|---|
+| `mhbench_dir` | **always** (the environment backend) | MHBench repo. Env specs resolve as `<mhbench_dir>/environments/<spec>.json`; also holds the scoped keys. A **defender** run needs the `arena-live-provisioning` branch (defender_subnet box + request-ingress CLI). |
+| `mhbench_config` | GCP runs | MHBench `--config` (relative to `mhbench_dir`), e.g. `config/config.gcp.yaml`. Unset = MHBench's OpenStack default. |
+| `incalmo_strategy_dir` (+`_python`) | `incalmo_strategy` attacker | Incalmo repo. |
+| `incalmo_llm_dir` (+`_python`) | `incalmo_llm` attacker | Incalmo repo (same checkout as above; named per plugin). |
+| `sliver_llm_dir` (+`_python`) | `sliver_llm` attacker | Sliver venv/checkout. Defaults to `<output_dir>/.sliver`. |
+| `llm_soc_dir` (+`_python`) | `llm_soc` defender | Defense/Perry repo. |
+| `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
+| `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |
+| `velociraptor_dir` | `velociraptor` defender | Velociraptor repo (holds `bin/velociraptor`; a Go binary, no venv). |
+| `arena_host_ip` | defenders | The arena/manager host's own IP (as seen from the deployed VMs), passed to defenders as `management_ip` for self-protection. **Not** the per-experiment bastion. |
 
 **Tunable parameters** — adjust these to control how the harness runs experiments:
 
@@ -132,10 +174,10 @@ Each plugin must implement `ui_schema()`, which declares what configuration opti
 
 ### Attacker plugin
 
-Create a new package under `experiment_manager/attacker/plugins/<your_plugin>/`:
+Create a new package under `arena/attacker/plugins/<your_plugin>/`:
 
 ```
-experiment_manager/attacker/plugins/
+arena/attacker/plugins/
   my_attacker/
     __init__.py      ← leave empty or re-export the class
     my_attacker.py   ← plugin implementation
@@ -205,15 +247,15 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
 Key points:
 
 - `config_type="my_attacker"` in the class declaration registers it. The same string must appear as `type` in `ui_schema()` and as the `type` literal.
-- If your attacker needs a C2 server, override `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c`. See the existing `_IncalmoAttacker` base class for a reference implementation.
+- If your attacker needs a C2 server, override `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c` (and `sweep_stale_state` to reap stale tunnels on clean-slate). See the `IncalmoStrategyAttacker` plugin (`arena/attacker/plugins/incalmo_strategy/`) for a reference implementation.
 - `run()` must return an `asyncio.subprocess.Process`. The manager waits for it to exit; exit code 0 → Finished, anything else → Error.
 
 ### Defender plugin
 
-Create a new package under `experiment_manager/defender/plugins/<your_plugin>/`:
+Create a new package under `arena/defender/plugins/<your_plugin>/`:
 
 ```
-experiment_manager/defender/plugins/
+arena/defender/plugins/
   my_defender/
     __init__.py
     my_defender.py
@@ -319,62 +361,3 @@ After collection, the harness also fetches each host's ground-truth logs into
 `/etc/passwd`+`/etc/group` id maps, and the `auditctl-rules.txt` / `auditctl-status.txt`
 sensor-state dumps).
 
----
-
-## Detections
-
-The collected auditd logs can be scored against the Sigma Linux ruleset to produce MITRE
-ATT&CK-mapped detections, via [Zircolite](https://github.com/wagga40/Zircolite) (which runs
-Sigma directly over raw auditd `.log` files — no SIEM required).
-
-**One-time setup** (the tool prints these exact commands if Zircolite is missing):
-
-```bash
-git clone --depth 1 https://github.com/wagga40/Zircolite.git ~/Zircolite
-cd ~/Zircolite && uv venv .venv && uv pip install -p .venv/bin/python -r requirements.txt
-```
-
-Point `zircolite_dir` in `config.yaml` at the checkout (defaults to `~/Zircolite`).
-
-**Run:**
-
-```bash
-uv run python detect.py <experiment_name>   # one experiment
-uv run python detect.py --all               # every experiment with collected logs
-```
-
-Output lands under `output/<experiment_name>/detections/`:
-
-```
-detections/
-  <host>.json            ← raw Zircolite detections for that host
-  <host>.zircolite.log   ← Zircolite run log
-  summary.json           ← per-host + per-rule + ATT&CK rollup (machine-readable)
-  summary.md             ← the same, human-readable
-```
-
-`summary.md` gives a per-host hit table, every Sigma rule that fired (with level and which hosts),
-and a MITRE ATT&CK technique tally ranked by matched events.
-
-**Rulesets.** Two are applied together: the stock SigmaHQ Linux ruleset (`rules_linux.json`,
-process-execution/discovery heavy) and a set of **custom Sigma rules** in
-`experiment_manager/detection/sigma_rules/` that cover MHBench's high-value auditd keys the stock
-ruleset misses — credential access (`/etc/shadow`, root SSH key), fileless execution
-(`memfd_create`), timestomping, failed-connect lateral-movement probes, eBPF/kernel-module loads,
-and failed privilege changes. These are portable Sigma (convertible to Splunk/Elastic/Sentinel),
-not Zircolite-specific. Each rule excludes the known-good system daemons (systemd, sshd,
-unix_chkpwd, splunkd, snapd…) so it fires on genuine misuse rather than benign telemetry — a raw
-auditd key alone is telemetry, not a detection.
-
-**Attack-window scoping.** Provisioning and teardown run the same benign commands (`uname`,
-key installs, service starts) on *every* host, which low-fidelity Sigma discovery rules flag as
-false positives. To avoid this, each host's auditd log is filtered to the attacker's run window
-(`attacker.started_at`…`finished_at` from `experiment/experiment_result.json`) before scoring, so
-only activity during the actual attack is counted. `summary.md` states which mode was used and,
-per host, how many audit lines fell inside the window. If the attacker timestamps are missing the
-runner falls back to scoring the full log (and says so) rather than dropping data silently.
-
-**Interpreting a non-hit:** a rule not firing has three possible causes — the attacker didn't do
-it, the audit rule never loaded, or the event was dropped. Cross-check the host's
-`environment/<host>/auditctl-rules.txt` (was the relevant rule loaded?) and `auditctl-status.txt`
-(was the `lost` count non-zero?) before treating a non-hit as a true negative.

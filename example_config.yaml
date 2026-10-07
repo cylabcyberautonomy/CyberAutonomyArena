@@ -1,0 +1,94 @@
+# Example arena config. Copy this to config.yaml and edit the paths + arena_host_ip:
+#
+#   cp example_config.yaml config.yaml
+#
+# The arena loads ./config.yaml by default. A second manager can point at a different
+# file via the EXPERIMENT_MANAGER_CONFIG env var, so it can run a non-default backend
+# without its startup clean-slate wiping the shared cloud.
+#
+# Only the two fields under "Required" must be set; every other field below is shown
+# with its default (commented out = that default is used). Per-plugin code paths are
+# all optional — set the ones for the plugins you actually run.
+
+# ---- Required ----------------------------------------------------------------
+
+# Local checkout of MHBench — the environment backend that deploys the victim topology (always required).
+mhbench_dir: /path/to/MHBench
+
+# The arena/manager host's own IP — the machine running the arena, as seen from the deployed
+# environment. NOT the per-experiment bastion (that one is ephemeral, assigned at provisioning).
+# Its one use: handed to the defender (as its config's management_ip) so the defender's
+# self-protection never acts against the harness host. (The telemetry relay + fallback
+# defender-box location is gcp_relay_ip, not this.)
+arena_host_ip: 10.0.0.1
+
+# ---- Per-plugin code paths ---------------------------------------------------
+# One *_dir per plugin that shells out to an external checkout — SET ONLY THE ONES FOR THE PLUGINS YOU
+# RUN (each fails fast if its plugin is selected while unset). Each takes an optional *_python override,
+# defaulting to <its_dir>/.venv/bin/python. Redundancy is intentional: plugins that share a repo each name
+# it (the two incalmo attackers -> the Incalmo repo; the three defenders -> the Defense/Perry repo).
+#
+# Attackers:
+# incalmo_strategy_dir:    /path/to/Incalmo
+# incalmo_strategy_python: /path/to/Incalmo/.venv/bin/python
+# incalmo_llm_dir:         /path/to/Incalmo
+# incalmo_llm_python:      /path/to/Incalmo/.venv/bin/python
+# sliver_llm_dir:          /path/to/sliver     # defaults to <output_dir>/.sliver, built on first use
+# sliver_llm_python:       /path/to/sliver/.venv/bin/python
+#
+# Defenders (llm_soc / deception / prompt_injection all live in the Defense/Perry repo):
+# llm_soc_dir:             /path/to/Defense-MHBench-compatible
+# llm_soc_python:          /path/to/Defense-MHBench-compatible/.venv/bin/python
+# deception_dir:           /path/to/Defense-MHBench-compatible
+# deception_python:        /path/to/Defense-MHBench-compatible/.venv/bin/python
+# prompt_injection_dir:    /path/to/Defense-MHBench-compatible
+# prompt_injection_python: /path/to/Defense-MHBench-compatible/.venv/bin/python
+# velociraptor_dir:        /path/to/velociraptor   # velociraptor defender; expects bin/velociraptor (Go binary, no venv)
+#
+# NOTE: a defender run also requires MHBench on the arena-live-provisioning branch (it supplies the
+# isolated defender_subnet box + the request-ingress CLI the arena calls). Pointing mhbench_dir at a
+# branch without those fails every defender run with "environment provides no defender box."
+
+# ---- Output / state ----------------------------------------------------------
+# output_dir:    output                     # per-experiment logs & results
+# registry_path: experiment_registry.yaml   # live state of all experiments
+
+# ---- Environment-backend (MHBench) settings ----------------------------------
+# How the MHBench ENVIRONMENT plugin deploys (which cloud, MHBench --config, relay IP). These are
+# env-layer settings, NOT arena behavior, so they live in their own `env_backend:` section that only the
+# environment plugin reads — the arena + defender are backend-neutral. (The deprecated flat top-level
+# forms — os_cloud:/cloud_backend:/... — are still accepted and migrated here for back-compat, but prefer
+# this section.)
+env_backend:
+  os_cloud: openstack          # the clouds.yaml entry name to authenticate with
+  cloud_backend: openstack     # "openstack" (default) or "gcp"
+  # mhbench_config: config/config.gcp.yaml   # passed to MHBench as --config (relative to mhbench_dir); set for gcp
+  # gcp_relay_ip: 10.0.1.10                  # internal mgmt-host IP on the victim-reachable CIDR (telemetry relay + defender-box fallback)
+  # gcp_flavor_cpu_cost:                     # MHBench flavor -> GCP CPUS_ALL_REGIONS cost; feeds max_active_cpus below
+  #   m1.small: 1    # -> e2-small
+  #   m2.large: 8    # -> e2-standard-8
+
+# ---- Concurrency / admission -------------------------------------------------
+# Defaults bound cluster network load (routers / FIPs / L3) that the vCPU tracker
+# does not model. Loosen only if your fabric can take it.
+max_concurrent_openstack_ops: 3    # concurrent provision + teardown (compute-heavy)
+max_concurrent_configures: 5       # concurrent ansible configure (light)
+max_concurrent_collects: 2         # concurrent post-run host-log collect
+max_concurrent_attacker_setups: 2  # concurrent C2-attacker bring-up
+max_active_experiments: 25         # hard cap on concurrently active experiments
+max_deployed: 10                   # cap experiments in the deploy stage (back-pressure)
+max_retries: 3
+# max_active_vms: 100              # optional cap on total VMs across active experiments
+
+# ---- GCP-only capacity (leave unset for OpenStack) ---------------------------
+# On GCP the binding quota is the GLOBAL CPUS_ALL_REGIONS, which a VM count can't model.
+# max_active_cpus: 80          # CPU-budget admission cap, sized to the GCP CPUS_ALL_REGIONS quota
+# (the per-flavor CPU cost it uses is env_backend.gcp_flavor_cpu_cost, above)
+
+# ---- Timeouts ----------------------------------------------------------------
+# attacker_timeout_seconds: 2700        # real wall-clock cap on the attacker (scored TimedOut); unset = no cap
+# experiment_timeout_seconds: 7200      # overall cap on the WHOLE run (provision -> ... -> teardown); unset = no cap.
+#                                       # Safety backstop for a total hang: aborts + tears down (ExperimentTimedOut),
+#                                       # distinct from attacker_timeout_seconds (which is a scored attacker cap).
+defender_ready_timeout_seconds: 1800    # max time for a defender to finish arming
+# ansible_verbosity: 0                  # 0-4 (-vvvv); also reads $ANSIBLE_VERBOSITY

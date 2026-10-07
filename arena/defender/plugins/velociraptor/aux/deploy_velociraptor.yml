@@ -1,0 +1,117 @@
+---
+# Velociraptor EDR deployment. Server on the DEFENDER BOX, clients on the victims.
+# velo_action selects the phase: install | stop.
+#
+# Server block runs on the defender box (velo_server group), reached via the bastion ProxyCommand.
+# Client block runs on the victims (velo_clients group), reached via the bastion
+# ProxyCommand. The binary is shipped from the harness (velo_binary) — no apt/download
+# on the range. The API user is created BEFORE the frontend starts, because a running
+# frontend caches users in memory and won't pick up a later `user add`.
+
+- name: Velociraptor server (defender box)
+  hosts: velo_server
+  gather_facts: false
+  become: true
+  tasks:
+    - name: make install dirs
+      when: velo_action == 'install'
+      file: { path: "{{ item }}", state: directory, mode: "0755" }
+      loop:
+        - "{{ velo_install_dir }}"
+        - "{{ velo_install_dir }}/datastore"
+        - "{{ velo_install_dir }}/artifacts"
+
+    - name: ship binary
+      when: velo_action == 'install'
+      copy: { src: "{{ velo_binary }}", dest: "{{ velo_install_dir }}/velociraptor", mode: "0755" }
+
+    - name: ship server + api configs
+      when: velo_action == 'install'
+      copy: { src: "{{ item.src }}", dest: "{{ item.dest }}", mode: "0600" }
+      loop:
+        - { src: "{{ velo_server_yaml }}", dest: "{{ velo_install_dir }}/server.yaml" }
+        - { src: "{{ velo_api_yaml }}", dest: "{{ velo_install_dir }}/api.yaml" }
+
+    - name: ship custom kill-chain artifacts
+      when: velo_action == 'install'
+      copy: { src: "{{ velo_artifacts_dir }}/", dest: "{{ velo_install_dir }}/artifacts/", mode: "0644" }
+
+    - name: create the API user IN THE DATASTORE (must precede the frontend)
+      when: velo_action == 'install'
+      command:
+        cmd: "{{ velo_install_dir }}/velociraptor --config {{ velo_install_dir }}/server.yaml user add --role administrator {{ velo_api_user }} {{ velo_api_password }}"
+      changed_when: true
+
+    - name: install frontend systemd unit
+      when: velo_action == 'install'
+      copy:
+        dest: /etc/systemd/system/velociraptor-server.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Velociraptor server (frontend) for MHBench defender
+          After=network.target
+          [Service]
+          Type=simple
+          WorkingDirectory={{ velo_install_dir }}
+          ExecStart={{ velo_install_dir }}/velociraptor --config {{ velo_install_dir }}/server.yaml frontend --definitions {{ velo_install_dir }}/artifacts
+          Restart=on-failure
+          LimitNOFILE=65536
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: start frontend
+      when: velo_action == 'install'
+      systemd: { name: velociraptor-server.service, state: started, enabled: true, daemon_reload: true }
+
+    - name: wait for the frontend to accept clients
+      when: velo_action == 'install'
+      wait_for: { port: 8000, host: 127.0.0.1, timeout: 60 }
+
+    - name: stop frontend
+      when: velo_action == 'stop'
+      systemd: { name: velociraptor-server.service, state: stopped }
+      failed_when: false
+
+- name: Velociraptor clients (victims)
+  hosts: velo_clients
+  gather_facts: false
+  become: true
+  tasks:
+    - name: make install dir
+      when: velo_action == 'install'
+      file: { path: "{{ velo_install_dir }}", state: directory, mode: "0755" }
+
+    - name: ship binary
+      when: velo_action == 'install'
+      copy: { src: "{{ velo_binary }}", dest: "{{ velo_install_dir }}/velociraptor", mode: "0755" }
+
+    - name: ship client config
+      when: velo_action == 'install'
+      copy: { src: "{{ velo_client_yaml }}", dest: "{{ velo_install_dir }}/client.yaml", mode: "0600" }
+
+    - name: install client systemd unit
+      when: velo_action == 'install'
+      copy:
+        dest: /etc/systemd/system/velociraptor-client.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Velociraptor client for MHBench defender
+          After=network.target
+          [Service]
+          Type=simple
+          WorkingDirectory={{ velo_install_dir }}
+          ExecStart={{ velo_install_dir }}/velociraptor --config {{ velo_install_dir }}/client.yaml client
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: start client (enrolls to the server)
+      when: velo_action == 'install'
+      systemd: { name: velociraptor-client.service, state: started, enabled: true, daemon_reload: true }
+
+    - name: stop client
+      when: velo_action == 'stop'
+      systemd: { name: velociraptor-client.service, state: stopped }
+      failed_when: false

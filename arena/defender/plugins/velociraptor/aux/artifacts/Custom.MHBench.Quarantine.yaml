@@ -1,0 +1,25 @@
+name: Custom.MHBench.Quarantine
+description: |
+  Active response: network-isolate the endpoint while keeping the Velociraptor
+  server reachable, so the defender retains visibility/control of a quarantined
+  host. Drops all new traffic except established flows and the server IP.
+
+  Deliberately conservative and reversible (Custom.MHBench.Unquarantine restores).
+  iptables only (no nft dependency); assumes iptables is present on the Ubuntu base
+  image. Live-validate the exact chain before relying on it in scoring.
+type: CLIENT
+parameters:
+  - name: ServerIP
+    type: str
+    description: Velociraptor server (bastion) IP to keep reachable
+sources:
+  - query: |
+      SELECT * FROM chain(
+        a={ SELECT * FROM execve(argv=["iptables", "-P", "OUTPUT", "DROP"]) },
+        b={ SELECT * FROM execve(argv=["iptables", "-P", "INPUT", "DROP"]) },
+        c={ SELECT * FROM execve(argv=["iptables", "-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"]) },
+        d={ SELECT * FROM execve(argv=["iptables", "-A", "INPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"]) },
+        e={ SELECT * FROM execve(argv=["iptables", "-A", "OUTPUT", "-d", ServerIP, "-j", "ACCEPT"]) },
+        f={ SELECT * FROM execve(argv=["iptables", "-A", "INPUT", "-s", ServerIP, "-j", "ACCEPT"]) },
+        g={ SELECT * FROM execve(argv=["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"]) }
+      )
