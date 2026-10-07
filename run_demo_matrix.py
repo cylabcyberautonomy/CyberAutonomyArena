@@ -766,14 +766,47 @@ def start_attack(name):
         return False, str(e)[:160]
 
 
+def _phase_label(rec):
+    """A human phase label from the full experiment record. The top-level status stays
+    'Configured' while the ATTACKER C2 and DEFENDER are set up — those show up only in
+    the attacker_status/defender_status sub-states, so surface them explicitly."""
+    st = rec.get("status")
+    a = rec.get("attacker_status")      # SetupStarted / Ready / Running / ...
+    d = rec.get("defender_status")
+    if st in ("Deploying", "Deployed"):
+        return f"{st} — provisioning the environment VMs"
+    if st == "Configuring":
+        return "Configuring — running ansible on the environment hosts"
+    if st == "Retrying":
+        return "Retrying — a previous attempt failed; redeploying"
+    if st == "Configured":
+        # Environment is configured; this window is attacker C2 setup + defender arming.
+        parts = []
+        if a:
+            parts.append(f"attacker C2 setup={a}")
+        if d:
+            parts.append(f"defender arming={d}")
+        if parts:
+            return "Setting up attacker + defender (" + ", ".join(parts) + ")"
+        return "Configured — environment ready; setting up attacker C2 + defender"
+    if st == "AwaitingAttack":
+        return "AwaitingAttack — environment deployed + attacker/defender armed; paused before the attack"
+    if st == "Running":
+        return "Running — the attack is in progress"
+    return st or "unknown"
+
+
 def _await_status(name, target, poll_seconds):
-    """Block until experiment `name` reaches `target` (or any terminal status). Returns the status reached."""
+    """Block until experiment `name` reaches `target` (or any terminal status), printing a
+    descriptive phase label on each change. Returns the status reached."""
     last = None
     while True:
-        st = (statuses() or {}).get(name) or _status_from_disk(name) or "unknown"
-        if st != last:
-            log(f"  [{name}] {st}")
-            last = st
+        rec = _exp_record(name)
+        st = (rec.get("status") if rec else None) or _status_from_disk(name) or "unknown"
+        label = _phase_label(rec) if rec else st
+        if label != last:
+            log(f"  [{name}] {label}")
+            last = label
         if st == target or st in TERMINAL:
             return st
         time.sleep(poll_seconds)
