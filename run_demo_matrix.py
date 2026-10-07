@@ -428,7 +428,12 @@ def attacker_name(acode):
 
 
 def environment_name(ecode):
-    return Path(ENVIRONMENTS[ecode]).stem if ecode in ENVIRONMENTS else ecode  # e.g. equifax_small_instrumented
+    if ecode not in ENVIRONMENTS:
+        return ecode
+    stem = Path(ENVIRONMENTS[ecode]).stem                 # e.g. equifax_small_instrumented
+    if stem.endswith("_instrumented"):
+        stem = stem[: -len("_instrumented")]
+    return stem.replace("_", " ").title()                 # e.g. "Equifax Small"
 
 
 def defender_name(dcode):
@@ -869,7 +874,7 @@ def step_run(jobs, args, results_dir):
             log(f"  {name} reached {reached} without pausing (deploy/configure failed?) — skipping launch")
             continue
         # Environment is fully provisioned+configured and holding at the gate. Show it.
-        list_servers(name, env_label=Path(ENVIRONMENTS[cell["ecode"]]).stem)
+        list_servers(name, env_label=environment_name(cell["ecode"]))
         if args.no_wait:
             log("  --no-wait: leaving it paused at the gate (auto-launches after the manager's timeout).")
             continue
