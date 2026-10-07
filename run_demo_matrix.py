@@ -956,6 +956,57 @@ def _tail_until(path, stop_fn, status_fn):
                 time.sleep(0.4)
 
 
+def _tail_many(labeled_paths, stop_fn, status_fn):
+    """Interleave appended lines from several files, each prefixed with its label.
+    `labeled_paths` is a list of (Path, label). Files that don't exist yet are picked
+    up when they appear. Streams until stop_fn() is true and all files are drained."""
+    handles = {}                                    # Path -> open file object
+    bufs = {p: "" for p, _ in labeled_paths}        # per-file partial-line buffer
+    label_of = {p: lab for p, lab in labeled_paths}
+    last_status = None
+
+    def _emit(path, data, final=False):
+        bufs[path] += data
+        parts = bufs[path].split("\n")
+        bufs[path] = "" if final else parts.pop()   # keep trailing partial unless final
+        wrote = False
+        for line in parts:
+            if not line:                             # skip blank lines (incl. trailing on drain)
+                continue
+            sys.stdout.write(f"{label_of[path]} {line}\n")
+            wrote = True
+        return wrote
+
+    while True:
+        for path, _ in labeled_paths:
+            if path not in handles and path.exists():
+                handles[path] = path.open("r", errors="replace")
+        if not handles:
+            if stop_fn():
+                return
+            s = status_fn()
+            if s != last_status:
+                log(f"    (waiting for {', '.join(p.name for p, _ in labeled_paths)} — status: {s})")
+                last_status = s
+            time.sleep(1.0)
+            continue
+        wrote = False
+        for path, fh in handles.items():
+            data = fh.read()
+            if data:
+                wrote = _emit(path, data) or wrote
+        if wrote:
+            sys.stdout.flush()
+        elif stop_fn():
+            for path, fh in handles.items():
+                _emit(path, fh.read(), final=True)
+                fh.close()
+            sys.stdout.flush()
+            return
+        else:
+            time.sleep(0.4)
+
+
 def follow_logs(which, names=None, poll_seconds=10):
     """Live-stream the <which> ('attacker'|'defender') log, following the active
     experiment on the targeted manager (API_URL / OUTPUT_ROOT).
@@ -976,7 +1027,8 @@ def follow_logs(which, names=None, poll_seconds=10):
         log(f"manager not reachable at {API_URL} — start the run (or the manager) first.")
         return
 
-    label = "attacker LLM transcript" if which == "attacker" else "defender log"
+    label = ("attacker LLM transcript" if which == "attacker"
+             else "defender log + SOC investigation")
     log(f"streaming {label} from {API_URL}; following the active experiment (Ctrl-C to stop)…")
     seen_terminal = set()
     while True:
@@ -996,12 +1048,19 @@ def follow_logs(which, names=None, poll_seconds=10):
             while status_map().get(cur) not in TERMINAL:
                 time.sleep(poll_seconds)
             continue
-        sub = _attacker_subpath_for(rec) if which == "attacker" else "defender/defender.log"
-        path = OUTPUT_ROOT / cur / sub
-        print(f"\n{'=' * 70}\n>>> {label}: {cur}  ({sub})\n{'=' * 70}", flush=True)
-        _tail_until(path,
-                    stop_fn=lambda c=cur: status_map().get(c) in TERMINAL,
-                    status_fn=lambda c=cur: status_map().get(c, "?"))
+        stop = lambda c=cur: status_map().get(c) in TERMINAL
+        stat = lambda c=cur: status_map().get(c, "?")
+        if which == "attacker":
+            sub = _attacker_subpath_for(rec)
+            print(f"\n{'=' * 70}\n>>> {label}: {cur}  ({sub})\n{'=' * 70}", flush=True)
+            _tail_until(OUTPUT_ROOT / cur / sub, stop_fn=stop, status_fn=stat)
+        else:
+            # Defender: stream BOTH the defender runtime log (defender.log) and the FalcoLLM
+            # SOC investigation transcript (perry_log.log), interleaved and labelled.
+            files = [(OUTPUT_ROOT / cur / "defender" / "defender.log", "[defender]"),
+                     (OUTPUT_ROOT / cur / "defender" / "perry_log.log", "[soc]")]
+            print(f"\n{'=' * 70}\n>>> {label}: {cur}  (defender.log + perry_log.log)\n{'=' * 70}", flush=True)
+            _tail_many(files, stop_fn=stop, status_fn=stat)
     log(f"{label} stream ended.")
 
 
