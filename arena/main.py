@@ -826,27 +826,6 @@ async def _run_experiment(experiment: Experiment) -> None:
             )
             return
 
-    # NoHat demo: optional deploy -> pause -> attack gate. When pause_before_attack is set, hold HERE with
-    # the whole environment provisioned+configured (env hosts + defender box + attacker foothold all up) and
-    # do NO attacker/defender work until POST /experiments/{name}/start-attack fires. Lets a demo list the
-    # live VMs and decide when to launch. Opt-in: default (flag off) leaves the lifecycle untouched.
-    if getattr(experiment, "_pause_before_attack", False):
-        experiment._start_attack_event = asyncio.Event()
-        experiment.status = ExperimentStatus.AWAITING_ATTACK
-        await registry.update(experiment)
-        exp_log.info("pause_before_attack: holding '%s' at AwaitingAttack; POST /experiments/%s/start-attack "
-                     "to launch (auto-launch after %ds)", experiment.experiment_name,
-                     experiment.experiment_name, _PAUSE_BEFORE_ATTACK_TIMEOUT)
-        try:
-            await asyncio.wait_for(experiment._start_attack_event.wait(),
-                                   timeout=_PAUSE_BEFORE_ATTACK_TIMEOUT)
-            exp_log.info("start-attack received for '%s' — launching", experiment.experiment_name)
-        except asyncio.TimeoutError:
-            exp_log.warning("pause_before_attack timed out after %ds for '%s' — launching anyway",
-                            _PAUSE_BEFORE_ATTACK_TIMEOUT, experiment.experiment_name)
-        experiment.status = ExperimentStatus.CONFIGURED
-        await registry.update(experiment)
-
     # Attacker setup on the ready (attacker-neutral) env: bring up any C2, run the attacker's setup play on
     # the foothold, wait for its channel — before the pre-attack log rotation so setup noise is rotated away.
     # NOTE: the pre-launch _teardown_stale_c2_before_launch() sweep was REMOVED (2026-09-21) — suspected of
@@ -997,6 +976,26 @@ async def _run_experiment(experiment: Experiment) -> None:
 
     # The env-mutation serving window was already opened before the defender's prepare() (so static decoy
     # deploy during arming is honoured); it stays open through the attack and closes at DEACTIVATE (finally).
+
+    # NoHat demo: optional deploy -> pause -> attack gate. By now the environment is up,
+    # the attacker C2/foothold is set up, and the defender is armed (and watching) — but
+    # the attack itself has NOT started. When pause_before_attack is set, HOLD here until
+    # POST /experiments/{name}/start-attack fires (or the safety timeout), then launch.
+    # Opt-in: default (flag off) leaves the lifecycle untouched.
+    if getattr(experiment, "_pause_before_attack", False):
+        experiment._start_attack_event = asyncio.Event()
+        experiment.status = ExperimentStatus.AWAITING_ATTACK
+        await registry.update(experiment)
+        exp_log.info("pause_before_attack: holding '%s' at AwaitingAttack (everything deployed; attack not "
+                     "started); POST /experiments/%s/start-attack to launch (auto-launch after %ds)",
+                     experiment.experiment_name, experiment.experiment_name, _PAUSE_BEFORE_ATTACK_TIMEOUT)
+        try:
+            await asyncio.wait_for(experiment._start_attack_event.wait(),
+                                   timeout=_PAUSE_BEFORE_ATTACK_TIMEOUT)
+            exp_log.info("start-attack received for '%s' — launching", experiment.experiment_name)
+        except asyncio.TimeoutError:
+            exp_log.warning("pause_before_attack timed out after %ds for '%s' — launching anyway",
+                            _PAUSE_BEFORE_ATTACK_TIMEOUT, experiment.experiment_name)
 
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)  # arena -> attacker: launch the attack now
