@@ -1,18 +1,4 @@
-"""Terminus-2 LLM shell attacker.
-
-Terminus 2 is Terminal-Bench 2.0's reference agent (shipped in the `harbor` framework): an LLM that
-drives a real shell in a read-terminal -> think -> type-command loop. This plugin points that agent
-at the attack instead of a benchmark task — it runs Terminus-2 ON the foothold box, so the shell it
-drives has east-west access to the victims (exactly like the CAI attacker, which this mirrors).
-
-Structure (same shape as the CAI plugin):
-  setup()  - install harbor (+ terminus-2) into a venv on foothold; no C2 (this is a pure shell agent)
-  start()  - push terminus_runner.py + the run config, launch it on foothold
-  stop()   - kill the remote runner
-The runner (terminus_runner.py) constructs a Terminus2 agent + a local shell environment and runs it
-with the attack objective. The harbor BaseEnvironment adapter in the runner is minimal and needs an
-on-box validation pass (harbor's environment contract is large) — see terminus_runner.py.
-"""
+"""Terminus-2 LLM shell attacker, run on the foothold box."""
 from __future__ import annotations
 
 import asyncio
@@ -41,11 +27,10 @@ _OBJECTIVE = (
 class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
     type: Literal["terminus_llm"]
     REQUIRED_CONFIG_KEYS = frozenset({"model", "objective", "foothold_ip", "max_turns"})
-    # LiteLLM-style model name (harbor's terminus-2 uses litellm), e.g. "anthropic/claude-opus-4-1".
     model: str = "anthropic/claude-sonnet-4-5"
-    api_base: Optional[str] = None   # OpenAI-compatible base URL; None for the model's default provider
+    api_base: Optional[str] = None
     max_turns: int = 1000
-    objective: Optional[str] = None  # override the default attack objective
+    objective: Optional[str] = None
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -74,7 +59,6 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             "foothold_ip": (env_spec.box.ip if env_spec.box else None),
         }
 
-    # -- ssh plumbing: reach the foothold via the env-provided AttackerSetupAccess (not hardcoded foothold) ----
     async def _push(self, base: list[str], dest: str, content: str) -> None:
         proc = await asyncio.create_subprocess_exec(
             *base, f"cat > {dest}", stdin=asyncio.subprocess.PIPE,
@@ -83,9 +67,8 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to push {dest} to foothold: {stderr.decode().strip()}")
 
-    # -- lifecycle (no C2; a pure shell agent, like CAI) -----------------------------------
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:
-        ssh_base_cmd = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
+        ssh_base_cmd = self.primary_access(access).ssh_base()
         install = (
             "set -e; mkdir -p /opt/terminus/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -93,7 +76,7 @@ class TerminusAttacker(AttackerPlugin, config_type="terminus_llm"):
             "export PATH=$HOME/.local/bin:$PATH; "
             "test -d /opt/terminus/venv || uv venv /opt/terminus/venv --python 3.12; "
             "uv pip install --python /opt/terminus/venv/bin/python harbor; "
-            "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux)"  # recording is off in the runner, so no asciinema needed
+            "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux)"
         )
         proc = await asyncio.create_subprocess_exec(
             *ssh_base_cmd, install, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)

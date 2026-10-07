@@ -1,30 +1,7 @@
-"""
-Arena cross-component contract test — the CI/CD regression guard for the refactor.
+"""Arena cross-component contract test: the fast, cloud-free regression guard pinning the 4-system contract.
 
-WHY THIS EXISTS
-    The arena (see docs/architecture.md) turns environment / attacker / defender into
-    independent systems. This file pins the contract each
-    system exposes to the others, so refactoring one can't silently break what another
-    reads from it — WITHOUT deploying anything to the cloud or spending LLM credits.
-
-    Run it before AND after refactoring a component; if it stays green the wiring the other
-    components rely on is intact.
-
-TWO TIERS
-    FAST (this file — default, no cloud, no LLM, ~1s):
-        <venv>/bin/python -m pytest tests/test_arena_contract.py -q
-        (e.g. /home/lakshmi/experiment_harness/.venv/bin/python)
-
-    LIVE SMOKE (opt-in, real cloud + LLM credits — NOT run here):
-        See tests/README_live_smoke.md. It submits the named baseline combo to a manager
-        and asserts the attacker reached the DB tier and the defender armed. Do NOT point it
-        at the shared OpenStack manager casually: a manager's startup clean-slate wipes the
-        cloud (all projects).
-
-THE NAMED BASELINE COMBO (what must keep working across the refactor):
-    environment = equifax_small
-    attacker    = incalmo_strategy / GraphSearch
-    defender    = llm_soc / FalcoLLM        (reads telemetry; deploys NO decoys)
+The named baseline combo: environment equifax_small, attacker incalmo_strategy / GraphSearch,
+defender llm_soc / FalcoLLM. See tests/README_live_smoke.md for the opt-in live smoke tier.
 """
 from __future__ import annotations
 
@@ -55,10 +32,8 @@ ATTACKER_PLUGIN = "incalmo_strategy"          # the (plugin, spec) pair — the 
 ATTACKER_SPEC = {"strategy": "GraphSearch"}   # inline spec dict (may also be a path to a JSON/YAML file)
 DEFENDER = {"type": "llm_soc", "strategy": "FalcoLLM"}
 
-# A representative environment_spec per backend, so the env security invariants below run over EVERY
-# registered environment plugin — not just mhbench. A newly-registered backend with no sample here is
-# yielded with spec_val=None and fails the test loudly: its security coverage must be wired, never
-# silently skipped. (ENV_SPEC is defined just below; this list is built lazily in _env_security_params.)
+# A representative environment_spec per backend, so the env security invariants below run over every
+# registered environment plugin. A backend with no sample here yields spec_val=None and fails the test loudly.
 ENV_SAMPLE_SPECS = {"mhbench": "environments/non-generated/equifax_small.json"}
 
 
@@ -74,9 +49,7 @@ FAKE_ATTACKER_SPEC = AttackerEnvSpec(
 
 
 def _mhbench_dir() -> Path | None:
-    """Best-effort locate MHBench's checkout so we can assert the env spec file exists.
-    Reads the harness config.yaml if present, else falls back to ~/MHBench. Returns None
-    if nothing plausible is found (that check then skips)."""
+    """Best-effort locate MHBench's checkout. Reads the harness config.yaml if present, else falls back to ~/MHBench. Returns None when it finds nothing."""
     import yaml
     for cfg_path in (
         Path(__file__).resolve().parent.parent / "config.yaml",
@@ -104,8 +77,7 @@ def test_registries_have_expected_plugins():
 # ------------------------------------------------------------------ spec validation layer
 
 def test_named_combo_experimentspecs_validates():
-    """The user-facing submission for the named combo must validate and round-trip.
-    This is the arena's single entry contract: one spec naming every system."""
+    """The user-facing submission for the named combo must validate and round-trip."""
     specs = ExperimentSpecs(
         experiment_name="ci_contract_smoke",
         environment=ENV,
@@ -123,9 +95,7 @@ def test_named_combo_experimentspecs_validates():
 
 
 def test_environmentconfig_requires_explicit_shape():
-    """ExperimentSpecs.environment must be the EXPLICIT {environment_plugin, environment_spec}:
-    environment_plugin names a registered plugin, environment_spec is a path. The bare-string and legacy
-    {type, spec} shorthands are no longer coerced — they're rejected — and an unknown plugin is rejected."""
+    """ExperimentSpecs.environment must be the explicit {environment_plugin, environment_spec}. ExperimentSpecs rejects the shorthand forms and an unknown plugin."""
     explicit = ExperimentSpecs(experiment_name="ci_env_explicit",
                                environment={"environment_plugin": "mhbench", "environment_spec": ENV_SPEC},
                                attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
@@ -140,7 +110,7 @@ def test_environmentconfig_requires_explicit_shape():
     with pytest.raises(Exception):
         ExperimentSpecs(experiment_name="x", environment={"type": "mhbench", "spec": ENV_SPEC},
                         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
-    # an unknown plugin is rejected
+    # an unknown plugin raises
     with pytest.raises(Exception):
         ExperimentSpecs(experiment_name="x",
                         environment={"environment_plugin": "nope", "environment_spec": ENV_SPEC},
@@ -148,8 +118,7 @@ def test_environmentconfig_requires_explicit_shape():
 
 
 def test_attacker_plugin_plus_spec_file(tmp_path):
-    """New shape: attacker_plugin selects the implementation; attacker_spec is a PATH to a file
-    holding the plugin's bespoke spec. It resolves to the same plugin instance as the embedded form."""
+    """attacker_plugin selects the implementation. attacker_spec is a path to a file holding the plugin's spec."""
     spec_file = tmp_path / "atk_spec.json"
     spec_file.write_text(json.dumps({"strategy": "GraphSearch", "script_path": "/tmp/replay.json"}))
     specs = ExperimentSpecs(
@@ -172,8 +141,7 @@ def test_attacker_plugin_plus_spec_file(tmp_path):
 
 
 def test_embedded_attacker_is_rejected():
-    """The attacker is selected only by attacker_plugin (+ attacker_spec). Passing an embedded
-    'attacker' block is rejected ('attacker' is a derived field, not an input)."""
+    """Only attacker_plugin (+ attacker_spec) selects the attacker. ExperimentSpecs rejects an embedded 'attacker' block."""
     with pytest.raises(Exception):
         ExperimentSpecs(experiment_name="x", environment=ENV, attacker=ATTACKER)
 
@@ -184,8 +152,7 @@ def test_attacker_plugin_unknown_name_rejected():
 
 
 def test_experiment_base_is_environment_plus_attacker():
-    """The experiment base is environment + attacker; the defender is optional. A spec with
-    only environment + attacker (no defender) must validate, with the defender left None."""
+    """The experiment base is environment + attacker. The defender is optional and defaults to None when absent."""
     specs = ExperimentSpecs(
         experiment_name="ci_base_only",
         environment=ENV,
@@ -195,14 +162,13 @@ def test_experiment_base_is_environment_plus_attacker():
 
 
 def test_experimentspecs_requires_an_attacker():
-    """environment + attacker are the required base: a spec with no attacker (neither the plugin pair
-    nor the embedded form) must be rejected, not fail later mid-run."""
+    """environment + attacker are the required base: a spec with no attacker must be rejected, not fail later mid-run."""
     with pytest.raises(Exception, match="requires attacker_plugin"):
         ExperimentSpecs(experiment_name="ci_no_attacker", environment=ENV)
 
 
 def test_experimentspecs_requires_an_environment():
-    """environment is required (the other half of the base)."""
+    """The spec requires environment (the other half of the base)."""
     with pytest.raises(Exception):
         ExperimentSpecs(experiment_name="ci_no_env",
                         attacker_plugin=ATTACKER_PLUGIN, attacker_spec=ATTACKER_SPEC)
@@ -211,8 +177,7 @@ def test_experimentspecs_requires_an_environment():
 # ------------------------------------------------- attacker -> runner build_config contract
 
 def test_attacker_env_spec_is_adversary_safe():
-    """AttackerEnvSpec could be handed to the adversary and be fine: objective + foothold IDENTITY
-    only, no keys / bastion / routing. Those live in the harness-only SetupAccess."""
+    """AttackerEnvSpec is adversary-safe: objective + foothold identity only, no keys, bastion, or routing."""
     spec_fields = set(AttackerEnvSpec.model_fields)
     assert spec_fields == {"objective", "box", "hosts", "subnets", "network_name", "management_sg"}, f"spec fields: {spec_fields}"
     box_fields = set(AttackerBox.model_fields)
@@ -229,16 +194,14 @@ def test_foothold_access_is_harness_only_and_carries_routing():
 
 
 def test_environment_produces_both_spec_and_access():
-    """The environment serves up the adversary-safe spec AND the harness-only access — the arena
-    hands each to the right place; the attacker never parses topology."""
+    """The environment serves the adversary-safe spec and the harness-only access, and the arena hands each to the right place. The attacker never parses topology."""
     from arena.environment.plugins.mhbench import deployer
     assert callable(deployer.attacker_env_spec)
     assert callable(deployer.attacker_setup_access)
 
 
 def test_terminus_build_config_contract():
-    """Terminus-2 LLM shell attacker: build_config carries model/api routing + objective + the kali
-    box IP the runner drives; ui_schema is well-formed."""
+    """Terminus-2 LLM shell attacker: build_config carries model/api routing, objective, and the kali box IP. ui_schema is well-formed."""
     atk = AttackerPlugin._registry["terminus_llm"].model_validate(
         {"type": "terminus_llm", "model": "anthropic/claude-opus-4-1"})
     built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, PreparedAttacker())
@@ -249,9 +212,7 @@ def test_terminus_build_config_contract():
 
 
 def test_openshell_build_config_contract():
-    """NVIDIA OpenShell attacker: an LLM coding agent driven under OpenShell on the foothold. agent +
-    policy are selectable; build_config carries the provider/key routing, image, generated-policy
-    inputs, objective and the kali IP; ui_schema is well-formed."""
+    """NVIDIA OpenShell attacker: agent + policy selectable. build_config carries provider/key routing, image, policy inputs, objective, and the kali IP."""
     reg = AttackerPlugin._registry["openshell"]
     # default: claude agent (claude-code provider type), restrictive policy (the fully-valid posture)
     atk = reg.model_validate({"type": "openshell"})
@@ -288,9 +249,7 @@ def test_openshell_build_config_contract():
 
 
 def test_sliver_llm_build_config_contract():
-    """The bare LLM + Sliver C2 attacker: its OWN C2 lifecycle (not _IncalmoAttacker), requires_docker
-    False (Sliver is a binary). build_config carries the Sliver C2 coordinates from its own prepared
-    baton (operator config + listener) + model routing. (Runner/lifecycle are not live-validated.)"""
+    """The bare LLM + Sliver C2 attacker: its own C2 lifecycle, requires_docker False. build_config carries the Sliver C2 coordinates + model routing."""
     from arena.attacker.plugins.sliver.sliver_c2 import SliverPreparedC2
     atk = AttackerPlugin._registry["sliver_llm"].model_validate(
         {"type": "sliver_llm", "model": "gpt-5", "api_base": "https://api.openai.com/v1"})
@@ -321,9 +280,7 @@ def test_attacker_graphsearch_build_config_contract():
     {"type": "incalmo_llm", "abstraction": "shell", "planning_llm": "openrouter/anthropic/claude-sonnet-5"},
 ])
 def test_attacker_never_blacklists_victim_ips(cfg):
-    """REGRESSION (commit 'incalmo: never blacklist victim IPs'): the shipped config once
-    excluded 192.168.x.10 — webserver0, the DB key-holder — so every run exfiltrated 0 files.
-    build_config must exclude ONLY Kali's docker bridge, never a victim subnet."""
+    """Regression: build_config must exclude only Kali's docker bridge, never a victim subnet (once excluded the DB key-holder)."""
     atk = AttackerPlugin._registry[cfg["type"]].model_validate(cfg)
     built = atk.build_config("ci_exp", FAKE_ATTACKER_SPEC, IncalmoPreparedC2(local_url="http://c2.example:8888", remote_url="http://kali:8888"))
     bl = built.get("blacklist_ips", [])
@@ -334,9 +291,7 @@ def test_attacker_never_blacklists_victim_ips(cfg):
 # ------------------------------------------------- defender -> runner build_config contract
 
 def test_defender_llm_soc_build_config_contract():
-    """What the FalcoLLM runner reads out of build_config must stay stable. The host inventory no longer
-    flows via topology_spec: the runner builds its Perry network from the arena-injected defender_env_spec
-    (env -> defender contract), so build_config carries NO topology_spec — the defender is env-agnostic."""
+    """What the FalcoLLM runner reads out of build_config must stay stable. The host inventory flows via the injected defender_env_spec, so build_config carries no topology_spec."""
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
     built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
@@ -346,10 +301,7 @@ def test_defender_llm_soc_build_config_contract():
 
 
 def test_defender_canary_build_config_contract():
-    """The canary (connectivity diagnostic) defender: no decoys, no LLM, stdlib runner.
-    Stage 2b: build_config carries only the connectivity knobs; hosts + per-host SSH access come from
-    the arena-injected defender_env_spec / defender_setup_access, NOT from build_config (no ssh_key,
-    no topology_spec — that coupling is gone)."""
+    """The canary (connectivity diagnostic) defender: build_config carries only the connectivity knobs, not hosts or SSH access (no ssh_key, no topology_spec)."""
     dfn = DefenderPlugin._registry["canary"].model_validate({"type": "canary"})
     built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
@@ -359,8 +311,7 @@ def test_defender_canary_build_config_contract():
 
 
 def test_defender_velociraptor_build_config_contract():
-    """Velociraptor now builds its monitored estate from the arena-injected defender_env_spec (in
-    setup()), not a topology parse — so build_config carries NO topology_spec (backend-agnostic)."""
+    """Velociraptor builds its monitored estate from the injected defender_env_spec, so build_config carries no topology_spec."""
     dfn = DefenderPlugin._registry["velociraptor"].model_validate({"type": "velociraptor"})
     built = dfn.build_config("ci_exp", None, PreparedDefender())
     assert built["experiment_name"] == "ci_exp"
@@ -371,14 +322,12 @@ def test_defender_velociraptor_build_config_contract():
 # ----------------------------------------------- defender-requested box ingress (env opens exactly these)
 
 def test_defender_box_ingress_declarations():
-    """Each defender declares the box ports the environment must open (telemetry->box:9200 relay
-    route, forward->victim:8000 passthrough). The harness reads box_ingress() at arm and requests
-    exactly these — the box surface matches what the defender uses. Config-aware."""
+    """Each defender declares the box ports the environment must open. The harness reads box_ingress() at arm and requests exactly these. Config-aware."""
     reg = DefenderPlugin._registry
     assert reg["llm_soc"].model_validate(DEFENDER).box_ingress() == {"telemetry": [9200]}
     assert reg["velociraptor"].model_validate({"type": "velociraptor"}).box_ingress() == {"forward": [8000]}
     assert reg["deception"].model_validate({"type": "deception", "strategy": "ReactiveLayered"}).box_ingress() == {"telemetry": [9200]}
-    # canary is config-aware: telemetry checks -> request 9200; ssh/resolve-only -> open nothing
+    # canary is config-aware: telemetry checks -> request 9200. ssh/resolve-only -> open nothing
     assert reg["canary"].model_validate({"type": "canary"}).box_ingress() == {"telemetry": [9200]}
     assert reg["canary"].model_validate({"type": "canary", "checks": ["ssh", "resolve"]}).box_ingress() == {}
     # base default is empty (a defender needing no box ingress opens zero ports)
@@ -388,8 +337,7 @@ def test_defender_box_ingress_declarations():
 # ----------------------------------------------- defender lifecycle (symmetric with the attacker)
 
 def test_defender_lifecycle_signals_and_persist():
-    """DefenderLifecycle drives SETUP_STARTED->READY->RUNNING->STOPPING->STOPPED, and the persister
-    records each onto the Experiment (defender_status + timestamps) — mirroring the attacker."""
+    """DefenderLifecycle drives SETUP_STARTED->READY->RUNNING->STOPPING->STOPPED, and the persister records each onto the Experiment."""
     import asyncio
     from arena.defender.lifecycle import (
         DefenderLifecycle, DefenderSignal, DefenderLifecycleError, signal_recorder,
@@ -440,9 +388,7 @@ def test_attacker_lifecycle_methods_present():
 
 def test_defender_lifecycle_methods_present():
     dfn = DefenderPlugin._registry["llm_soc"].model_validate(DEFENDER)
-    # Mirror of the attacker surface: setup() ARMS (blocks until armed) + build_config/start/stop/
-    # collect_logs/teardown + the framework run_* wrappers. ALL arming happens in setup(), so run_setup
-    # returning IS READY — there is NO prepare() and NO readiness handshake (see docs/agent-symmetry.md).
+    # Mirror of the attacker surface: setup() arms, plus the lifecycle methods and framework run_* wrappers. No prepare() or readiness handshake.
     for m in ("setup", "start", "stop", "collect_logs", "teardown", "run", "build_config",
               "run_setup", "run_start", "run_stop", "run_collect_logs"):
         assert callable(getattr(dfn, m)), f"defender missing {m}()"
@@ -452,8 +398,7 @@ def test_defender_lifecycle_methods_present():
 
 
 def test_capacity_counts_only_topology_vms():
-    """Admission counts ONLY the topology VMs — no 'extra'/decoy pre-reservation. capacity must not
-    own a decoy estimate, and reserve() must not take extra_vms/extra_vcpus."""
+    """Admission counts only the topology VMs. capacity must not own a decoy estimate, and reserve() must not take extra_vms/extra_vcpus."""
     import inspect
     from arena.environment import capacity
     assert not hasattr(capacity, "estimate_decoy_vms"), "capacity must not own a decoy estimate"
@@ -471,9 +416,7 @@ def test_environment_is_a_plugin():
 
 
 def test_build_environment_requires_explicit_shape():
-    """build_environment takes the explicit {environment_plugin, environment_spec} (or an
-    EnvironmentConfig) and returns the plugin instance. A bare string and the legacy {type, spec} dict
-    are no longer coerced, and an unknown plugin raises."""
+    """build_environment takes the explicit {environment_plugin, environment_spec} and returns the plugin instance. The shorthand forms and an unknown plugin raise."""
     from arena.environment import build_environment
     env = build_environment({"environment_plugin": "mhbench", "environment_spec": ENV_SPEC})
     assert env.type == "mhbench" and env.spec == ENV_STEM and env.environment_spec == ENV_SPEC
@@ -486,8 +429,7 @@ def test_build_environment_requires_explicit_shape():
 
 
 def test_environment_plugin_lifecycle_and_signals():
-    """The plugin exposes the arena-driven lifecycle, and provision/configure/teardown accept the
-    lifecycle channel; EnvironmentLifecycle records the emitted signals."""
+    """The plugin exposes the arena-driven lifecycle, provision/configure/teardown accept the lifecycle channel, and EnvironmentLifecycle records the signals."""
     import inspect
     from arena.environment.plugins.base import EnvironmentPlugin
     from arena.environment import EnvironmentLifecycle, EnvironmentSignal, build_environment
@@ -509,11 +451,7 @@ def test_environment_plugin_lifecycle_and_signals():
 
 
 def test_environment_commands_arena_to_env():
-    """The arena has commands it SENDS to the environment, recorded for an auditable command/ack trace.
-    The environment now HAS an active phase: between CONFIGURED and teardown the arena ACTIVATEs it as a
-    request-serving window (a running defender may mutate the topology via EnvActionRequest events) and
-    DEACTIVATEs it when the attack ends — it is not a busy loop, just the window in which env-mutation
-    events are honoured."""
+    """The arena sends commands to the environment, recorded for an auditable command/ack trace. Between CONFIGURED and teardown it ACTIVATEs a request-serving window and DEACTIVATEs it at the attack end."""
     from arena.environment import EnvironmentLifecycle, EnvironmentCommand
     cmds = {c.value for c in EnvironmentCommand}
     assert cmds == {"Provision", "Configure", "Activate", "Deactivate", "Teardown"}
@@ -529,9 +467,7 @@ def test_environment_commands_arena_to_env():
 
 
 def test_environment_request_trace_and_primitive_defaults():
-    """The env↔defender dynamic interface: a running defender sends EnvActionRequest events; the
-    lifecycle records each serviced one (experiment data), and the EnvironmentPlugin primitives default
-    to UNSUPPORTED so a static environment is unaffected until a backend opts in."""
+    """The env/defender dynamic interface: a running defender sends EnvActionRequest events, the lifecycle records each serviced one, and the primitives default to UNSUPPORTED."""
     import asyncio
     from arena.environment import (
         EnvironmentLifecycle, EnvActionRequest, EnvActionResult, EnvActionKind, EnvRequestUnsupported,
@@ -549,7 +485,7 @@ def test_environment_request_trace_and_primitive_defaults():
     lc.record_request({"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"})
     assert lc.requests == rec == [{"kind": "AddHost", "name": "decoy0", "ok": True, "ip": "1.2.3.4"}]
 
-    # primitive defaults: unsupported + static-topology flag, so a non-dynamic env is unaffected
+    # primitive defaults: unsupported + static-topology flag, so a non-dynamic env stays unaffected
     class _Static(EnvironmentPlugin, config_type="static_env_contract_test"):
         environment_spec: str = "x"
     st = _Static(environment_spec="x")
@@ -563,9 +499,7 @@ def test_environment_request_trace_and_primitive_defaults():
 
 
 def test_env_action_handler_window_budget():
-    """The defender→env action handler enforces, in order: experiment existence (404), an OPEN serving
-    window (409), and the pre-reserved VM budget ceiling; it records every serviced event and degrades an
-    unsupported primitive to ok=False instead of crashing. No token check — the UDS is the boundary."""
+    """The defender/env action handler enforces, in order: experiment existence (404), an open serving window (409), and the VM budget ceiling. It degrades an unsupported primitive to ok=False, not a crash."""
     import asyncio
     from types import SimpleNamespace
     from arena.env_action_server import handle_env_action
@@ -620,9 +554,7 @@ def test_env_action_handler_window_budget():
 
 
 def test_mhbench_dynamic_topology_primitives(monkeypatch):
-    """The MHBench env plugin fulfils EnvActionRequests by shelling to per-host CLI subcommands:
-    supports_dynamic_topology() is True; add_host returns name/ip + a box-relative scoped SetupAccess;
-    rebuild/remove pass the target through. Subprocess is stubbed (no cloud)."""
+    """The MHBench env plugin fulfils EnvActionRequests by shelling to per-host CLI subcommands. add_host returns name/ip + a box-relative SetupAccess. rebuild/remove pass the target through. Subprocess stubbed."""
     import asyncio
     from arena.environment import EnvActionRequest, EnvActionKind, build_environment
     import arena.environment.plugins.mhbench.deployer as dep
@@ -639,10 +571,8 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
     monkeypatch.setattr(dep, "_host_op_sync", fake_host_op)
     monkeypatch.setattr(dep, "_mhbench_ssh_key", lambda cfg: "/scoped/defender_key")
 
-    # The box reaches an add-host'd decoy DIRECTLY (its SG admits the box), so the access is box-relative
-    # with no bastion hop. But the decoy only has MHBench's mgmt keypair, so add_host must inject the
-    # scoped DEFENDER pubkey into the decoy's authorized_keys (via the bastion, with the mgmt key) — else
-    # the box's ConfigureDecoy SSH gets 'Permission denied (publickey)'. Stub the injection + key issuance.
+    # The box reaches an add-host'd decoy directly, so the access is box-relative with no bastion hop.
+    # add_host injects the scoped defender pubkey into the decoy via the bastion. Stub the injection + key issuance.
     injected = {}
     monkeypatch.setattr(dep, "issue_scoped_keys", lambda cfg: (Path("/keys/attacker_key"), Path("/keys/defender_key")))
     monkeypatch.setattr(Path, "read_text", lambda self: "ssh-ed25519 AAAAdefenderpub arena-defender_key\n")
@@ -652,7 +582,7 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
     add = asyncio.run(env.add_host(exp, None, EnvActionRequest(kind=EnvActionKind.ADD_HOST, name="decoy0", role="apache_vuln", subnet="victim_net"), None))
     assert add.ok and add.ip == "192.168.0.42" and add.name == "decoy0"
     assert add.access is not None and add.access.host == "192.168.0.42" and add.access.ssh_common_args == ""  # box-relative
-    # the defender scoped pubkey was injected onto the decoy IP via the bastion
+    # add_host injected the defender scoped pubkey onto the decoy IP via the bastion
     assert injected.get("host") == "192.168.0.42" and injected.get("bastion") == "203.0.113.9"
     assert "defenderpub" in injected.get("pub", "")
     assert calls["add-host"] == {"name": "decoy0", "role": "apache_vuln", "subnet": "victim_net"}
@@ -664,11 +594,7 @@ def test_mhbench_dynamic_topology_primitives(monkeypatch):
 
 
 def test_defender_no_arena_execution_path():
-    """ENFORCEMENT: the in-env defenders never reach victims FROM THE ARENA — a runner must not call
-    openstack.connect(), construct OpenstackOrchestrator/GCPOrchestrator, or build an AnsibleRunner on the
-    arena host. Host actions go to the box agent / box-resident engine; cloud ops go to the env over the
-    env-action channel. Re-introducing an arena-execution path fails this test. (The old executes_from_box
-    flag is gone — the base is agnostic to WHERE a defender executes; it only knows uses_env_actions.)"""
+    """Enforcement: the in-env defenders never reach victims from the arena. A runner must not call openstack.connect(), construct an orchestrator, or build an AnsibleRunner on the arena host."""
     import pathlib
     from arena.defender.plugins.base import DefenderPlugin
 
@@ -697,9 +623,7 @@ def test_experiment_environment_property_returns_plugin():
 
 
 def test_env_plugin_produces_both_agent_specs_and_setup_access():
-    """The environment PLUGIN is the producer of the agent-facing specs (attacker_spec + defender_spec)
-    and the harness-only SetupAccess for both sides. Invariant: agent-facing specs carry NO credential
-    field; SetupAccess carries the key + routing."""
+    """The environment plugin produces the agent-facing specs and the harness-only SetupAccess for both sides. Agent-facing specs carry no credential. SetupAccess carries the key + routing."""
     from arena.environment import build_environment, DeployedEnvironment
     from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox, AttackerSetupAccess
     from arena.defender.env_spec import DefenderEnvSpec, DefenderHost
@@ -738,15 +662,13 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert names and "attacker" not in names  # kali excluded
     assert any(h.role == "webserver" for h in dspec.hosts) and any(h.role == "database" for h in dspec.hosts)
     assert "ssh_key" not in DefenderHost.model_fields and "ssh_key" not in DefenderEnvSpec.model_fields
-    # Env-resolved subnet structure (the decoy defenders build Perry's Network from this, NOT the backend
-    # topology — topology.py is gone). The env resolves the backend network/sg NAMES + per-host users.
+    # Env-resolved subnet structure (the decoy defenders build Perry's Network from this).
     assert dspec.subnets, "defender_spec must carry the subnet structure"
     assert dspec.management_sg == "ci_proj-management_sg"
     ws = next((s for s in dspec.subnets if any(h.role == "webserver" for h in s.hosts)), None)
     assert ws is not None and ws.network == f"ci_proj-{ws.name}" and ws.sec_group == f"ci_proj-{ws.name}_sg"
     assert any("tomcat" in [u.name for u in h.users] for h in ws.hosts)  # env knows webserver accounts (honey-cred target)
-    # The attacker's own segment is NOT in the defended estate (a real blue team doesn't know where the
-    # red team sits) — so there's no attacker subnet and no "attacker" field to leak its position.
+    # The attacker's own segment is not in the defended estate, so nothing leaks its position.
     assert all(s.name != "attacker_subnet" for s in dspec.subnets)
     assert all(not any(h.role == "kali" for h in s.hosts) for s in dspec.subnets)
     assert not any(hasattr(s, "attacker") for s in dspec.subnets)
@@ -758,10 +680,7 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
 
 
 def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
-    """_defender_subnets resolves the DEFENDED estate only, backend-agnostically: it excludes the
-    attacker's segment AND the defender's own box subnet, resolves backend network/sg names, carries
-    per-host users, and maps the topology's `perimeter` marker (NOT attacker adjacency) through. Fully
-    self-contained (synthetic topology) so it doesn't depend on which MHBench checkout is configured."""
+    """_defender_subnets resolves the defended estate only. It excludes the attacker segment and the defender box subnet, resolves backend names, carries per-host users, and maps the perimeter marker through."""
     from arena.environment.plugins.mhbench.deployer import _defender_subnets
     topo = {
         "name": "net0",
@@ -793,8 +712,7 @@ def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
 
 
 def _deployed_for(plugin_name):
-    """A minimal DeployedEnvironment so attacker_spec can produce a foothold. mhbench derives the
-    foothold (kali) from the topology + kali IP."""
+    """A minimal DeployedEnvironment so attacker_spec can produce a foothold. mhbench derives the foothold from the topology + kali IP."""
     if plugin_name == "mhbench":
         md = _mhbench_dir()
         topo = str(md / ENV_SPEC) if md else "/tmp/x.json"
@@ -804,9 +722,7 @@ def _deployed_for(plugin_name):
 
 @pytest.mark.parametrize("plugin_name,spec_val", _env_security_params())
 def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
-    """The always-provisioned defender box + the telemetry-relay routing are GENERIC environment
-    guarantees — part of the EnvironmentPlugin interface, not MHBench-specific hacks. Runs over every
-    registered env backend."""
+    """The always-provisioned defender box + the telemetry-relay routing are generic EnvironmentPlugin guarantees. Runs over every registered env backend."""
     from arena.environment import build_environment
     from arena.defender.env_spec import DefenderBox, DefenderEnvSpec
     from arena.attacker.env_spec import AttackerEnvSpec
@@ -818,21 +734,18 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
     from arena.environment.config import EnvBackendConfig
     cfg = SimpleNamespace(mhbench_dir=(_mhbench_dir() or "/tmp"), env_backend=EnvBackendConfig(gcp_relay_ip="10.0.1.10"))
 
-    # the generic infra methods are on the base contract. There is no telemetry_ingest/program_telemetry/
-    # telemetry_relay_ip: the defender declares the box port it needs via box_ingress(), and
-    # program_ingress() both opens it and points the relay at the box — one path, not two.
+    # the generic infra methods are on the base contract. program_ingress() opens the box port and points the relay at the box.
     for m in ("defender_box", "program_ingress"):
         assert callable(getattr(env, m)), f"{plugin_name} missing {m}()"
 
-    # always-provisioned defender box, in an isolated subnet (egress/ingress is a design requirement the
-    # arena may verify later, not a self-reported field — see docs/security-model.md)
+    # always-provisioned defender box, in an isolated subnet
     box = env.defender_box(None, cfg)
     assert isinstance(box, DefenderBox) and box.ip and box.subnet
 
-    # the attacker box is guaranteed too — always SERVED via the attacker spec (footholds non-empty)
+    # the environment guarantees the attacker box too — always served via the attacker spec (footholds non-empty)
     assert env.attacker_spec(_deployed_for(plugin_name), cfg).footholds
 
-    # agent-facing specs are the right types; the defender spec carries the box
+    # agent-facing specs are the right types. the defender spec carries the box
     assert isinstance(env.attacker_spec(None, cfg), AttackerEnvSpec)
     dspec = env.defender_spec(None, cfg)
     assert isinstance(dspec, DefenderEnvSpec) and dspec.box is not None and dspec.box.name == box.name
@@ -844,10 +757,7 @@ def test_env_infra_guarantees_are_backend_agnostic(plugin_name, spec_val):
 
 @pytest.mark.parametrize("plugin_name,spec_val", _env_security_params())
 def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
-    """The environment issues SEPARATE per-system credentials (no single god-key): the attacker key is
-    scoped to its foothold only, the defender key to the defender box + victims (not the foothold).
-    INVARIANT: no credential in a system's SetupAccess grants access that system couldn't legitimately
-    earn — attacker key opens its box and nothing else. Runs over every registered env backend."""
+    """The environment issues separate per-system credentials (no god-key): it scopes the attacker key to its foothold only, the defender key to the box + victims. Runs over every registered env backend."""
     from arena.environment import build_environment
     if spec_val is None:
         pytest.fail(f"env plugin {plugin_name!r} has no ENV_SAMPLE_SPECS entry — add one so its "
@@ -862,21 +772,20 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     dcred = env.defender_credential(deployed, cfg)
     assert acred and dcred and acred != dcred  # per-system, not one god-key
 
-    # attacker SetupAccess: all use the attacker cred; hosts are the foothold(s) ONLY
+    # attacker SetupAccess: all use the attacker cred. hosts are the foothold(s) ONLY
     aacc = env.attacker_setup_access(deployed, "1.2.3.4", cfg)
     assert aacc and all(a.ssh_key == acred for a in aacc)
     foothold_hosts = {f.ip for f in env.attacker_spec(deployed, cfg).footholds}
     assert {a.host for a in aacc} <= foothold_hosts
 
-    # defender SetupAccess: all use the defender cred; the attacker foothold is NOT reachable with it
+    # defender SetupAccess: all use the defender cred. the attacker foothold is NOT reachable with it
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     assert dacc and all(a.ssh_key == dcred for a in dacc)
     assert foothold_hosts.isdisjoint({a.host for a in dacc})
 
 
 def test_environment_module_exposes_lifecycle():
-    """MHBench is one environment plugin; its deploy/collect/teardown implementation lives under
-    environment/plugins/mhbench/ (not the backend-neutral environment package root)."""
+    """MHBench is one environment plugin. Its deploy/collect/teardown implementation lives under environment/plugins/mhbench/."""
     from arena.environment.plugins.mhbench import deployer, collect, teardown
     assert callable(deployer.provision_environment)
     assert callable(deployer.configure_environment)
@@ -899,9 +808,7 @@ def test_ui_schema_returns_dict(registry, key):
 
 
 def test_deployed_environment_object_shape():
-    """DeployedEnvironment is the env -> {attacker, defender} handoff object today.
-    The refactor will split it into attacker- and defender-relevant specs; this pins the
-    current shape so consumers keep working until then."""
+    """DeployedEnvironment is the env -> {attacker, defender} handoff object. This pins its current shape."""
     env = DeployedEnvironment(topology_spec="/x/equifax_small.json", ip="1.2.3.4", spec=ENV_STEM)
     assert env.topology_spec.endswith("equifax_small.json")
     assert env.spec == ENV_STEM
@@ -910,8 +817,7 @@ def test_deployed_environment_object_shape():
 # ---------------------------------------------------------- environment spec (needs MHBench)
 
 def test_equifax_small_spec_exists_and_protects_keyholder():
-    """The named environment must exist and still place a Kali attacker + a webserver0 at
-    .10 (the DB key-holder the blacklist regression protects). Skips if MHBench isn't local."""
+    """The named environment must exist and still place a Kali attacker + a .10 host (the DB key-holder). Skips if MHBench is not local."""
     md = _mhbench_dir()
     if md is None:
         pytest.skip("mhbench_dir not resolvable; skipping env-file check")
@@ -933,9 +839,7 @@ if __name__ == "__main__":
 # ------------------------------------------------------------------ env↔defender interface contract
 
 def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
-    """The environment's defender-relevant spec: defender_box_spec() reports the defender box (or None) in the deployed
-    topology includes a defender box. The arena uses it to enforce 'a configured defender requires a
-    defender box from the environment' — the check is the ARENA's, not the defender plugin's."""
+    """defender_box_spec() reports the defender box (or None) in the deployed topology. The arena uses it to enforce that a configured defender requires a box from the environment."""
     from arena.environment.plugins.mhbench.deployer import defender_box_spec
 
     base = {"networks": [{"name": "victims", "subnets": [
@@ -957,8 +861,7 @@ def test_defender_box_spec_detects_the_env_defender_box(tmp_path):
 
 
 def test_defender_box_spec_none_when_no_env():
-    """No deployed environment (or no topology) => cannot assert a box, so the contract check will fail
-    a defender run rather than assume one exists."""
+    """No deployed environment or topology means no box can be asserted, so the contract check fails a defender run rather than assume one exists."""
     from arena.environment.plugins.mhbench.deployer import defender_box_spec
     assert defender_box_spec(None, None) is None
 
@@ -966,8 +869,7 @@ def test_defender_box_spec_none_when_no_env():
 # ------------------------------------------------------------------ attacker plugins: no god key
 
 def test_c2_builds_ssh_from_scoped_setupaccess():
-    """Regression: the foothold C2 reaches the foothold via the SetupAccess (scoped key + env routing),
-    not a management key read off disk."""
+    """Regression: the foothold C2 reaches the foothold via the SetupAccess (scoped key + env routing), not a management key read off disk."""
     from arena.attacker.plugins.incalmo_strategy import c2
     fa = AttackerSetupAccess(name="foothold", host="192.168.0.9", user="root", ssh_key="/scoped/attacker_key",
                      ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i /jump/fwd root@1.2.3.4"')

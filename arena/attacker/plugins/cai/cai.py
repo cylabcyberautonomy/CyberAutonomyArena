@@ -29,7 +29,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
     type: Literal["cai_llm"]
     REQUIRED_CONFIG_KEYS = frozenset({"model", "objective", "foothold_ip"})
     model: str = "claude-sonnet-4-5"
-    api_base: Optional[str] = None  # OpenAI-compatible base URL (e.g. glm); None for Anthropic
+    api_base: Optional[str] = None
 
     @classmethod
     def ui_schema(cls) -> PluginUISchema:
@@ -56,7 +56,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
         }
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig, bastion_ip: Optional[str], access=None) -> PreparedAttacker:
-        base = self.primary_access(access).ssh_base()  # run_setup persists access; here just use it
+        base = self.primary_access(access).ssh_base()
         install = (
             "set -e; mkdir -p /opt/cai/logs; "
             "export PATH=$HOME/.local/bin:$PATH; "
@@ -106,7 +106,7 @@ class CAIAttacker(AttackerPlugin, config_type="cai_llm"):
         return await asyncio.create_subprocess_exec(
             *base, f"{_REMOTE_DIR}/venv/bin/python {_REMOTE_DIR}/cai_runner.py {_REMOTE_DIR}/attacker_config.json",
             stdout=log_file, stderr=subprocess.STDOUT,
-            start_new_session=True,  # own group so a force-kill reaps the local ssh client cleanly (remote runner is killed via stop()'s pkill)
+            start_new_session=True,
         )
 
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:

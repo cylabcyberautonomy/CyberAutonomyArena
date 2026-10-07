@@ -25,11 +25,7 @@ from cai.agents.red_teamer import redteam_agent
 
 @function_tool
 def finish(summary: str) -> str:
-    """Call this when the objective is complete or no further progress is possible, then stop.
-
-    Args:
-        summary: a brief summary of what was accomplished.
-    """
+    """Call this when the objective is complete or no further progress is possible, then stop."""
     return "Acknowledged. Provide your final summary and stop."
 
 

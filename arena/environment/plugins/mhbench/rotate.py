@@ -18,7 +18,6 @@ def _rotate_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     cli = mhbench_dir / "cli.py"
     exp_dir = output_root(name, cfg) / name / "experiment"
 
-    # bastion_ip is not carried on the experiment — re-read it from where provisioning wrote it.
     provision_result = exp_dir / "provision_result.json"
     bastion_ip = None
     if provision_result.exists():

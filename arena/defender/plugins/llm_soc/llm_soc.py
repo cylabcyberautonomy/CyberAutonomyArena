@@ -15,29 +15,9 @@ from ....experiment_log import output_root
 from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 
-# The harness-run reactive-loop process, launched in setup() (single-process arm-then-loop mirror) and
-# handed to run_start via start(). Keyed by experiment_name — the plugin is a stateless pydantic model.
 _PROCS: dict = {}
 
-# Model names Perry's own LangChainRegistry (defender/agents/langchain_registry.py)
-# knows how to build — a separate, simpler registry from Incalmo's, used only by
-# this defender-side LLM agent. The fixed names below (claude-3.7-sonnet, gpt-4o,
-# ...) call the direct provider SDKs directly and need ANTHROPIC_API_KEY /
-# OPENAI_API_KEY / GOOGLE_API_KEY set - none of which are funded in this
-# account. "litellm/<model>" and "openrouter/<model-slug>" route through the
-# same working CMU LiteLLM gateway / OpenRouter credentials Incalmo already
-# uses (LITELLM_API_KEY+LITELLM_BASE_URL / OPENROUTER_API_KEY in Deception's
-# own .env) - prefer those unless a direct-provider key gets added later.
-# The Sonnet-4.5-vs-5 defender comparison MUST keep both arms on ONE route, or
-# provider/backend differences confound the model comparison. OpenRouter is the
-# only route that serves BOTH: the CMU LiteLLM gateway
-# (ai-gateway.andrew.cmu.edu) exposes claude-sonnet-4, -4-6 and -5 but NO 4.5
-# (verified against its /models list, 2026-09-14). So the two canonical arms are
-# the OpenRouter slugs below (both confirmed present in OpenRouter's /models).
-# Keep them first, and do not pin the 5 arm to litellm/... while the 4.5 arm is
-# on openrouter/... .
 _LLM_MODEL_SUGGESTIONS = [
-    # Canonical same-route comparison pair (OpenRouter):
     "openrouter/anthropic/claude-sonnet-5",
     "openrouter/anthropic/claude-sonnet-4.5",
     "litellm/us.anthropic.claude-sonnet-5",
@@ -62,40 +42,26 @@ _LLM_MODEL_SUGGESTIONS = [
 
 
 class PreparedLLMSOC(PreparedDefender):
-    """llm_soc's box-telemetry baton: the per-experiment box ES ssh -L tunnel + falco/sysflow indices, plus
-    the box-agent endpoint for FalcoLLMC2Block. Opaque to the base; baked into the runner config by this
-    plugin's own build_config (symmetric with a C2 attacker's PreparedAttacker subclass)."""
+    """llm_soc's box-telemetry baton: box ES tunnel + falco/sysflow indices + box-agent endpoint."""
     es_url: Optional[str] = None
     falco_index: Optional[str] = None
     sysflow_index: Optional[str] = None
     box_agent_host: Optional[str] = None
     box_agent_port: Optional[int] = None
     box_agent_token: Optional[str] = None
-    # The env-action channel — ONE token'd TCP endpoint the arena armed on harness-loopback. build_config bakes these.
     env_action_url: Optional[str] = None
     env_action_token: Optional[str] = None
 
 
 class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
-    """Wraps Perry's LLM-SOC-analyst strategies (defender/strategy/llm/*.py). On a
-    Falco-flagged suspicious host, an LLM agent (SysFlowAgent) investigates by
-    iteratively querying that host's SysFlow telemetry in Elasticsearch, then
-    reports whether it believes the host is compromised and, if so, the attacker's
-    C2 IP.
-
-    - FalcoLLM: restores the host from a clean snapshot once the LLM confirms malware.
-    - FalcoLLMC2Block: instead blocks the C2 IP the LLM identifies, leaving the host up.
-    """
+    """Wraps Perry's LLM-SOC-analyst strategies. FalcoLLM restores a confirmed host. FalcoLLMC2Block blocks its C2 IP."""
 
     type: Literal["llm_soc"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "strategy", "llm_model"})
-    code_dir_field = "llm_soc_dir"          # Defense/Perry repo for this defender (per-plugin)
-    uses_env_actions = True                  # issues env-actions (FalcoLLM RebuildHost; FalcoLLMC2Block BlockIP) -> base arms the serving window + env channel; this plugin picks its UDS door in setup()
+    code_dir_field = "llm_soc_dir"
+    uses_env_actions = True
     code_python_field = "llm_soc_python"
-    strategy: str  # "FalcoLLM" or "FalcoLLMC2Block"
-    # Default to Sonnet-5 on OpenRouter so it shares a route with the 4.5
-    # comparison arm (openrouter/anthropic/claude-sonnet-4.5). See
-    # _LLM_MODEL_SUGGESTIONS for why litellm can't host the 4.5 arm.
+    strategy: str
     llm_model: str = "openrouter/anthropic/claude-sonnet-5"
 
     @field_validator("strategy", mode="before")
@@ -133,7 +99,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         }
 
     def box_ingress(self) -> dict[str, list[int]]:
-        # FalcoLLM reads the box ES (falco + sysflow) -> needs telemetry routed to box:9200.
         return {"telemetry": [9200]}
 
     def build_config(
@@ -146,42 +111,26 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "llm_model": self.llm_model,
-            # No topology_spec: this defender builds its Network from the env-provided DefenderEnvSpec
-            # (forwarded by the framework), and reads the box ES tunnel url + indices + box-agent endpoint
-            # from the Phase-A baton this plugin produced — baked in below.
         }
-        # bake this plugin's own Phase-A box baton (es tunnel + indices + box-agent endpoint); opaque to the
-        # base, so a telemetry defender forwards it here (symmetric with the attacker baking its C2 URLs).
         built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built
 
     async def setup(self, experiment, cfg: ExperimentManagerConfig,
                     bastion_ip: Optional[str] = None, access=None) -> PreparedDefender:
-        """ARM the defender and BLOCK until armed — mirror of AttackerPlugin.setup(). Stand up this run's box
-        ES + box agent, write the runner config, then LAUNCH the single arm-then-loop runner and block until
-        it signals armed. FalcoLLM / FalcoLLMC2Block deploy NO decoys: their initialize() subscribes to
-        telemetry + sets begin_monitoring (instant, no placement), which the runner does in ONE process
-        before touching the readiness marker setup() polls (_wait_local_ready) — so setup() returning IS
-        armed, and begin_monitoring is set before the attacker runs (no early telemetry missed). The process
-        is stashed in _PROCS and handed to run_start via start(). Blocking SSH work runs off the event loop."""
+        """Stand up box ES + box agent, write the config, then launch the arm-then-loop runner and block until armed."""
         experiment_name = experiment.experiment_name
         env_spec = experiment._defender_env_spec
         box_cfg = {"defender_env_spec": env_spec.model_dump() if env_spec is not None else {},
                    "defender_setup_access": [a.model_dump() for a in (access or [])]}
         loop = asyncio.get_event_loop()
         es = await loop.run_in_executor(None, self.prepare_box_es, box_cfg, experiment_name, cfg)
-        box_cfg.update(es)  # the box-agent config reads sysflow_index from prepare_box_es's output
+        box_cfg.update(es)
         agent = await loop.run_in_executor(None, self.prepare_box_agent, box_cfg, experiment_name, cfg)
-        # The env-action channel: the ONE token'd TCP endpoint the arena armed on harness-loopback (a
-        # harness-run runner reaches 127.0.0.1:port directly). Carried on the baton; build_config bakes it.
         _box_port = getattr(experiment, "_env_action_box_port", None)
         prepared = PreparedLLMSOC(
             env_action_url=(f"http://127.0.0.1:{_box_port}" if _box_port else None),
             env_action_token=getattr(experiment, "_env_action_token", None),
             **{**es, **agent})
-        # Write the runner config setup() launches against (the base re-writes the same config in run_setup;
-        # harmless — the runner already read it at launch). build_config bakes the baton, then inject the
-        # credential-bearing access + routing (kept out of build_config by the leak guard, as run_setup does).
         config_path = output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         built = self.build_config(experiment_name, env_spec, prepared)
@@ -192,19 +141,12 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         built["bastion_ip"] = bastion_ip
         built["log_dir"] = str(output_root(experiment_name, cfg) / experiment_name / "defender")
         config_path.write_text(json.dumps(built, indent=2))
-        # ARM = launch the single arm-then-loop runner and block until it signals armed (box-resident
-        # mirror): the runner subscribes to telemetry + begin_monitoring, then touches the marker and loops.
         self._clear_ready_marker(experiment_name, cfg)
         proc = await self._launch_runner(config_path, experiment_name, cfg)
         _PROCS[experiment_name] = proc
         await self._wait_local_ready(experiment_name, cfg, proc)
         return prepared
 
-    # -- box agent deploy (the defender's in-environment effector) ---------------------------------
-    # Copied per dynamic-defender plugin (box_agent_install.sh co-located), like prepare_box_es. Ships the
-    # Perry runtime to the bare box, starts the agent on box:8900, opens a harness->box ssh -L tunnel (the
-    # box is in-env, only reachable via the bastion), and injects box_agent_host/port/token into the config
-    # the runner reads so RemoteEnvOrchestrator.from_config can reach it. NOT YET LIVE-VALIDATED.
     def _box_agent_tunnel_pidfile(self, experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "box_agent_tunnel.pid"
 
@@ -233,13 +175,8 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         target = f"{user}@{box_ip}"
         repo_dir = str(self._code_dir(cfg))
 
-        # 1. ship ONLY the ansible/ YAML tree + the standalone agent (the self-contained agent imports no
-        #    Perry Python — which needs py3.10+ — so the box's py3.8 is fine). Via the bastion jump.
         rsync_e = "ssh " + " ".join(shlex.quote(o) for o in ssh_opts)
         subprocess.run(
-            # artifacts/ is ansible-runner's OWN output (gitignored UUID job dirs — can grow to GBs over a
-            # live checkout's lifetime; no playbook reads it), so never ship it to the box: it has blown the
-            # 600s timeout on a bloated checkout. The box needs the YAML + vendored .deb/.zip inputs only.
             ["rsync", "-a", "--delete", "-e", rsync_e, "--exclude", ".git", "--exclude", "__pycache__",
              "--exclude", "artifacts",
              repo_dir.rstrip("/") + "/ansible/", f"{target}:/root/ansible/"],
@@ -247,28 +184,21 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         agent_src = Path(repo_dir) / "defender" / "box_agent" / "agent.py"
         subprocess.run([*ssh_base, target, "cat > /root/box_agent_agent.py"],
                        input=agent_src.read_text(), text=True, check=True, timeout=60)
-        # 2. ship the scoped key the box agent's AnsibleRunner uses to reach victims (box -> victim direct).
         subprocess.run([*ssh_base, target, "cat > /root/scoped_key && chmod 600 /root/scoped_key"],
                        input=Path(key).read_text(), text=True, check=True, timeout=60)
-        # 3. write + ship the box-agent config.
         token = secrets.token_urlsafe(24)
         box_cfg = {
             "token": token, "host": "127.0.0.1", "port": 8900,
             "ssh_key_path": "/root/scoped_key", "ansible_dir": "/root/ansible", "log_dir": "/root",
-            # A decoy's SysFlow exports to the box's OWN ES, reached from the decoy at the box's in-env
-            # address (the box runs ES on :9200 from prepare_box_es). Plain HTTP, no auth (box ES has
-            # security disabled). NOTE live-unknown: decoy->box:9200 routing + box ES binding 0.0.0.0.
             "es_address": f"http://{box_ip}:9200",
             "es_index": cfgd.get("sysflow_index", "sysflow"),
         }
         subprocess.run([*ssh_base, target, "cat > /root/box_agent_config.json"],
                        input=_json.dumps(box_cfg), text=True, check=True, timeout=60)
-        # 4. ship + run the install/start script (idempotent).
         script = (Path(__file__).parent / "box_agent_install.sh").read_text()
         subprocess.run([*ssh_base, target, "cat > /root/box_agent_install.sh && chmod +x /root/box_agent_install.sh"],
                        input=script, text=True, check=True, timeout=60)
         subprocess.run([*ssh_base, target, "/root/box_agent_install.sh"], check=True, timeout=600)
-        # 5. open a harness->box:8900 ssh -L tunnel (box is in-env, reachable only through the bastion).
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             lport = s.getsockname()[1]
@@ -277,7 +207,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         pidfile = self._box_agent_tunnel_pidfile(experiment_name, cfg)
         pidfile.parent.mkdir(parents=True, exist_ok=True)
         pidfile.write_text(str(tunnel.pid))
-        # 6. wait for the agent's /health through the tunnel.
         import urllib.request
         deadline = time.time() + 120
         while time.time() < deadline:
@@ -289,7 +218,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                 time.sleep(3)
         else:
             raise RuntimeError(f"box agent did not answer /health on {box_ip}:8900 within 120s")
-        # 7. inject the reachable host/port/token into the config the runner reads.
         return {"box_agent_host": "127.0.0.1", "box_agent_port": lport, "box_agent_token": token}
 
     # Copied per box-using defender (self-contained, like prepare_box_agent/prepare_box_es): pull the box
@@ -339,8 +267,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> None:
-        # Kill the harness-host->box ES ssh -L tunnel (no-op if this run used the legacy path).
-        # Stray decoy VMs, if any, are reaped by the environment's own teardown, not here.
         self._teardown_box_es_tunnel(experiment_name, cfg)
 
     async def start(
@@ -351,8 +277,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         cfg: ExperimentManagerConfig,
         access=None,
     ) -> asyncio.subprocess.Process:
-        """Hand run_start the arm-then-loop process launched + armed in setup() (box-resident mirror).
-        Fallback: launch now if setup() didn't run for this experiment."""
+        """Hand run_start the arm-then-loop process launched in setup(). Fallback: launch it now."""
         proc = _PROCS.pop(experiment_name, None)
         if proc is not None:
             return proc
@@ -364,8 +289,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> asyncio.subprocess.Process:
-        # Fallback launcher (start() normally hands back the process launched in setup()). Single
-        # arm-then-loop runner — no "run"-mode arg any more.
         return await self._launch_runner(config_path, experiment_name, cfg)
 
     async def _launch_runner(
@@ -388,10 +311,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             stderr=subprocess.STDOUT,
         )
 
-    # -- readiness: setup() blocks until the runner signals armed -------------------------------------
-    # Copied per harness-run reactive defender (like prepare_box_es / box_agent_install.sh), not a base
-    # method — canary/llm_soc_box carry the box-resident (SSH-polled) twin. The marker is the plugin-internal
-    # arm signal the runner touches once Strategy.initialize() has returned (subscribed + begin_monitoring).
     @staticmethod
     def _ready_marker(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "defender_ready"
@@ -404,10 +323,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
 
     async def _wait_local_ready(self, experiment_name: str, cfg: ExperimentManagerConfig, process,
                                 timeout_s: float = 1800.0, poll_s: float = 2.0) -> float:
-        """Block until the runner writes its readiness marker (Strategy.initialize() returned — armed), then
-        return seconds waited. Raises if the process dies first (failed arm) or arming exceeds timeout — an
-        undefended run must never be reported defended. Mirror of the box-resident _wait_box_ready (a local
-        marker poll instead of an SSH one)."""
+        """Block until the runner writes its readiness marker. Raise on process death or timeout."""
         marker = self._ready_marker(experiment_name, cfg)
         start = time.monotonic()
         while True:
@@ -420,24 +336,12 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                 raise RuntimeError(f"defender did not arm within {timeout_s:.0f}s (no {marker})")
             await asyncio.sleep(poll_s)
 
-    # -- per-experiment Elasticsearch on the defender box -----------------------------------------
-    # The environment provisions a bare, isolated box (defender_subnet) and ships sensor telemetry to it
-    # via its relay (victim -> relay(mgmt:9200) -> box:9200) under plain "falco"/"sysflow" indices. This
-    # defender stands up ES on the box (bare box, no docker/java -> the ES tarball bundles a JDK) and opens
-    # an ssh -L tunnel so its detection loop reads the box's OWN ES at localhost:<port> — each run gets its
-    # own ES (no shared harness ES), fixing cross-experiment contamination + shard-cap arming failures.
-    # Copied into each telemetry-consuming plugin (box_es_install.sh is co-located) so each plugin is
-    # self-contained — no shared base method or helper module.
     @staticmethod
     def _es_tunnel_pidfile(experiment_name: str, cfg: ExperimentManagerConfig) -> Path:
         return output_root(experiment_name, cfg) / experiment_name / "defender" / "es_tunnel.pid"
 
     def prepare_box_es(self, box_cfg: dict, experiment_name: str, cfg: ExperimentManagerConfig) -> dict:
-        """Install ES on the defender box (idempotent) and open a harness-host->box:9200 ssh -L tunnel.
-        Takes box_cfg ({defender_env_spec, defender_setup_access} — the env-produced box inventory + access,
-        NOT a written config, so it can run BEFORE build_config) and RETURNS {es_url, falco_index,
-        sysflow_index}; build_config() bakes those in. Drops an es_tunnel.pid for teardown. Fail-closed:
-        raises if the topology has no defender box — box ES is required, no shared-harness-ES fallback."""
+        """Install ES on the defender box and open a harness->box:9200 ssh -L tunnel. Returns es_url + indices."""
         import shlex
         import socket
         import time
@@ -460,16 +364,12 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                     "-o", "UserKnownHostsFile=/dev/null", "-p", port, *common]
         target = f"{user}@{box_ip}"
 
-        # 1. ship + run the ES install (idempotent: the script no-ops if :9200 is already up).
-        #    Two steps so the stdin write completes before the channel closes (backgrounding a
-        #    stdin-reading remote cmd in one shot truncates it).
         script = (Path(__file__).parent / "box_es_install.sh").read_text()
         subprocess.run([*ssh_base, target, "cat > /root/box_es_install.sh && chmod +x /root/box_es_install.sh"],
                        input=script, text=True, check=True, timeout=60)
         subprocess.run([*ssh_base, target,
                         "nohup /root/box_es_install.sh > /root/es_install.log 2>&1 & echo launched"],
                        check=True, timeout=30)
-        # 2. wait for ES on the box (fresh install downloads a ~650MB tarball -> allow a few min).
         deadline = time.time() + 300
         while time.time() < deadline:
             r = subprocess.run([*ssh_base, target, "curl -s -m 5 -o /dev/null -w '%{http_code}' localhost:9200"],
@@ -480,7 +380,6 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
         else:
             raise RuntimeError(f"defender-box ES did not come up on {box_ip}:9200 within 300s")
 
-        # 3. open an ssh -L tunnel harness-host:<lport> -> box:9200 (via the box access's bastion jump).
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             lport = s.getsockname()[1]

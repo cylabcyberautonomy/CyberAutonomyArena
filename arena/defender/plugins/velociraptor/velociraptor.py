@@ -1,17 +1,4 @@
-"""Velociraptor EDR defender plugin.
-
-Deploys a per-experiment Velociraptor deployment — server on the experiment
-bastion, clients on the victim hosts — then runs an EDR loop that detects the
-MHBench kill chain from process-execution telemetry and actively responds
-(kill process / quarantine host) via Velociraptor collections. Server + clients
-are torn down with the environment (no shared, long-lived infrastructure).
-
-Self-contained in the harness (its own bastion-hop deploy + a stdlib runner that
-drives the server over SSH), so it needs nothing from MHBench's playbook registry
-or the Defense-MHBench (Perry) repo. The velociraptor binary is a single static Go
-binary shipped from the harness (cfg.velociraptor_dir/bin/velociraptor) — no apt
-or download on the range.
-"""
+"""Velociraptor EDR defender plugin: detection + active response over a per-experiment deployment."""
 from __future__ import annotations
 
 import asyncio
@@ -29,8 +16,6 @@ from ....ui_schema import PluginUISchema
 from ..base import DefenderPlugin, PreparedDefender
 from . import deploy
 
-# The mgmt-host address Velo clients beacon to (where the env's mgmt:8000->box:8000 forward listens);
-# same host as the falcosidekick relay. Constant across deploys (management subnet host).
 _MGMT_ADVERTISE_IP = "10.0.1.10"
 
 
@@ -47,23 +32,16 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
 
     type: Literal["velociraptor"]
     REQUIRED_CONFIG_KEYS = frozenset({"experiment_name", "response_mode"})
-    # External code path (per-plugin, like every other repo-backed plugin): the Velociraptor checkout
-    # holding bin/velociraptor. It's a Go binary, so there is no venv — code_python_field stays None.
-    # Resolved generically via self._code_dir(cfg) / cfg.plugin_dir("velociraptor_dir").
     code_dir_field = "velociraptor_dir"
-    # off | kill | quarantine | both  — what to do when a kill-chain rule fires.
     response_mode: str = "kill"
     poll_interval: float = 15.0
-    # Paths of planted data files to treat as crown jewels for the data-access rule.
     planted_data_paths: list[str] = []
 
-    # Filled in setup(), consumed by build_config() (same instance, called right after).
     _server_ip: Optional[str] = PrivateAttr(default=None)
     _expected_clients: int = PrivateAttr(default=0)
     _ssh_key: Optional[str] = PrivateAttr(default=None)
-    _server_proxy: Optional[str] = PrivateAttr(default=None)  # bastion ProxyCommand to reach the box
+    _server_proxy: Optional[str] = PrivateAttr(default=None)
 
-    # -- lifecycle ---------------------------------------------------------
     async def provision_box(
         self,
         experiment_name: str,
@@ -73,16 +51,10 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         defender_access=None,
         needs_agent: bool = False,
     ) -> "PreparedDefender":
-        # Velociraptor stands its server (box) + clients (victims) up here — the provision_box HOOK the base
-        # setup() template calls. No box ES / box agent, so it returns an empty baton.
+        """Deploy the server (box) + clients (victims). Returns an empty baton (no box ES/agent)."""
         if bastion_ip is None:
             raise RuntimeError("Velociraptor defender needs the experiment bastion IP (bastion_ip).")
         velo_dir = self._code_dir(cfg)
-        # The server runs ON the defender box. Read the box + the SCOPED defender access (key + bastion
-        # routing) from the env-produced specs the arena injected (defender_env_spec / defender_access) —
-        # NOT a specific backend's deployer — so this stays environment-agnostic. The box + victims sit
-        # behind the bastion, so the deploy reaches both via that scoped-key ProxyCommand. This is the
-        # same access the other defenders read out of their injected config (see base.prepare_box_es).
         box = getattr(defender_env_spec, "box", None)
         if not (box and box.ip):
             raise RuntimeError(
@@ -94,10 +66,8 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         scoped_key = box_access.ssh_key
         proxy_common = box_access.ssh_common_args
         self._ssh_key = str(scoped_key)
-        self._server_ip = box_ip                 # server runs here; runner drives it over the box's proxy
-        self._server_proxy = proxy_common        # runner SSHes to the box via this bastion ProxyCommand
-        # Victims from the env-produced run spec (backend-agnostic) — NOT a topology parse. The env already
-        # excluded the attacker + the defender box, so this is exactly the monitored estate.
+        self._server_ip = box_ip
+        self._server_proxy = proxy_common
         victims = deploy.victims_from_spec(defender_env_spec)
         if not victims:
             raise RuntimeError("Velociraptor: defender_env_spec carries no victim hosts to monitor.")
@@ -106,12 +76,9 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         log_path = out / "velociraptor_deploy.log"
 
         loop = asyncio.get_event_loop()
-        # 1. generate configs advertising the mgmt-host address clients beacon to (the forward-listen
-        #    IP), while the server binds 0.0.0.0:8000 on the box.
         cfgs = await loop.run_in_executor(
             None, lambda: deploy.generate_configs(velo_dir, _MGMT_ADVERTISE_IP, out / "velociraptor_cfg")
         )
-        # 2. deploy server (box) + clients (victims), both via the scoped-key bastion ProxyCommand
         await loop.run_in_executor(
             None,
             lambda: deploy.run_play(
@@ -135,24 +102,21 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         return PreparedDefender()
 
     def box_ingress(self) -> dict[str, list[int]]:
-        # Server-mediated EDR: clients beacon in via the victim->mgmt->box:8000 forward. No box ES.
         return {"forward": [8000]}
 
     def build_config(
         self,
         experiment_name: str,
         env_spec=None,
-        prepared=None,  # Phase-A baton; velociraptor has no box ES, so it is unused
+        prepared=None,
     ) -> dict:
-        # No topology_spec: the monitored estate comes from defender_env_spec (forwarded into the config by
-        # the framework, run_setup), backend-agnostic; the runner drives the already-deployed server.
         built = {
             "experiment_name": experiment_name,
             "install_dir": deploy.INSTALL_DIR,
-            "server_ip": self._server_ip,          # the defender box (server runs here)
-            "server_proxy": self._server_proxy,    # bastion ProxyCommand so the runner can SSH to the box
+            "server_ip": self._server_ip,
+            "server_proxy": self._server_proxy,
             "expected_clients": self._expected_clients,
-            "ssh_key": self._ssh_key,   # the injected scoped defender key (set in setup(); no god-key fallback)
+            "ssh_key": self._ssh_key,
             "response_mode": self.response_mode,
             "poll_interval": self.poll_interval,
             "ready_timeout": 600,
@@ -169,8 +133,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         log_path = _defender_out(experiment_name, cfg) / "defender.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
-        # stdlib-only runner (shells out to ssh + the remote binary) — run under the
-        # harness's own interpreter; no extra venv needed.
         return await asyncio.create_subprocess_exec(
             sys.executable,
             str(Path(__file__).parent / "runner.py"),
@@ -185,8 +147,6 @@ class VelociraptorDefenderPlugin(DefenderPlugin, config_type="velociraptor"):
         experiment_name: str,
         cfg: ExperimentManagerConfig,
     ) -> None:
-        # Server+clients live on VMs that MHBench destroys, so this is best-effort:
-        # nothing to leak, nothing that blocks env reclaim if it fails.
         return None
 
     @classmethod

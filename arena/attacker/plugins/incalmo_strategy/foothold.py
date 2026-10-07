@@ -1,15 +1,4 @@
-"""Attacker-owned foothold prep — the attacker prepares its own box, over the bastion, using the
-credentials in the AttackerEnvSpec. No MHBench cli, no environment.deployer.
-
-The environment provides the box (a reachable foothold VM) and the access (bastion + key) in the
-AttackerEnvSpec; the attacker does everything ON the box itself. This mirrors how the Velociraptor
-and caldera_human plugins run their own bastion-hop ansible with vendored plays (aux/), reusing
-only the ansible-playbook binary — not MHBench's orchestration.
-
-Plays (vendored in aux/):
-  start_incalmo.yml     — download + launch the sandcat C2 agent, beaconing to caldera_ip:port
-  install_metasploit.yml — msfrpcd + pymetasploit3 (only the msf/LLM attackers need it)
-"""
+"""Attacker-owned foothold prep: run vendored ansible plays on the foothold over the bastion."""
 from __future__ import annotations
 
 import json
@@ -28,13 +17,11 @@ _AUX = Path(__file__).parent / "aux"
 
 
 def _ansible_playbook_bin(cfg: ExperimentManagerConfig) -> Path:
-    # Reuse the ansible-playbook binary (a tool), not MHBench's orchestration — same as the
-    # velociraptor/caldera_human plugins.
     return cfg.mhbench_dir / ".venv" / "bin" / "ansible-playbook"
 
 
 def _caldera_ip_port(remote_url: Optional[str]) -> tuple[Optional[str], Optional[int]]:
-    """Parse the C2 URL the sandcat agent beacons to (what MHBench passed as caldera_ip/port)."""
+    """Parse the C2 URL the sandcat agent beacons to into (hostname, port)."""
     if not remote_url:
         return None, None
     u = urlparse(remote_url)
@@ -42,7 +29,7 @@ def _caldera_ip_port(remote_url: Optional[str]) -> tuple[Optional[str], Optional
 
 
 def _write_inventory(access: list[AttackerSetupAccess], tmp: Path) -> Path:
-    """One inventory over every foothold — ansible preps them all at once (multi-host)."""
+    """Write an ansible inventory covering every foothold."""
     if not access:
         raise RuntimeError("attacker foothold prep got no AttackerSetupAccess entries")
     base = (
@@ -53,7 +40,6 @@ def _write_inventory(access: list[AttackerSetupAccess], tmp: Path) -> Path:
     for fa in access:
         if not fa.host or not fa.ssh_key:
             raise RuntimeError(f"foothold {fa.name!r} needs host + ssh_key (got host={fa.host}, ssh_key={fa.ssh_key})")
-        # Routing (bastion/relay ProxyCommand, or empty for direct) is opaque and env-owned.
         common = f"{base} {fa.ssh_common_args}".strip()
         hosts[fa.name] = {
             "ansible_host": str(fa.host),
@@ -61,14 +47,14 @@ def _write_inventory(access: list[AttackerSetupAccess], tmp: Path) -> Path:
             "ansible_user": fa.user,
             "ansible_ssh_private_key_file": os.path.expanduser(fa.ssh_key),
             "ansible_ssh_common_args": common,
-            "user": fa.user,  # the vendored plays' `become_user: {{ user }}` resolves per-host from here
+            "user": fa.user,
         }
     p = tmp / "inventory.json"
     p.write_text(json.dumps({"attacker": {"hosts": hosts}}))
     return p
 
 
-_GROUP = "attacker"  # inventory group holding every foothold; the vendored plays' `{{ host }}` targets it
+_GROUP = "attacker"
 
 
 def _run_play_sync(play: str, access: list[AttackerSetupAccess], extravars: dict,
@@ -82,9 +68,6 @@ def _run_play_sync(play: str, access: list[AttackerSetupAccess], extravars: dict
         tmp = Path(td)
         inv = _write_inventory(access, tmp)
         varfile = tmp / "vars.json"
-        # The vendored plays use `{{ host }}` (the target group) and `{{ user }}` (per-host, resolved
-        # from each foothold's inventory `user` var — see _write_inventory), so multiple footholds
-        # with different accounts still work.
         varfile.write_text(json.dumps({"host": _GROUP, **extravars}))
         cmd = [str(_ansible_playbook_bin(cfg)), str(play_path), "-i", str(inv), "-e", f"@{varfile}"]
         env = {
@@ -117,7 +100,7 @@ async def run_play(play: str, access: list[AttackerSetupAccess], extravars: dict
 
 async def land_sandcat(access: list[AttackerSetupAccess], remote_url: Optional[str],
                        cfg: ExperimentManagerConfig, experiment_name: str) -> None:
-    """Download + start the sandcat C2 agent on the attacker's foothold(s) (MHBench's start_incalmo)."""
+    """Download and start the sandcat C2 agent on the attacker's foothold(s)."""
     caldera_ip, caldera_port = _caldera_ip_port(remote_url)
     if not caldera_ip or not caldera_port:
         raise RuntimeError(f"cannot derive caldera_ip/port from C2 URL {remote_url!r} for sandcat landing")
@@ -126,5 +109,5 @@ async def land_sandcat(access: list[AttackerSetupAccess], remote_url: Optional[s
 
 
 async def install_metasploit(access: list[AttackerSetupAccess], cfg: ExperimentManagerConfig, experiment_name: str) -> None:
-    """Install msfrpcd + pymetasploit3 on the attacker's foothold(s) (MHBench's install_metasploit)."""
+    """Install msfrpcd + pymetasploit3 on the attacker's foothold(s)."""
     await run_play("install_metasploit.yml", access, {}, cfg, experiment_name)

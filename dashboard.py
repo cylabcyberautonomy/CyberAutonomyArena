@@ -21,10 +21,6 @@ EST = timezone(timedelta(hours=-5))
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 EXPERIMENT_SERVER = "http://localhost:8000/experiments"
 
-# Matches ExperimentManagerConfig.output_dir's own default (_HERE / "output") - the
-# dashboard has no access to that Pydantic config, so it's re-derived the same way:
-# relative to this file's own location, since dashboard.py and config.py live in the
-# same directory.
 OUTPUT_ROOT = Path(__file__).parent / "output"
 
 def _load_config() -> dict:
@@ -39,20 +35,12 @@ MHBENCH_ENVIRONMENTS_DIR = (
     if "mhbench_dir" in _cfg
     else Path("/tmp/missing-mhbench")
 )
-# Honor an explicit output_dir from config (arena points it at a custom path);
-# the relative default above only applies when config doesn't set one. This drives
-# the log viewer's file browsing and the Anthropic token_usage.json scan.
 if _cfg.get("output_dir"):
     OUTPUT_ROOT = Path(_cfg["output_dir"])
 
-# ── API usage tab: credentials ────────────────────────────────────────────────
-# The dashboard is its own long-running process with no access to a plugin's env
-# vars, so it reads them itself. Which repos to read, and which provider each one
-# feeds, is NOT hardcoded here - it comes from config.yaml's `usage_sources` (see
-# usage_json). This helper just parses one repo's .env given its config key.
+
 def _load_repo_env(dir_key: str) -> dict:
-    """Parse the .env at the root of the checkout config.yaml points to under
-    dir_key. A missing config entry or a missing file yields {} - never a raise."""
+    """Parse the .env at the root of the checkout config.yaml points to under dir_key. Return {} if absent."""
     env: dict = {}
     repo_dir = _cfg.get(dir_key)
     if not repo_dir:
@@ -72,14 +60,7 @@ def _load_repo_env(dir_key: str) -> dict:
     return env
 
 def _make_cred(env_dir_key: str | None, prefer_dotenv: bool):
-    """A name->value resolver for one usage_source. The source names a repo via
-    its config key (env_dir); the credential is read from that repo's .env and
-    the process env. prefer_dotenv flips the precedence: the defender loads its
-    own .env with override=True (to beat Incalmo's empty ANTHROPIC_API_KEY=''
-    placeholder that the dashboard process may have inherited), so a source
-    mirroring that sets prefer_dotenv: true to report the key actually in use.
-    An empty value on either side falls through. The dashboard holds no repo or
-    plugin name here - env_dir comes from config.yaml's usage_sources."""
+    """A name->value credential resolver for one usage_source, reading the repo's .env and the process env."""
     dotenv = _load_repo_env(env_dir_key) if env_dir_key else {}
 
     def cred(name: str) -> str | None:
@@ -90,9 +71,7 @@ def _make_cred(env_dir_key: str | None, prefer_dotenv: bool):
 
 
 def _get_json(url: str, headers: dict, params: dict | None = None) -> tuple[int, dict]:
-    """GET url, return (status_code, parsed_json). Never raises - a connection
-    failure comes back as (0, {"detail": "..."})  , matching the shape of an
-    HTTP error response so callers can treat both uniformly."""
+    """GET url and return (status_code, parsed_json). A connection failure returns (0, {"detail": ...})."""
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers=headers, method="GET")
@@ -110,11 +89,6 @@ def _get_json(url: str, headers: dict, params: dict | None = None) -> tuple[int,
 
 
 def _get_openrouter_usage(cred) -> dict:
-    # /api/v1/key (singular) is OpenRouter's self-serve endpoint: the calling
-    # key reports its OWN per-key limit/usage, no separate Provisioning key
-    # needed. This is the per-key spend cap OpenRouter's key-edit page calls
-    # "Credit limit" - distinct from (and more useful than) /api/v1/credits,
-    # which is account-wide lifetime purchased-credits/usage, not this key's cap.
     api_key = cred("OPENROUTER_API_KEY")
     if not api_key:
         return {"limit": None, "limit_remaining": None, "usage": None, "error": "OPENROUTER_API_KEY not found"}
@@ -127,7 +101,6 @@ def _get_openrouter_usage(cred) -> dict:
         return {"limit": None, "limit_remaining": None, "usage": None, "error": f"OpenRouter returned {status}: {body}"}
 
     data = body.get("data") or {}
-    # None (limit) means "no limit set" (unlimited key) - distinct from 0.
     return {"limit": data.get("limit"), "limit_remaining": data.get("limit_remaining"), "usage": data.get("usage"), "error": None}
 
 
@@ -141,11 +114,6 @@ def _get_litellm_usage(cred) -> dict:
     if root.endswith("/v1"):
         root = root[: -len("/v1")]
 
-    # Self-serve: LITELLM_API_KEY queries /key/info about itself. Requires that
-    # key's allowed_routes include "/key/info" alongside its normal
-    # llm_api_routes entry - a narrow, read-only grant added via (once, with a
-    # master key): POST {root}/key/update {"key": "<key>", "allowed_routes":
-    # ["llm_api_routes", "/key/info"]}.
     status, body = _get_json(f"{root}/key/info", headers={"Authorization": f"Bearer {api_key}"})
     if status != 200:
         return {"spend": None, "max_budget": None, "error": f"/key/info returned {status}: {body}"}
@@ -166,9 +134,7 @@ def _mask_key(api_key: str) -> str:
 
 
 def _anthropic_key_status(api_key: str) -> tuple[bool, str | None]:
-    """Is the defense repo's key still live? GET /v1/models is authenticated but
-    free - it spends no tokens - so the tab can probe it on every 30s refresh.
-    Returns (ok, error)."""
+    """Probe whether the key is still live with the free GET /v1/models. Return (ok, error)."""
     status, body = _get_json(
         f"{_ANTHROPIC_API_BASE}/v1/models",
         headers={"x-api-key": api_key, "anthropic-version": _ANTHROPIC_VERSION},
@@ -181,25 +147,7 @@ def _anthropic_key_status(api_key: str) -> tuple[bool, str | None]:
 
 
 def _anthropic_local_spend(output_root: Path) -> dict:
-    """Spend on the defender's direct anthropic/ route, summed from the defender's
-    own token_usage.json rows under output_root.
-
-    Unlike the two cards above, this is NOT what the provider says the key spent.
-    Anthropic has no self-serve per-key usage endpoint: OpenRouter's /api/v1/key and
-    LiteLLM's /key/info both let a key ask about itself, but Anthropic's usage and
-    cost reports live on the Admin API, which rejects a plain sk-ant-api key with
-    401 "The Admin API requires an Admin API key or an organization-scoped API key".
-    So the figure is reconstructed from what the defender logged - each row's `cost`
-    is token counts x Anthropic list price, computed by LangChainRegistry
-    .estimate_cost in the deception repo (which reprices cached input at Anthropic's
-    cache rates). It tracks the bill, it is not the bill.
-
-    Only rows the DEFENDER wrote count (parent dir "defender", at any depth under
-    output/): the attacker's token_usage.json rows are Incalmo's spend on Incalmo's
-    own credentials. Rows are matched on the "anthropic/" model prefix, which is
-    exactly the routing prefix LangChainRegistry sends to the first-party API with
-    ANTHROPIC_API_KEY - openrouter/ and litellm/ rows reach Anthropic models on
-    somebody else's bill and must not be counted here."""
+    """Reconstruct spend on the defender's direct anthropic/ route from its token_usage.json rows."""
     empty = {"cost": None, "calls": 0, "unpriced": 0, "models": [], "latest": None}
     if not output_root.is_dir():
         return empty
@@ -223,7 +171,7 @@ def _anthropic_local_spend(output_root: Path) -> dict:
             try:
                 row = json.loads(line)
             except ValueError:
-                continue    # a row half-written by a live run - skip the row, not the file
+                continue
             model = row.get("model") or ""
             if not model.startswith("anthropic/"):
                 continue
@@ -231,7 +179,7 @@ def _anthropic_local_spend(output_root: Path) -> dict:
             models.add(model[len("anthropic/"):])
             row_cost = row.get("cost")
             if row_cost is None:
-                unpriced += 1   # model absent from estimate_cost's price table
+                unpriced += 1
             else:
                 cost += row_cost
             timestamp = row.get("timestamp")
@@ -245,19 +193,7 @@ def _anthropic_local_spend(output_root: Path) -> dict:
 
 
 def _get_anthropic_org_cost(admin_key: str) -> dict:
-    """Month-to-date ORGANIZATION spend from the Admin Cost API - the only route to
-    a real billed figure, and optional because it needs a separate credential:
-    ANTHROPIC_ADMIN_KEY must hold an Admin key (sk-ant-admin...) or an org-scoped
-    key. Absent that, the card falls back to the computed number above.
-
-    Org-wide, not per-key: /v1/organizations/cost_report takes no api_key_ids filter
-    (that lives on usage_report, which reports tokens rather than dollars), so this
-    is an upper bound covering every other key in the org.
-
-    UNVERIFIED against a live Admin key - none exists on this host. Two things to
-    confirm when one does: that amounts sit at data[].results[].amount, and that
-    they really are cents (the docs say "decimal strings in lowest units (cents)"),
-    i.e. that dividing by 100 below is right."""
+    """Month-to-date organization spend from the Admin Cost API (needs an Admin or org-scoped key)."""
     now = datetime.now(timezone.utc)
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     status, body = _get_json(
@@ -283,10 +219,7 @@ def _get_anthropic_org_cost(admin_key: str) -> dict:
 
 
 def _anthropic_budget(cred) -> float | None:
-    """Optional spend cap, so this card can show the same spend-against-limit bar as
-    the other two. Anthropic publishes no per-key limit of its own, so the number has
-    to come from us: set ANTHROPIC_BUDGET_USD in the source's .env (or the dashboard's
-    environment) to whatever the key was funded with."""
+    """Optional spend cap from ANTHROPIC_BUDGET_USD, for the spend-against-limit bar."""
     raw = cred("ANTHROPIC_BUDGET_USD")
     if not raw:
         return None
@@ -314,7 +247,6 @@ def _get_anthropic_usage(cred, output_root: Path, scan_output: bool = False) -> 
     }
 
 
-# ── Plugin schema discovery ───────────────────────────────────────────────────
 _HARNESS_DIR = Path(__file__).parent
 if str(_HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(_HARNESS_DIR))
@@ -322,7 +254,7 @@ if str(_HARNESS_DIR) not in sys.path:
 _ATTACKER_SCHEMAS: dict = {}
 _DEFENDER_SCHEMAS: dict = {}
 try:
-    import arena.attacker.plugins   # triggers __init_subclass__ registration
+    import arena.attacker.plugins
     import arena.defender.plugins
     from arena.attacker.plugins.base import AttackerPlugin as _AtkBase
     from arena.defender.plugins.base import DefenderPlugin as _DefBase
@@ -339,14 +271,10 @@ try:
 except Exception as _e:
     import warnings
     warnings.warn(f"Plugin schema discovery failed ({_e}); type dropdowns will be empty.")
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 
 def load_experiments():
-    # The manager keeps the registry in memory (the old experiment_registry.yaml
-    # is never written), so read live state from its REST API. Return [] when the
-    # backend is unreachable, so the dashboard still renders.
+    """Read live experiment state from the manager's REST API. Return [] when the API is unreachable."""
     try:
         req = urllib.request.Request(EXPERIMENT_SERVER, method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -355,7 +283,6 @@ def load_experiments():
         return []
 
     def _parse_sort_ts(exp):
-        # Prefer explicit submission time, then creation time.
         raw = exp.get("submitted_at") or exp.get("created_at")
         if not raw:
             return datetime.min.replace(tzinfo=timezone.utc)
@@ -371,8 +298,7 @@ def load_experiments():
     return sorted(experiments, key=_parse_sort_ts, reverse=True)
 
 def load_environments():
-    """Return dict of group_name → sorted list of stems.
-    Subdirectories become groups; JSON files directly in the root go under 'misc'."""
+    """Return dict of group_name → sorted list of stems (subdirs are groups, root JSON goes under 'misc')."""
     groups = {}
     root = MHBENCH_ENVIRONMENTS_DIR
     if not root.exists():
@@ -384,13 +310,6 @@ def load_environments():
         groups["misc"] = misc
     return groups
 
-# Short, legible nickname per environment spec ("group/stem" - see _env_panels()),
-# used when the dashboard builds an experiment name out of the selected env. Same
-# reasoning as the plugin `short_names` maps in ui_schema.py: experiment names become
-# an SSH ControlPath component (mhbench-ssh/<experiment_name>/<hash>) and AF_UNIX
-# socket paths cap out at 108 bytes, so a long env stem silently breaks every SSH
-# connection. Specs with no entry here fall back to the plain stem (see submit JS) -
-# add a nickname here rather than relying on that fallback for anything long.
 ENV_NICKNAMES = {
     "non-generated/chain": "chain",
     "non-generated/chain_2hosts": "chain2h",
@@ -414,14 +333,13 @@ ENV_NICKNAMES = {
 
 
 
-_LOG_VIEWER_MAX_BYTES = 500_000  # tail-truncate anything bigger, rather than ship huge payloads
+_LOG_VIEWER_MAX_BYTES = 500_000
 
 def _experiment_output_dir(name: str) -> Path:
     return OUTPUT_ROOT / name
 
 def list_experiment_files(name: str) -> list[str]:
-    """Relative file paths under this experiment's output dir, sorted. Empty list (not an error) if
-    the experiment has no output yet or the name doesn't resolve to a real directory under OUTPUT_ROOT."""
+    """Return sorted relative file paths under this experiment's output dir. Return an empty list if none resolve."""
     base = _experiment_output_dir(name)
     try:
         base = base.resolve()
@@ -433,8 +351,7 @@ def list_experiment_files(name: str) -> list[str]:
     return sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
 
 def read_experiment_file(name: str, rel_path: str) -> tuple[bool, str]:
-    """Returns (ok, content-or-error-message). Guards path traversal - the resolved target must stay
-    under this specific experiment's own output dir, whatever `rel_path` claims."""
+    """Returns (ok, content-or-error-message), guarding path traversal under the experiment's output dir."""
     base = _experiment_output_dir(name)
     try:
         base = base.resolve()
@@ -461,9 +378,7 @@ def read_experiment_file(name: str, rel_path: str) -> tuple[bool, str]:
         return False, f"Error reading file: {e}"
 
 def _stat_experiment_file(name: str, rel_path: str):
-    """(size, mtime) for the same path read_experiment_file() would read, or None if it doesn't
-    resolve to a real file under this experiment's output dir. Used to detect whether a log
-    actually changed without re-reading (and re-shipping) its full content on every poll."""
+    """(size, mtime) for the path read_experiment_file() would read, or None if it doesn't resolve."""
     base = _experiment_output_dir(name)
     try:
         base = base.resolve()
@@ -477,19 +392,15 @@ def _stat_experiment_file(name: str, rel_path: str):
     except OSError:
         return None
 
-_LOG_WAIT_TIMEOUT_S = 25.0   # long-poll ceiling; client reconnects immediately after
-_LOG_WAIT_POLL_S = 0.5       # how often we stat() the file while waiting for it to change
+_LOG_WAIT_TIMEOUT_S = 25.0
+_LOG_WAIT_POLL_S = 0.5
 
 def wait_for_experiment_file_change(name: str, rel_path: str, since_size, since_mtime) -> dict:
-    """Blocks (up to _LOG_WAIT_TIMEOUT_S) until (size, mtime) differs from what the client last
-    saw, then returns fresh content - this is what lets the log viewer refresh "when the log
-    changes" rather than on a blind timer. since_size/since_mtime arrive as query-string strings
-    (or None on a client's first call for a file), so comparisons below are string vs str(int/float)."""
+    """Block until (size, mtime) differs from what the client last saw (or the timeout), then return fresh content."""
     deadline = time.monotonic() + _LOG_WAIT_TIMEOUT_S
     while True:
         st = _stat_experiment_file(name, rel_path)
         if st is None:
-            # File vanished (e.g. rotated) - report unconditionally rather than looping forever.
             ok, content = read_experiment_file(name, rel_path)
             return {"changed": True, "ok": ok, "content": content, "size": None, "mtime": None}
         size, mtime = st
@@ -500,20 +411,8 @@ def wait_for_experiment_file_change(name: str, rel_path: str, since_size, since_
         time.sleep(_LOG_WAIT_POLL_S)
 
 
-# ── Submit-shape adapters (arena wire format) ─────────────────────────────────
-# The browser builds the generic, backend-agnostic form from each plugin's
-# ui_schema(): environment as a spec string, attacker/defender as embedded
-# {type, ...}. The arena manager, however, takes the explicit {environment_plugin,
-# environment_spec} for the environment and a (plugin, spec) pair for the attacker
-# (the embedded 'attacker' block is rejected). Adapt here, server-side on the
-# manager's own host, so the frontend stays plugin/backend-agnostic. Defender keeps
-# its embedded {type, ...} form, so it passes through untouched.
 def _topology_spec(spec: str) -> str:
-    """The env picker's value is the <group>/<stem> the listing was built from (so the
-    nickname/display map keys line up). mhbench's resolve_topology_path wants the real
-    path relative to mhbench_dir - environments/<group>/<stem>.json, the same subtree
-    load_environments() reads - with no library-name resolution. Normalize here, unless
-    the value is already an absolute path or a full environments/*.json path."""
+    """Normalize the env picker's <group>/<stem> value to environments/<group>/<stem>.json unless already a path."""
     if spec.startswith("/") or (spec.startswith("environments/") and spec.endswith(".json")):
         return spec
     return f"environments/{spec}.json"
@@ -530,10 +429,7 @@ def _environment_to_config(payload: dict) -> dict:
 
 
 def _attacker_to_plugin_spec(payload: dict) -> dict:
-    """Embedded attacker {type, ...fields} -> attacker_plugin + attacker_spec (an
-    inline dict of the bespoke fields; the manager injects the type). The arena
-    model accepts attacker_spec as an inline dict or a file path - inline keeps
-    the dashboard stateless (no spec files to write, name, or clean up)."""
+    """Convert embedded attacker {type, ...fields} to attacker_plugin + attacker_spec (inline dict)."""
     atk = payload.get("attacker")
     if isinstance(atk, dict) and atk.get("type"):
         payload = {k: v for k, v in payload.items() if k != "attacker"}
@@ -565,17 +461,6 @@ def proxy_submit(payload: dict) -> tuple[int, dict]:
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Thin JSON backend
-#
-# All rendering lives in dashboard_static/{index.html,app.css,app.js}; the server
-# only (a) serves those static files, (b) exposes the data the browser cannot get
-# on its own - plugin/env schemas (need the Python plugin registry), API-usage
-# aggregation (needs secret keys + the token_usage.json scan), and log-file reads
-# (need the local filesystem) - and (c) proxies the manager's experiment CRUD so
-# the manager URL stays server-side and there is no cross-origin dance.
-# ─────────────────────────────────────────────────────────────────────────────
-
 import mimetypes
 
 STATIC_DIR = Path(__file__).parent / "dashboard_static"
@@ -585,9 +470,6 @@ _STATIC_TYPES = {".html": "text/html; charset=utf-8",
                  ".svg": "image/svg+xml"}
 
 
-# Generic provider adapters. The dashboard knows how to talk to these LLM
-# providers; it does NOT know which plugin or repo uses them - that mapping is
-# declared per deployment in config.yaml's `usage_sources`.
 _USAGE_ADAPTERS = {
     "openrouter": lambda cred, src: _get_openrouter_usage(cred),
     "litellm":    lambda cred, src: _get_litellm_usage(cred),
@@ -597,10 +479,7 @@ _USAGE_ADAPTERS = {
 
 
 def usage_json() -> dict:
-    """Spend per configured source. Each entry of config.yaml's `usage_sources`
-    names a generic provider adapter plus the repo (env_dir) whose .env holds the
-    credentials; the dashboard renders whatever the adapters return. No provider,
-    repo, or plugin name is hardcoded here."""
+    """Spend per source configured in config.yaml's `usage_sources`."""
     sources = []
     for src in (_cfg.get("usage_sources") or []):
         provider = src.get("provider")
@@ -657,7 +536,7 @@ def _proxy_call(req) -> tuple[int, dict]:
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # silence request logs
+        pass
 
     def _respond(self, code, content_type, body):
         b = body.encode() if isinstance(body, str) else body
@@ -668,13 +547,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(b)
         except (BrokenPipeError, ConnectionResetError):
-            pass  # client navigated away mid-response (common with long-poll)
+            pass
 
     def _json(self, code, obj):
         self._respond(code, "application/json", json.dumps(obj, default=str))
 
     def _serve_static(self, rel: str):
-        # rel is already path-safe (only [a-zA-Z0-9._-], no slashes) by the caller.
         path = (STATIC_DIR / rel).resolve()
         if not str(path).startswith(str(STATIC_DIR.resolve())) or not path.is_file():
             self._respond(404, "text/plain", "Not found")
@@ -703,7 +581,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, schemas_json())
         elif route == "/api/environments":
             self._json(200, load_environments())
-        # ── log viewer (filesystem reads; kept verbatim from the old server) ──
         elif route == "/experiment_files":
             name = (qs.get("name") or [""])[0]
             self._json(200, {"files": list_experiment_files(name)})
@@ -769,9 +646,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     ThreadingHTTPServer.allow_reuse_address = True
-    # Threading matters for /experiment_file_wait: it long-polls (blocks up to
-    # _LOG_WAIT_TIMEOUT_S inside the request), so every other viewer's refresh and
-    # log tail would stall behind it on a single-threaded HTTPServer.
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"Dashboard running at http://localhost:{args.port}")
     try:

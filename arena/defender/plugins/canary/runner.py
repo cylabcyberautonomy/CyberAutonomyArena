@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Canary defender runner — stdlib only (SSH via subprocess, ES via urllib).
-
-argv[1] = config JSON with:
-  experiment_name, checks[], canary_host, telemetry_port,
-  telemetry_timeout_s, fail_closed, management_ip, bastion_ip, log_dir,
-  and the arena-injected defender_env_spec / defender_setup_access (hosts + scoped access)
-
-Writes <log_dir>/connectivity_report.json, then arms (writes <log_dir>/defender_ready)
-unless fail_closed and a required check failed. Then idles until SIGTERM (the harness
-tears it down when the attacker finishes).
-"""
+"""Canary defender runner — stdlib only (SSH via subprocess, ES via urllib)."""
 from __future__ import annotations
 
 import json
@@ -23,7 +13,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-# --------------------------------------------------------------------------- config
 CONFIG = json.loads(Path(sys.argv[1]).read_text())
 EXP = CONFIG["experiment_name"]
 CHECKS = CONFIG.get("checks") or ["ssh", "resolve", "telemetry", "canary_event"]
@@ -34,9 +23,6 @@ FAIL_CLOSED = bool(CONFIG.get("fail_closed", False))
 LOG_DIR = Path(CONFIG["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# The environment-produced host access: one entry per victim, {name, host, user, port, ssh_key,
-# ssh_common_args (the bastion ProxyCommand etc.)}. The canary does not parse the topology or
-# resolve an MHBench key itself.
 ACCESS = CONFIG.get("defender_setup_access", [])
 
 
@@ -45,18 +31,13 @@ def _log(msg: str) -> None:
 
 
 def _sanitize(name: str) -> str:
-    # Mirror Perry's defender/telemetry/index_names.sanitize so we look at the exact
-    # falco-<exp>/sysflow-<exp> indices a real defender reads.
     return re.sub(r"[^a-z0-9_.-]+", "-", (name or "").strip().lower()).strip("-._")
 
 
-# --------------------------------------------------------------------------- ssh
 def _ssh(access: dict, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
     """Run remote_cmd on a victim using its SetupAccess entry (key + routing). Returns (ok, out/err)."""
     _k = access.get("ssh_key")
     if not _k:
-        # Fail closed: never fall back to the management (god) key on disk — that would defeat the
-        # per-system key scoping. The harness must inject a scoped ssh_key in defender_setup_access.
         raise RuntimeError("SetupAccess entry has no ssh_key; refusing to use the management key")
     key = os.path.expanduser(_k)
     cmd = [
@@ -66,7 +47,7 @@ def _ssh(access: dict, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
         "-o", f"ConnectTimeout={min(timeout, 20)}",
         "-p", str(access.get("port", 22)),
     ]
-    cmd += shlex.split(access.get("ssh_common_args") or "")  # bastion ProxyCommand, etc.
+    cmd += shlex.split(access.get("ssh_common_args") or "")
     cmd += [f"{access.get('user', 'root')}@{access['host']}", remote_cmd]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -77,7 +58,6 @@ def _ssh(access: dict, remote_cmd: str, timeout: int = 45) -> tuple[bool, str]:
     return True, r.stdout.strip()
 
 
-# --------------------------------------------------------------------------- es
 def _es_get(path: str, timeout: int = 15):
     url = f"http://{ES_HOST}:{ES_PORT}{path}"
     req = urllib.request.Request(url, headers={"content-type": "application/json"})
@@ -93,7 +73,6 @@ def _es_count(index: str) -> int | None:
         return None
 
 
-# --------------------------------------------------------------------------- checks
 def check_ssh(access_list):
     results = {}
     ok_any = False
@@ -148,7 +127,7 @@ def check_telemetry():
 
 
 def check_canary_event(access_list, want_host):
-    """Read /etc/shadow on one victim, then confirm the falco index grows (data actually
+    """Read /etc/shadow on one victim, then check that the falco index grows (data actually
     flows victim -> sensor -> store)."""
     if not access_list:
         return {"ok": False, "detail": "no victims"}
@@ -186,7 +165,6 @@ def check_canary_event(access_list, want_host):
     }
 
 
-# --------------------------------------------------------------------------- main
 def main() -> None:
     victims = ACCESS
     report = {"experiment": EXP, "checks_requested": CHECKS, "victims": len(victims), "results": {}}
@@ -228,7 +206,6 @@ def main() -> None:
     marker.write_text("armed\n")
     _log("armed")
 
-    # Idle until the harness sends SIGTERM at teardown.
     running = {"v": True}
 
     def _stop(signum, frame):

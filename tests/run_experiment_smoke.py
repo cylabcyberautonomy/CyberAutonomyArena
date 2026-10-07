@@ -1,37 +1,8 @@
 #!/usr/bin/env python3
-"""
-Live end-to-end smoke test: submit ONE real experiment to a running manager, poll it to a
-terminal state, and report pass/fail against concrete criteria.
+"""Live end-to-end smoke test: submit one real experiment to a running manager and report pass/fail.
 
-This is the "does a real experiment still work across all four systems" check — the thing
-`tests/test_arena_contract.py` deliberately does NOT do. Use it after a refactor, once the fast
-contract test is green.
-
-    stdlib only (urllib) — no venv needed. Run it from anywhere.
-
-NAMED BASELINE COMBO (defaults):
-    environment = equifax_small_instrumented   (instrumented: FalcoLLM needs Falco telemetry)
-    attacker    = incalmo_strategy / GraphSearch
-    defender    = llm_soc / FalcoLLM           (reads telemetry; deploys NO decoys)
-
-⚠  SAFETY
-    - This submits to a REAL manager and runs on the REAL cloud it controls: it spends cluster
-      time and (for an LLM defender/attacker) real API credits, and takes ~an hour.
-    - It does NOT start a manager. Point --url at one that is already running. Do NOT start a
-      second OpenStack manager just for this: a manager's startup clean-slate wipes the shared
-      cloud (all projects). To test the arena-refactor code specifically, that manager must be
-      running the arena-refactor branch.
-    - Requires --yes (or an interactive "yes") before it submits.
-
-EXAMPLES
-    # against an already-running manager on this host
-    python3 tests/run_experiment_smoke.py --yes
-
-    # attacker-only reachability check (no defender), keep the range up to inspect
-    python3 tests/run_experiment_smoke.py --defender none --keep --yes
-
-    # just tear a leftover smoke run down
-    python3 tests/run_experiment_smoke.py --delete-only --name smoke_arena_contract
+SAFETY: this submits to a REAL manager on the REAL cloud (cluster time + LLM credits, ~an hour). It does
+not start a manager. It requires --yes before it submits.
 """
 from __future__ import annotations
 
@@ -115,15 +86,13 @@ def _poll(url: str, name: str, timeout_s: int, poll_s: int) -> tuple[str | None,
 
 
 def _check_outputs(name: str, expect_defender: bool, output_root: str | None) -> list[tuple[str, bool, str]]:
-    """Best-effort inspection of the output tree. Returns (label, ok, detail) rows.
-    Skipped gracefully if the tree isn't reachable from this host."""
+    """Best-effort inspection of the output tree, returning (label, ok, detail) rows."""
     rows: list[tuple[str, bool, str]] = []
     out = _find_output_dir(name, output_root)
     if out is None:
         rows.append(("output tree", False, "not found on this host (manager may be remote) — skipping file checks"))
         return rows
 
-    # attacker did something
     actions = out / "attacker" / "actions.json"
     n_actions = 0
     exfil = 0
@@ -140,12 +109,10 @@ def _check_outputs(name: str, expect_defender: bool, output_root: str | None) ->
                  f"{exfil} MD5SumAttackerData action(s)"
                  + ("" if exfil else " — see detect.py / expected_data_hashes.py for true scoring")))
 
-    # defender armed
     if expect_defender:
         ready = out / "defender" / "defender_ready"
         rows.append(("defender armed (defender_ready marker)", ready.exists(),
                      "present" if ready.exists() else "missing"))
-        # canary defender: surface its connectivity report per-check
         report = out / "defender" / "connectivity_report.json"
         if report.exists():
             try:
@@ -156,7 +123,6 @@ def _check_outputs(name: str, expect_defender: bool, output_root: str | None) ->
             except Exception as e:  # noqa: BLE001
                 rows.append(("connectivity report", False, f"unreadable: {e}"))
 
-    # host logs collected before teardown
     env_dir = out / "environment"
     collected = [p for p in env_dir.glob("*/*") ] if env_dir.exists() else []
     rows.append(("host logs collected", len(collected) > 0,
@@ -191,8 +157,6 @@ def main() -> int:
     dfn = args.defender.lower()
     expect_defender = dfn != "none"
     is_canary = dfn == "canary"
-    # New config shape: attacker is a (plugin + spec-file) pair. Write the bespoke spec to a file
-    # and pass its path (the manager reads it). Same host as the manager, so an absolute temp path works.
     spec_dir = Path(tempfile.gettempdir()) / "mhbench_submitted_specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     attacker_spec_path = spec_dir / f"{args.name}_attacker.json"

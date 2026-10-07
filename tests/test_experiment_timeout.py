@@ -1,11 +1,4 @@
-"""The overall experiment-timeout backstop (cfg.experiment_timeout_seconds).
-
-Verifies the two halves of the mechanism with fakes — no cloud:
-  - _run_experiment_gated cancels a hung run on the deadline and dispatches the handler (and does NOT
-    when the run finishes in time, or when the cap is disabled);
-  - _handle_experiment_timeout performs the cleanup contract: force-kill the orphaned attacker by pid,
-    tear down (reclaim VMs + capacity), mark the terminal ExperimentTimedOut, and survive a teardown error.
-"""
+"""The overall experiment-timeout backstop (cfg.experiment_timeout_seconds), verified with fakes."""
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +18,7 @@ def _exp(name="to_test", pid=None, priority=0):
 # --------------------------------------------------------------- gated wrapper: cancel + dispatch
 
 def test_timeout_cancels_hung_run_and_dispatches_handler(monkeypatch):
-    """Past the deadline, the hung _run_experiment is cancelled and _handle_experiment_timeout fires."""
+    """Past the deadline, the wrapper cancels the hung _run_experiment and _handle_experiment_timeout fires."""
     monkeypatch.setattr(m, "cfg", SimpleNamespace(experiment_timeout_seconds=0.05), raising=False)
     monkeypatch.setattr(m, "_inflight_gate", _PriorityLock(10), raising=False)
     cancelled = {"v": False}
@@ -34,7 +27,7 @@ def test_timeout_cancels_hung_run_and_dispatches_handler(monkeypatch):
         try:
             await asyncio.sleep(100)
         except asyncio.CancelledError:
-            cancelled["v"] = True   # the deadline must actually cancel the run, not leave it orphaned
+            cancelled["v"] = True
             raise
 
     handled = {"exp": None}
@@ -52,7 +45,7 @@ def test_timeout_cancels_hung_run_and_dispatches_handler(monkeypatch):
 
 
 def test_no_timeout_when_run_finishes_in_time(monkeypatch):
-    """A run that completes within the cap returns normally; the handler never fires."""
+    """A run that completes within the cap returns normally. The handler never fires."""
     monkeypatch.setattr(m, "cfg", SimpleNamespace(experiment_timeout_seconds=5), raising=False)
     monkeypatch.setattr(m, "_inflight_gate", _PriorityLock(10), raising=False)
     ran, called = {"v": False}, {"v": False}
@@ -93,7 +86,7 @@ def test_disabled_cap_runs_without_the_wrapper(monkeypatch):
 # --------------------------------------------------------------- handler: the cleanup contract
 
 def _patch_handler_deps(monkeypatch):
-    """Stub the handler's module deps; return the recorders."""
+    """Stub the handler's module deps. Return the recorders."""
     rec = {"torn": None, "killed": None, "updated": False, "wrote": False}
 
     async def fake_teardown(exp):
@@ -133,7 +126,7 @@ def test_handler_skips_kill_when_no_attacker_pid(monkeypatch):
 
 
 def test_handler_marks_status_even_if_teardown_raises(monkeypatch):
-    """A teardown failure during cleanup must not prevent the terminal status/result from being set."""
+    """A teardown failure during cleanup must still set the terminal status and result."""
     rec = _patch_handler_deps(monkeypatch)
 
     async def boom_teardown(exp):

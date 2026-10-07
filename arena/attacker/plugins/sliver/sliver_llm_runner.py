@@ -1,22 +1,4 @@
-"""Runs on the harness host under the dedicated sliver venv. A BARE LLM with raw Sliver-C2 access: each
-turn it sees the registered Sliver sessions + recent output and runs a shell command on one of them,
-until the objective is met or max_turns. The Sliver analog of c2_llm_runner.py — identical loop, the
-only change is the C2 client (sliver-py instead of Incalmo's HTTP API).
-
-Reads attacker_config.json (argv[1]) from SliverLLMAttacker.build_config():
-  operator_cfg  path to the Sliver operator config (already pointed at the ssh -L tunnel)
-  listener_addr the foothold's in-env listener victims session to (informational / for the prompt)
-  model, api_base, api_key_env, max_turns, objective   (same as c2_llm)
-Output -> $SLIVER_LLM_OUTPUT_DIR (set by run()).
-
-Sliver client (VALIDATE — written from sliver-py's documented shape, not yet run against real Sliver):
-  SliverClientConfig.parse_config_file(cfg) -> SliverClient -> await connect()
-  await client.sessions()                              -> [Session(ID, Name, Hostname, Username, RemoteAddress, ...)]
-  await client.interact_session(id) -> interactive     -> await .execute(exe, args, output=True) -> (.Stdout/.Stderr bytes)
-
-NOT LIVE-VALIDATED (same bar as terminus_runner / _sliver_ops). The sliver-py execute contract and the
-provider tool-calling are only exercised end to end against a real Sliver + model.
-"""
+"""A bare LLM with raw Sliver-C2 access, running a run-command loop until the objective is met or max_turns."""
 from __future__ import annotations
 
 import asyncio
@@ -83,11 +65,9 @@ _SYSTEM = (
 
 
 async def _exec(client, session_id: str, command: str) -> dict:
-    """Run a shell command on a session via sliver-py. VALIDATE: interact_session / execute contract."""
+    """Run a shell command on a session via sliver-py."""
     try:
         inter = await client.interact_session(session_id)
-        # VALIDATE: splitting the command into exe+args vs a shell wrapper; many setups run via
-        # `/bin/sh -c "<command>"` so pipes/redirs work.
         res = await inter.execute("/bin/sh", ["-c", command], True)
         out = getattr(res, "Stdout", b"") or b""
         err = getattr(res, "Stderr", b"") or b""
@@ -99,7 +79,7 @@ async def _exec(client, session_id: str, command: str) -> dict:
 
 
 async def main() -> None:
-    from sliver import SliverClient, SliverClientConfig  # VALIDATE import path
+    from sliver import SliverClient, SliverClientConfig
     sconf = SliverClientConfig.parse_config_file(CONFIG["operator_cfg"])
     client = SliverClient(sconf)
     await client.connect()

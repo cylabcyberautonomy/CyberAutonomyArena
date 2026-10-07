@@ -28,14 +28,6 @@ def _teardown_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None
             stdout=lf, stderr=lf,
         )
     if result.returncode != 0:
-        # Previously just logged a warning and fell through to "Teardown complete" -
-        # both callers (main.py's normal-finish path and _cancel_and_remove) already
-        # try/except this and handle failure correctly (the former marks the env "not
-        # cleanly destroyed" and skips teardown_finished_at; the latter just logs and
-        # continues cleanup), so swallowing this here only hid failures - e.g. a
-        # security-group-in-use ConflictException from a leftover decoy VM left every
-        # network/subnet/security-group for the experiment leaked, while the
-        # experiment's status still showed "Finished" with teardown_finished_at set.
         raise RuntimeError(
             f"MHBench teardown exited with code {result.returncode}, see {mhbench_log}"
         )
