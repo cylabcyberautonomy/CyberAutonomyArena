@@ -866,6 +866,9 @@ def step_run(jobs, args, results_dir):
     script = Path(__file__).name
     log(f"Tip — watch live in SEPARATE panes:  python3 {script} --follow-attacker   |   "
         f"python3 {script} --follow-defender")
+    # Clear any PRIOR run's output up front (avoids overwrite/archive pile-up) — and, unlike
+    # clearing at the end, this LEAVES the finished run's logs on disk afterward for inspection.
+    _clear_output([n for n, _ in jobs])
 
     for name, cell in jobs:
         print()
@@ -896,9 +899,9 @@ def step_run(jobs, args, results_dir):
         _await_status(name, None, args.poll_seconds)   # returns when the run is terminal
 
     report(jobs, results_dir)
-    # Clear the per-experiment output so a re-run of the same name starts clean (no
-    # overwrite/archive pile-up). The scored results already live in results_dir.
-    _clear_output([n for n, _ in jobs])
+    # NOTE: output is cleared at the START of the next run, not here — so the just-finished
+    # run's logs (attacker llm.log, defender perry_log.log, Falco/telemetry) stay on disk to
+    # inspect. The scored results also live in results_dir.
 
 
 def _clear_output(names):
