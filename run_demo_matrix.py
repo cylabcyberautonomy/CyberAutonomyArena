@@ -8,7 +8,7 @@ cloud backend, and auto-starts the OpenStack arena manager (no prompts). Then, f
 EACH cell, it submits PAUSED, lets the environment deploy + configure, LISTS the live
 VMs (openstack/gcloud), and asks the ONE question —
 
-    Launch the attack on <name>? [Y/n]
+    Launch the attack on <name>? (type y)     <- requires an explicit y; Enter does NOT launch
 
 — on your yes it fires start-attack and waits for the run to finish. It does NOT
 stream the logs itself; attach to them from other panes with --follow-attacker /
@@ -922,14 +922,19 @@ def step_run(jobs, args, results_dir):
             if args.no_wait:
                 log("  --no-wait: leaving it paused at the gate (auto-launches after the manager's timeout).")
                 continue
-            if not ask_yes_no(f"Launch the attack on {name}?", default=True, assume_yes=args.yes):
-                log(f"  not launching {name}; left paused (auto-launches after the manager's gate timeout).")
+            # default=False: require an EXPLICIT 'y' — a bare Enter must NOT launch (the gate's whole
+            # point is a deliberate go). -y still auto-launches for unattended runs.
+            if not ask_yes_no(f"Launch the attack on {name}? (type y)", default=False, assume_yes=args.yes):
+                log(f"  not launching {name}; left paused (release later with: "
+                    f"curl -X POST {API_URL}/experiments/{name}/start-attack, or it auto-launches after the gate timeout).")
                 continue
             ok2, info2 = start_attack(name)
-            if not ok2:
-                log(f"  FAIL start-attack {name}: {info2}")
-                continue
-            log(f"  attack launched. Watch it live in another pane:  python3 {script} --follow-attacker")
+            if ok2:
+                log(f"  attack launched. Watch it live in another pane:  python3 {script} --follow-attacker")
+            else:
+                # 409 = it's already past the gate (e.g. something else released it). Don't bail to an
+                # empty report — wait for the real result either way.
+                log(f"  start-attack returned '{info2}' (already running?) — waiting for the result anyway")
             log("  waiting for it to finish…")
             _await_status(name, None, args.poll_seconds)   # returns when the run is terminal
 
