@@ -7,9 +7,9 @@ not start a manager. It requires --yes before it submits.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -157,7 +157,7 @@ def main() -> int:
     dfn = args.defender.lower()
     expect_defender = dfn != "none"
     is_canary = dfn == "canary"
-    spec_dir = Path(tempfile.gettempdir()) / "mhbench_submitted_specs"
+    spec_dir = Path("/tmp") / getpass.getuser() / "submitted-specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     attacker_spec_path = spec_dir / f"{args.name}_attacker.json"
     attacker_spec_path.write_text(json.dumps({"strategy": args.attacker}))
