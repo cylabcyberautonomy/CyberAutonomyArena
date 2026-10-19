@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import hashlib
 import hmac
 import os
@@ -71,7 +72,7 @@ def resolve_socket_path(cfg) -> str:
     if explicit:
         return str(explicit)
     tag = hashlib.sha1(str(cfg.output_dir).encode()).hexdigest()[:8]
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/{getpass.getuser()}"
     return str(Path(runtime) / f"arena-env-{tag}.sock")
 
 

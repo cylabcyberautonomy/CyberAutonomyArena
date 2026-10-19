@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import os
 import shlex
@@ -14,7 +15,7 @@ from typing import Optional
 from ...env_spec import AttackerSetupAccess
 from ..base import PreparedAttacker
 
-_STATE_DIR = Path("/tmp/mhbench-sliver-c2")
+_STATE_DIR = Path("/tmp") / getpass.getuser() / "sliver-c2"  # per-user: /tmp is shared
 _GRPC_PORT = 31337
 _LISTENER_PORT = 8443
 _SLIVER_INSTALL = "https://sliver.sh/install"

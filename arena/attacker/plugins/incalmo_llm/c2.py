@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _C2C_IMAGE = "incalmo/c2c:latest"
 _C2_PORT = 8888
-_STATE_DIR = Path("/tmp/mhbench-foothold-c2")
+_STATE_DIR = Path("/tmp") / getpass.getuser() / "foothold-c2"  # per-user: /tmp is shared
 _built = False
 
 STARTUP_TIMEOUT = 60
