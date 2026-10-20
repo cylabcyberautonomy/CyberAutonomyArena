@@ -37,7 +37,7 @@ These are the load-bearing rules (full rationale in [security-model.md](security
 
 1. **No god key.** The environment issues a *scoped* credential per system (attacker key → its foothold
    only; defender key → its box + victims only). A plugin gets its key from the injected `SetupAccess`
-   and must **never** read the broad management key off disk. `tests/test_no_god_key.py` enforces this.
+   and must **never** read the broad management key off disk. `scripts/tests/test_no_god_key.py` enforces this.
 2. **Run spec vs setup access.** The environment produces, per system, a run spec (objective +
    identity/inventory — the runtime info the agent acts on) and a `SetupAccess` (keys + routing — the
    setup-time info the plugin uses to stand the system up). The split is by purpose (runtime vs setup):
@@ -61,13 +61,13 @@ topology format.
 
 ## Register and verify
 
-Add a case to `tests/test_arena_contract.py` — the fast, cloud-free contract guard. Assert the class is in
+Add a case to `scripts/tests/test_arena_contract.py` — the fast, cloud-free contract guard. Assert the class is in
 its registry, its `ui_schema()` is well-formed, and (for defender/attacker) that `build_config`/the spec
 carries what the runner reads. Then run the whole suite:
 
 ```
-pytest tests/
+pytest scripts/tests/
 ```
 
-`tests/test_arena_contract.py` is the cheap guard for the 4-system contract; `tests/test_no_god_key.py`
+`scripts/tests/test_arena_contract.py` is the cheap guard for the 4-system contract; `scripts/tests/test_no_god_key.py`
 is the scoped-credential tripwire. Both must stay green.

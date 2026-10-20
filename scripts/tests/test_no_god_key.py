@@ -22,7 +22,7 @@ _BASELINE = {
 
 
 def _plugins_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "arena"
+    return Path(__file__).resolve().parents[2] / "arena"
 
 
 def _offending_files() -> dict[str, list[str]]:

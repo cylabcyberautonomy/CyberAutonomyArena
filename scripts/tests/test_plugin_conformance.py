@@ -18,7 +18,7 @@ from arena.environment.plugins.base import EnvironmentPlugin
 from arena.environment import build_environment
 from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
 
-_ARENA_ROOT = Path(__file__).resolve().parent.parent / "arena"
+_ARENA_ROOT = Path(__file__).resolve().parents[2] / "arena"
 
 
 def _real_plugins(registry: dict) -> list[str]:

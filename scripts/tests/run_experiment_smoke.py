@@ -18,8 +18,8 @@ from pathlib import Path
 TERMINAL = {"Finished", "Error", "TimedOut", "Blocked"}
 OUTPUT_ROOT_CANDIDATES = [
     Path.home() / "experiment_harness" / "output",
-    Path(__file__).resolve().parent.parent / "output",
-    Path(__file__).resolve().parent.parent / "arena" / "output",
+    Path(__file__).resolve().parents[2] / "output",
+    Path(__file__).resolve().parents[2] / "arena" / "output",
 ]
 
 

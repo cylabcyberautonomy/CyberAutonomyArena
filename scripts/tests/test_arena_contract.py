@@ -1,7 +1,7 @@
 """Arena cross-component contract test: the fast, cloud-free regression guard pinning the 4-system contract.
 
 The named baseline combo: environment equifax_small, attacker incalmo_strategy / GraphSearch,
-defender llm_soc / FalcoLLM. See tests/README_live_smoke.md for the opt-in live smoke tier.
+defender llm_soc / FalcoLLM. See scripts/tests/README_live_smoke.md for the opt-in live smoke tier.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def _mhbench_dir() -> Path | None:
     """Best-effort locate MHBench's checkout. Reads the harness config.yaml if present, else falls back to ~/MHBench. Returns None when it finds nothing."""
     import yaml
     for cfg_path in (
-        Path(__file__).resolve().parent.parent / "config.yaml",
+        Path(__file__).resolve().parents[2] / "config.yaml",
         Path.home() / "experiment_harness" / "config.yaml",
     ):
         try:
@@ -598,7 +598,7 @@ def test_defender_no_arena_execution_path():
     import pathlib
     from arena.defender.plugins.base import DefenderPlugin
 
-    root = pathlib.Path(__file__).resolve().parent.parent / "arena" / "defender" / "plugins"
+    root = pathlib.Path(__file__).resolve().parents[2] / "arena" / "defender" / "plugins"
     forbidden = ("openstack.connect(", "OpenstackOrchestrator(", "GCPOrchestrator(", "AnsibleRunner(",
                  "import OpenstackOrchestrator", "import GCPOrchestrator", "import openstack")
     for plug in ("llm_soc", "deception", "prompt_injection"):

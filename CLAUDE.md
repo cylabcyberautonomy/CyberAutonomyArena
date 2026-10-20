@@ -49,7 +49,7 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
 **Two invariants every plugin must respect** (full rationale in `docs/security-model.md`):
 1. **No god key.** The environment issues a scoped credential per system — the attacker key opens its
    foothold only, the defender key its box + victims only. A plugin gets its key from the injected
-   `SetupAccess` and must **never** read the broad management key off disk. `tests/test_no_god_key.py`
+   `SetupAccess` and must **never** read the broad management key off disk. `scripts/tests/test_no_god_key.py`
    enforces this.
 2. **Run spec vs setup access.** The environment produces two things per system, split by *when* they're
    used: a **run spec** (objective + identity/inventory — the runtime info the agent acts on, handed to it
@@ -67,7 +67,7 @@ emits the dict its runner reads. Declare the keys the runner REQUIRES as
 `REQUIRED_CONFIG_KEYS = frozenset({...})` on the plugin class (an un-annotated class attribute — the base
 types it as a `ClassVar`, so it is not a pydantic field). The arena calls `validate_built_config()` right
 after `build_config()` and fails the experiment early with a precise message if a key is missing (instead
-of a `KeyError` deep in the run), and `tests/test_plugin_conformance.py` enforces it generically + pins the
+of a `KeyError` deep in the run), and `scripts/tests/test_plugin_conformance.py` enforces it generically + pins the
 per-plugin set in one data table. Declare only keys `build_config()` ALWAYS emits (not per-config-optional
 ones, and not the arena-injected defender keys like `defender_env_spec`).
 
@@ -91,21 +91,21 @@ environment layer: `arena/environment/config.py` owns `EnvBackendConfig`, loaded
 
 **Running the tests** (fast, cloud-free — run before committing):
 ```
-pytest tests/
+pytest scripts/tests/
 ```
-- `tests/test_arena_contract.py` — the 4-system contract (registration, config round-trip,
+- `scripts/tests/test_arena_contract.py` — the 4-system contract (registration, config round-trip,
   `build_config`/`ui_schema` shapes) for the specific named baseline plugins.
-- `tests/test_plugin_conformance.py` — registry-driven smoke tests: iterates EVERY registered plugin of
+- `scripts/tests/test_plugin_conformance.py` — registry-driven smoke tests: iterates EVERY registered plugin of
   each type and holds it to the shared base-class contract (instantiable, `ui_schema` well-formed,
   lifecycle methods present + right async-ness, `build_config` serializable + no credential leak). A new
   plugin is checked automatically; a failure names the plugin and lists every problem at once.
-- `tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
-- `tests/test_defender_lifecycle.py` — the defender setup → ready → running → stopping → stopped handshake
+- `scripts/tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
+- `scripts/tests/test_defender_lifecycle.py` — the defender setup → ready → running → stopping → stopped handshake
   (mirror of the attacker: arming in `setup()`, READY on return, no readiness marker).
-- `tests/test_no_god_key.py` — the scoped-key regression guard.
+- `scripts/tests/test_no_god_key.py` — the scoped-key regression guard.
 
 There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud + LLM
-credits — see `tests/README_live_smoke.md` (`run_experiment_smoke.py`, `run_dashboard_smoke.py`, and a
+credits — see `scripts/tests/README_live_smoke.md` (`run_experiment_smoke.py`, `run_dashboard_smoke.py`, and a
 cheap no-cloud adapter probe). Run that before shipping a plugin that touches a real foothold.
 
 ## Layout
