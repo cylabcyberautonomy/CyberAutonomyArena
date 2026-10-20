@@ -5,7 +5,7 @@ A dashboard and backend for running attacker/defender experiments across network
 ## Architecture overview
 
 ```
-dashboard.py          — browser UI (port 8080 by default)
+dashboard/server.py   — browser UI (port 8080 by default)
 arena/   — FastAPI backend (port 8000)
   main.py             — orchestrates experiment lifecycle
   config.py           — loads config.yaml
@@ -47,7 +47,7 @@ On startup the manager tears down any leftover OpenStack resources and clears th
 **4. Start the dashboard** (frontend)
 
 ```bash
-uv run python dashboard.py --port 8080
+uv run python dashboard/server.py --port 8080
 ```
 
 Open `http://localhost:8080` in a browser.

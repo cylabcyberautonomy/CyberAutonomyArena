@@ -18,10 +18,10 @@ import yaml
 
 EST = timezone(timedelta(hours=-5))
 
-CONFIG_PATH = Path(__file__).parent / "config.yaml"
+CONFIG_PATH = Path(__file__).parents[1] / "config.yaml"
 EXPERIMENT_SERVER = "http://localhost:8000/experiments"
 
-OUTPUT_ROOT = Path(__file__).parent / "output"
+OUTPUT_ROOT = Path(__file__).parents[1] / "output"
 
 def _load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -247,7 +247,7 @@ def _get_anthropic_usage(cred, output_root: Path, scan_output: bool = False) -> 
     }
 
 
-_HARNESS_DIR = Path(__file__).parent
+_HARNESS_DIR = Path(__file__).parents[1]
 if str(_HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(_HARNESS_DIR))
 
@@ -463,7 +463,7 @@ def proxy_submit(payload: dict) -> tuple[int, dict]:
 
 import mimetypes
 
-STATIC_DIR = Path(__file__).parent / "dashboard_static"
+STATIC_DIR = Path(__file__).parent / "static"
 _STATIC_TYPES = {".html": "text/html; charset=utf-8",
                  ".css": "text/css; charset=utf-8",
                  ".js": "application/javascript; charset=utf-8",
