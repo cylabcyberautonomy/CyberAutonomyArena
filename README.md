@@ -47,7 +47,7 @@ On startup the manager tears down any leftover OpenStack resources and clears th
 **4. Start the dashboard** (frontend)
 
 ```bash
-uv run python dashboard/server.py --port 8080
+uv run python dashboard/server.py --port 8080 --url http://localhost:8000
 ```
 
 Open `http://localhost:8080` in a browser.

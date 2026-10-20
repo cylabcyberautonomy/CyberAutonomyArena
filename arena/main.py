@@ -947,6 +947,25 @@ async def set_priority(experiment_name: str, body: dict):
     return {"experiment_name": experiment_name, "priority": priority, "requeued": waiting}
 
 
+@app.get("/plugin-schemas")
+async def plugin_schemas():
+    """Every registered plugin's ui_schema(), so the dashboard can build its Submit form
+    over HTTP instead of importing this package and reading the private _registry."""
+    from .attacker.plugins.base import AttackerPlugin
+    from .defender.plugins.base import DefenderPlugin
+
+    def _schemas(base):
+        out = {}
+        for name, cls in base._registry.items():
+            try:
+                out[name] = dict(cls.ui_schema())
+            except NotImplementedError:
+                pass  # a plugin without a schema is API-only, not a dashboard entry
+        return out
+
+    return {"attacker": _schemas(AttackerPlugin), "defender": _schemas(DefenderPlugin)}
+
+
 @app.get("/experiments")
 async def list_experiments():
     return [e.flat() for e in registry.load()]

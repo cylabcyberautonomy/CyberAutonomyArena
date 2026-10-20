@@ -5,7 +5,6 @@ import argparse
 import html
 import json
 import os
-import sys
 import time
 import urllib.request
 import urllib.error
@@ -247,30 +246,23 @@ def _get_anthropic_usage(cred, output_root: Path, scan_output: bool = False) -> 
     }
 
 
-_HARNESS_DIR = Path(__file__).parents[1]
-if str(_HARNESS_DIR) not in sys.path:
-    sys.path.insert(0, str(_HARNESS_DIR))
+_SCHEMA_CACHE: dict = {}
 
-_ATTACKER_SCHEMAS: dict = {}
-_DEFENDER_SCHEMAS: dict = {}
-try:
-    import arena.attacker.plugins
-    import arena.defender.plugins
-    from arena.attacker.plugins.base import AttackerPlugin as _AtkBase
-    from arena.defender.plugins.base import DefenderPlugin as _DefBase
-    for _t, _cls in _AtkBase._registry.items():
-        try:
-            _ATTACKER_SCHEMAS[_t] = dict(_cls.ui_schema())
-        except NotImplementedError:
-            pass
-    for _t, _cls in _DefBase._registry.items():
-        try:
-            _DEFENDER_SCHEMAS[_t] = dict(_cls.ui_schema())
-        except NotImplementedError:
-            pass
-except Exception as _e:
-    import warnings
-    warnings.warn(f"Plugin schema discovery failed ({_e}); type dropdowns will be empty.")
+
+def _plugin_schemas() -> dict:
+    """The arena's registered plugin schemas, fetched over HTTP and cached on first success.
+
+    Fetched rather than imported: importing arena in-process tied the dashboard to the same
+    filesystem as the backend and read its private _registry. Lazy rather than at startup so
+    the dashboard can be started before the backend.
+    """
+    if _SCHEMA_CACHE:
+        return _SCHEMA_CACHE
+    base = EXPERIMENT_SERVER[: -len("/experiments")]
+    status, data = _get_json(base + "/plugin-schemas", {})
+    if status == 200 and isinstance(data, dict):
+        _SCHEMA_CACHE.update(data)
+    return _SCHEMA_CACHE
 
 
 def load_experiments():
@@ -496,9 +488,10 @@ def usage_json() -> dict:
 
 def schemas_json() -> dict:
     """Plugin UI-schema contract + env nickname map that drive the Submit form."""
+    schemas = _plugin_schemas()
     return {
-        "attacker": _ATTACKER_SCHEMAS,
-        "defender": _DEFENDER_SCHEMAS,
+        "attacker": schemas.get("attacker", {}),
+        "defender": schemas.get("defender", {}),
         "env_nicknames": ENV_NICKNAMES,
     }
 
@@ -643,7 +636,10 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Experiment dashboard server")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--url", default="http://localhost:8000",
+                        help="arena backend base URL (default: %(default)s)")
     args = parser.parse_args()
+    EXPERIMENT_SERVER = args.url.rstrip("/") + "/experiments"
 
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
