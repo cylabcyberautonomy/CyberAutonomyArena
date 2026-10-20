@@ -6,7 +6,7 @@ import yaml
 from pydantic import BaseModel
 
 _HERE = Path(__file__).parent.parent
-_DEFAULT_CONFIG_PATH = _HERE / "config.yaml"
+_DEFAULT_CONFIG_PATH = _HERE / "config" / "config.yaml"
 
 
 class ExperimentManagerConfig(BaseModel):

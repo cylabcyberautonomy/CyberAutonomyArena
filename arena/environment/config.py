@@ -9,8 +9,8 @@ from typing import Dict, Optional
 import yaml
 from pydantic import BaseModel
 
-# config.yaml lives at the repo root. This file is arena/environment/config.py, so parents[2] is the root.
-_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+# config.yaml lives in config/ at the repo root. This file is arena/environment/config.py, so parents[2] is the root.
+_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
 
 # Deprecated flat top-level forms, migrated into the env_backend section for back-compat.
 _FLAT_BACKEND_FIELDS = ("cloud_backend", "os_cloud", "mhbench_config", "gcp_relay_ip", "gcp_flavor_cpu_cost")

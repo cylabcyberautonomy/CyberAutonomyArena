@@ -17,7 +17,7 @@ import yaml
 
 EST = timezone(timedelta(hours=-5))
 
-CONFIG_PATH = Path(__file__).parents[1] / "config.yaml"
+CONFIG_PATH = Path(__file__).parents[1] / "config" / "config.yaml"
 EXPERIMENT_SERVER = "http://localhost:8000/experiments"
 
 OUTPUT_ROOT = Path(__file__).parents[1] / "output"
