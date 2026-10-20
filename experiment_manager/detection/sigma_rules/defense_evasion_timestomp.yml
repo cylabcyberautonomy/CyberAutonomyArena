@@ -1,0 +1,36 @@
+title: Timestomping via utime Syscalls
+id: b9669eb3-10ad-4f38-b254-16d4ac99db4c
+status: experimental
+description: >
+    Detects use of utimensat/utimes/futimesat to alter a file's access/modification timestamps —
+    timestomping, an anti-forensics technique used to make malicious files blend in with
+    surrounding system files and defeat timeline analysis.
+references:
+    - https://attack.mitre.org/techniques/T1070/006/
+author: MHBench detection harness
+date: 2026/09/01
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        key: file_timestomp
+    # systemd and snapd's apparmor_parser set timestamps during normal operation — exclude them.
+    # Timestamp-setting by cp/touch/tar or an interpreter is the anti-forensics signal.
+    filter_benign:
+        exe|endswith:
+            - /systemd
+            - /apparmor_parser
+            - /unsquashfs   # snap/lxd image extraction sets timestamps on every extracted file
+            - /mksquashfs
+            - /dpkg
+            - /dpkg-deb
+            - /snap
+            - /snapd
+    condition: selection and not filter_benign
+falsepositives:
+    - Archive extraction (tar -p), rsync -a, and cp -p during legitimate admin/build activity.
+level: medium
+tags:
+    - attack.defense-evasion
+    - attack.t1070.006

@@ -1,0 +1,46 @@
+title: Failed Privilege Change (setuid/setgid/capset)
+id: 0529b371-bc7a-4042-8cdf-2c81e7c2e2f0
+status: experimental
+description: >
+    Detects a FAILED setuid/setgid/setresuid/capset syscall (key priv_change, success=no).
+    Successful privilege changes happen constantly (sudo, su, login), but a failed one is a
+    strong escalation signal — a process attempting to change credentials it is not permitted to,
+    e.g. a failing exploit or an agent probing for a privilege it lacks.
+references:
+    - https://attack.mitre.org/techniques/T1548/
+author: MHBench detection harness
+date: 2026/09/01
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        key: priv_change
+        success: 'no'
+    # sshd's privilege separation and other login/session daemons perform setuid/setgid that the
+    # kernel records as failed during normal operation — exclude them. A failed setuid from a
+    # shell, interpreter, or unexpected binary is the escalation signal.
+    filter_priv_daemons:
+        exe|endswith:
+            - /sshd
+            - /sshd-auth
+            - /sshd-session
+            - /su
+            - /sudo
+            - /login
+            - /agetty
+            - /systemd
+            - /systemd-logind
+            - /unix_chkpwd
+            - /cron
+            - /crond
+            - /polkitd
+            - /dbus-daemon
+            - /gdm-session-worker
+    condition: selection and not filter_priv_daemons
+falsepositives:
+    - Residual privilege-dropping daemons not in the exclusion list under an unexpected uid map.
+level: medium
+tags:
+    - attack.privilege-escalation
+    - attack.t1548
