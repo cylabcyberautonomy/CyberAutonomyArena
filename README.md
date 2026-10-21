@@ -5,10 +5,10 @@ A dashboard and backend for running attacker/defender experiments across network
 ## Architecture overview
 
 ```
-dashboard.py          — browser UI (port 8080 by default)
+dashboard/server.py   — browser UI (port 8080 by default)
 arena/   — FastAPI backend (port 8000)
   main.py             — orchestrates experiment lifecycle
-  config.py           — loads config.yaml
+  config.py           — loads config/config.yaml
   attacker/plugins/   — attacker plugin implementations
   defender/plugins/   — defender plugin implementations
 experiment_registry.yaml  — live state of all experiments
@@ -28,13 +28,13 @@ cd cyberautonomy-arena
 uv sync
 ```
 
-**2. Create `config.yaml`** from the template, then edit the paths and `arena_host_ip`:
+**2. Create `config/config.yaml`** from the template, then edit the paths and `arena_host_ip`:
 
 ```bash
-cp example_config.yaml config.yaml
+cp config/example_config.yaml config/config.yaml
 ```
 
-[`example_config.yaml`](example_config.yaml) documents every field with its default; the [Config reference](#config-reference) below summarizes the common ones.
+[`config/example_config.yaml`](config/example_config.yaml) documents every field with its default; the [Config reference](#config-reference) below summarizes the common ones.
 
 **3. Start the experiment manager** (backend)
 
@@ -47,7 +47,7 @@ On startup the manager tears down any leftover OpenStack resources and clears th
 **4. Start the dashboard** (frontend)
 
 ```bash
-uv run python dashboard.py --port 8080
+uv run python dashboard/server.py --port 8080 --url http://localhost:8000
 ```
 
 Open `http://localhost:8080` in a browser.
@@ -84,7 +84,7 @@ the example above needs `incalmo_strategy_dir` (attacker) and `llm_soc_dir` (def
 
 ## Config reference
 
-`config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`example_config.yaml`](example_config.yaml) to `config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).
+`config/config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`config/example_config.yaml`](config/example_config.yaml) to `config/config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).
 
 **Per-plugin code paths** — most plugins shell out to an external codebase (its own checkout + venv) that
 the arena does not vendor, so you point the arena at it here. There is **one `*_dir` per plugin** (plus an

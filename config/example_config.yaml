@@ -1,8 +1,8 @@
-# Example arena config. Copy this to config.yaml and edit the paths + arena_host_ip:
+# Example arena config. Copy this to config/config.yaml and edit the paths + arena_host_ip:
 #
-#   cp example_config.yaml config.yaml
+#   cp config/example_config.yaml config/config.yaml
 #
-# The arena loads ./config.yaml by default. A second manager can point at a different
+# The arena loads ./config/config.yaml by default. A second manager can point at a different
 # file via the EXPERIMENT_MANAGER_CONFIG env var, so it can run a non-default backend
 # without its startup clean-slate wiping the shared cloud.
 #

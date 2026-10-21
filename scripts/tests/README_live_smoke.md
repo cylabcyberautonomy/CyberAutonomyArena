@@ -27,7 +27,7 @@ store. It deploys no decoys and calls no LLM. Its report lands at
 `output/<exp>/defender/connectivity_report.json`.
 
 ```bash
-python3 tests/run_experiment_smoke.py --defender canary --environment environments/instrumented/equifax_small_instrumented.json --yes
+python3 scripts/tests/run_experiment_smoke.py --defender canary --environment environments/instrumented/equifax_small_instrumented.json --yes
 ```
 
 If the canary passes, a real telemetry defender can connect on that environment.
@@ -45,9 +45,9 @@ If the canary passes, a real telemetry defender can connect on that environment.
 Use the script — it submits, polls to a terminal state, and checks the pass criteria below:
 
 ```bash
-python3 tests/run_experiment_smoke.py --yes                    # named combo, teardown on
-python3 tests/run_experiment_smoke.py --defender none --keep --yes   # attacker-only, leave range up
-python3 tests/run_experiment_smoke.py --delete-only --name smoke_arena_contract  # clean up
+python3 scripts/tests/run_experiment_smoke.py --yes                    # named combo, teardown on
+python3 scripts/tests/run_experiment_smoke.py --defender none --keep --yes   # attacker-only, leave range up
+python3 scripts/tests/run_experiment_smoke.py --delete-only --name smoke_arena_contract  # clean up
 ```
 
 Key flags: `--url` (default `http://localhost:8000`), `--environment`, `--attacker` (Incalmo

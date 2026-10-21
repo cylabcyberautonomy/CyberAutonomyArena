@@ -38,7 +38,7 @@ before log rotation.
 legitimately earn by playing the game. The attacker key opens its foothold and nothing else; a leak buys
 the adversary only what it already had.
 
-### Enforcement: `tests/test_no_god_key.py`
+### Enforcement: `scripts/tests/test_no_god_key.py`
 
 A regression guard greps every plugin file under `attacker/plugins` and `defender/plugins`
 for the signatures of a management-key read (`openstack_config.ssh_key_path`,
