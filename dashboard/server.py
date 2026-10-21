@@ -17,7 +17,9 @@ import yaml
 
 EST = timezone(timedelta(hours=-5))
 
-CONFIG_PATH = Path(__file__).parents[1] / "config" / "config.yaml"
+_CONFIG_PATH = Path(__file__).parents[1] / "config" / "config.yaml"
+_LEGACY_CONFIG_PATH = Path(__file__).parents[1] / "config.yaml"   # pre-config/ layout
+CONFIG_PATH = _CONFIG_PATH if _CONFIG_PATH.exists() or not _LEGACY_CONFIG_PATH.exists() else _LEGACY_CONFIG_PATH
 EXPERIMENT_SERVER = "http://localhost:8000/experiments"
 
 OUTPUT_ROOT = Path(__file__).parents[1] / "output"

@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -7,6 +8,23 @@ from pydantic import BaseModel
 
 _HERE = Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _HERE / "config" / "config.yaml"
+# Pre-config/ layout. Honoured so a host can pull the config/ move before relocating its own
+# config.yaml; remove once every box has moved. Config load happens before clean_slate, so a
+# miss here aborts startup rather than running against backend defaults.
+_LEGACY_CONFIG_PATH = _HERE / "config.yaml"
+
+
+def _default_config_path() -> Path:
+    """config/config.yaml, else the legacy repo-root config.yaml, else the new path (so the
+    FileNotFoundError names where the file is meant to live)."""
+    if _DEFAULT_CONFIG_PATH.exists():
+        return _DEFAULT_CONFIG_PATH
+    if _LEGACY_CONFIG_PATH.exists():
+        logging.getLogger(__name__).warning(
+            "Loading config from the legacy path %s; move it to %s",
+            _LEGACY_CONFIG_PATH, _DEFAULT_CONFIG_PATH)
+        return _LEGACY_CONFIG_PATH
+    return _DEFAULT_CONFIG_PATH
 
 
 class ExperimentManagerConfig(BaseModel):
@@ -68,7 +86,7 @@ class ExperimentManagerConfig(BaseModel):
         """Load config from an explicit path, else $EXPERIMENT_MANAGER_CONFIG, else config.yaml."""
         if path is None:
             env = os.environ.get("EXPERIMENT_MANAGER_CONFIG")
-            path = Path(env) if env else _DEFAULT_CONFIG_PATH
+            path = Path(env) if env else _default_config_path()
         with open(path) as f:
             data = yaml.safe_load(f)
         return cls(**data)

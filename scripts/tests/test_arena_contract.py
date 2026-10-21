@@ -53,6 +53,7 @@ def _mhbench_dir() -> Path | None:
     import yaml
     for cfg_path in (
         Path(__file__).resolve().parents[2] / "config" / "config.yaml",
+        Path(__file__).resolve().parents[2] / "config.yaml",   # pre-config/ layout
         Path.home() / "experiment_harness" / "config.yaml",
     ):
         try:

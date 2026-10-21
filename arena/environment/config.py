@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 # config.yaml lives in config/ at the repo root. This file is arena/environment/config.py, so parents[2] is the root.
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
+_LEGACY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"   # pre-config/ layout
 
 # Deprecated flat top-level forms, migrated into the env_backend section for back-compat.
 _FLAT_BACKEND_FIELDS = ("cloud_backend", "os_cloud", "mhbench_config", "gcp_relay_ip", "gcp_flavor_cpu_cost")
@@ -30,18 +31,29 @@ def _resolve_config_path(path: Optional[Path] = None) -> Path:
     if path is not None:
         return Path(path)
     env = os.environ.get("EXPERIMENT_MANAGER_CONFIG")
-    return Path(env) if env else _DEFAULT_CONFIG_PATH
+    if env:
+        return Path(env)
+    if not _DEFAULT_CONFIG_PATH.exists() and _LEGACY_CONFIG_PATH.exists():
+        return _LEGACY_CONFIG_PATH
+    return _DEFAULT_CONFIG_PATH
 
 
 @lru_cache(maxsize=None)
 def _load(path_str: str) -> EnvBackendConfig:
+    # No config is an error, not a default: silently falling back would target
+    # env_backend's default cloud (openstack) and clean_slate wipes whatever it reaches.
+    if not Path(path_str).exists():
+        raise FileNotFoundError(
+            f"No arena config found at {_DEFAULT_CONFIG_PATH} or {_LEGACY_CONFIG_PATH} "
+            f"(looked for {path_str}). Copy config/example_config.yaml to config/config.yaml."
+        )
     data: dict = {}
     try:
         loaded = yaml.safe_load(Path(path_str).read_text())
         if isinstance(loaded, dict):
             data = loaded
     except (OSError, ValueError):
-        data = {}  # missing/unreadable config.yaml falls back to defaults (openstack)
+        data = {}  # unreadable/malformed: the main config load raises on this first
     eb = dict(data.get("env_backend") or {})
     for k in _FLAT_BACKEND_FIELDS:            # explicit env_backend wins over a stale flat field
         if k in data:
