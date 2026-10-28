@@ -94,6 +94,14 @@ class EnvironmentPlugin(BaseModel):
         """SETUP ACCESS: list[SetupAccess] for the victims (+ the defender box) the defender may reach."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_setup_access()")
 
+    def traffic_spec(self, deployed, cfg: ExperimentManagerConfig):
+        """AGENT-FACING TrafficEnvSpec: objective + the hosts traffic may run on, with roles (no creds/routing)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_spec()")
+
+    def traffic_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
+        """SETUP ACCESS: list[SetupAccess] for the hosts traffic runs on (victims only, never a box)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_setup_access()")
+
     # -- per-system credential issuance (the environment's job) ----------------------------------
     # The environment issues separate per-system credentials, each scoped to that system's own boxes.
     def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
@@ -103,6 +111,10 @@ class EnvironmentPlugin(BaseModel):
     def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         """The credential issued for the defender, scoped to the defender box + the victims it may act on."""
         raise NotImplementedError(f"{type(self).__name__} must implement defender_credential()")
+
+    def traffic_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        """The credential issued for traffic, scoped to the victims only (no box, no foothold)."""
+        raise NotImplementedError(f"{type(self).__name__} must implement traffic_credential()")
 
     # The broad management credential stays harness-side and is never placed in any spec, so it has no accessor here.
 
@@ -151,6 +163,11 @@ class EnvironmentPlugin(BaseModel):
         """Rebuild one existing host from its base image (RestoreServer) — restore a compromised VM."""
         from ..env_requests import EnvRequestUnsupported
         raise EnvRequestUnsupported(f"{type(self).__name__} does not support rebuild_host")
+
+    async def restore_traffic_access(self, experiment, deployed, host_name: str, cfg) -> None:
+        """Re-grant the traffic credential on a host rebuild_host() just restored, so traffic can rearm it.
+        Called in the background after a successful rebuild, only when the experiment runs traffic. Default no-op."""
+        return None
 
     def supports_dynamic_topology(self) -> bool:
         """Whether this environment honours EnvActionRequests at all. Default: False. MHBench overrides to True."""

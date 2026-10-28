@@ -83,6 +83,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
             lc.emit(EnvironmentSignal.CONFIGURING)
         try:
             await configure_environment(experiment, bastion_ip, c2c_url, cfg)
+            # MHBench issues the attacker/defender keys; the traffic key is ours, and only when traffic runs.
+            # Before the rotation below, so the injection logins are rotated out of the ground truth.
+            if getattr(experiment, "traffic", None) is not None:
+                import asyncio
+                from .deployer import inject_traffic_key
+                await asyncio.to_thread(inject_traffic_key, experiment, bastion_ip, cfg)
         except Exception as e:  # noqa: BLE001
             if lc:
                 lc.emit(EnvironmentSignal.FAILED, str(e))
@@ -141,6 +147,18 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
                                       ssh_key=cred, ssh_common_args=""))
         return access
 
+    def traffic_spec(self, deployed, cfg: ExperimentManagerConfig):
+        from .deployer import traffic_env_spec
+        return traffic_env_spec(deployed, cfg)
+
+    def traffic_setup_access(self, deployed, bastion_ip, cfg: ExperimentManagerConfig):
+        from .deployer import traffic_setup_access, _bastion_proxy_args
+        cred = self.traffic_credential(deployed, cfg)
+        # Both hops use the scoped victims-only traffic key. No management key enters SetupAccess.
+        proxy = _bastion_proxy_args(bastion_ip, cred)
+        return [a.model_copy(update={"ssh_key": cred, "ssh_common_args": proxy})
+                for a in traffic_setup_access(deployed, bastion_ip, cfg)]
+
     # -- per-system credential issuance -----------------------------------------------------------
     # MHBench generates and injects a separate scoped keypair per system during configure.
     def attacker_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
@@ -148,6 +166,9 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
 
     def defender_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
         return str(Path(cfg.mhbench_dir) / "keys" / "defender_key")
+
+    def traffic_credential(self, deployed, cfg: ExperimentManagerConfig) -> str:
+        return str(Path(cfg.mhbench_dir) / "keys" / "traffic_key")
 
     # -- generic infra guarantees (defender box) --------------------------------------------------
     def _mgmt_internal_ip(self, cfg: ExperimentManagerConfig) -> str:
@@ -253,6 +274,26 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         await asyncio.to_thread(_host_op_sync, "rebuild-host", experiment.experiment_name,
                                 self.environment_spec, cfg, target=request.target)
         return EnvActionResult(kind=EnvActionKind.REBUILD_HOST, ok=True, name=request.target)
+
+    async def restore_traffic_access(self, experiment, deployed, host_name: str, cfg) -> None:
+        """Re-inject the traffic key on the rebuilt host, retrying while it boots."""
+        import asyncio
+        from ....experiment_log import log
+        from .deployer import reinject_traffic_key, _iter_victims
+        bastion_ip = getattr(experiment, "_bastion_ip", None)
+        topo = deployed.topology_spec if deployed else None
+        ip = next((str(h["ip_address"]) for h in (_iter_victims(topo) if topo else [])
+                   if h["name"] == host_name and h.get("ip_address")), None)
+        if not (bastion_ip and ip):
+            return
+        ok, attempts = False, 0
+        for attempts in range(1, 13):
+            ok = await asyncio.to_thread(reinject_traffic_key, experiment, bastion_ip, ip, cfg)
+            if ok:
+                break
+            await asyncio.sleep(10)
+        log(experiment.experiment_name,
+            f"rebuild: re-inject traffic_key -> {host_name} ({ip}): {'ok' if ok else 'FAILED'} after {attempts} attempt(s)")
 
     async def remove_host(self, experiment, deployed, request, cfg):
         """Remove one existing host."""

@@ -1,12 +1,13 @@
 # The arena
 
-The arena runs cyber-range **experiments**. An experiment pairs three pluggable systems:
+The arena runs cyber-range **experiments**. An experiment pairs four pluggable systems:
 
 | System          | Role                                                              | Required? |
 |-----------------|------------------------------------------------------------------|-----------|
 | **environment** | deploys the network the experiment runs on, sizes it, issues scoped access, produces the agent-facing specs | yes |
 | **attacker**    | the offensive agent, run from a foothold in that network         | yes |
 | **defender**    | the defensive system (detection / deception / active response)   | optional |
+| **traffic**     | benign background activity on the victims (realistic noise for detection) | optional |
 
 The arena (`arena/main.py`) drives each system through a fixed lifecycle and **never reaches
 inside a plugin**; no plugin reaches into the arena. Swapping any system is choosing a different plugin —
@@ -37,18 +38,19 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
   "environment": "environments/instrumented/equifax_small_instrumented.json",
   "attacker_plugin": "incalmo_strategy",
   "attacker_spec": {"strategy": "GraphSearch"},
-  "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"}
+  "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"},
+  "traffic":   {"type": "persona_traffic", "profile": "equifax_office", "warmup_seconds": 300}
 }
 ```
 - **attacker** — a `(plugin, spec)` pair: `attacker_plugin` + `attacker_spec` (an inline dict **or** a
   path to a JSON/YAML file). This is the only attacker form.
 - **environment** — the explicit `{environment_plugin, environment_spec}` (`environment_plugin` names a
   registered plugin, `environment_spec` is a path; no bare-string shorthand).
-- **defender** — the embedded `{type, ...}` form.
+- **defender** / **traffic** — the embedded `{type, ...}` form.
 
 **Two invariants every plugin must respect** (full rationale in `docs/security-model.md`):
 1. **No god key.** The environment issues a scoped credential per system — the attacker key opens its
-   foothold only, the defender key its box + victims only. A plugin gets its key from the injected
+   foothold only, the defender key its box + victims only, the traffic key the victims only. A plugin gets its key from the injected
    `SetupAccess` and must **never** read the broad management key off disk. `scripts/tests/test_no_god_key.py`
    enforces this.
 2. **Run spec vs setup access.** The environment produces two things per system, split by *when* they're
@@ -102,6 +104,8 @@ pytest scripts/tests/
 - `scripts/tests/test_attacker_lifecycle.py` — the attacker setup → ready → running → stopping → stopped handshake.
 - `scripts/tests/test_defender_lifecycle.py` — the defender setup → ready → running → stopping → stopped handshake
   (mirror of the attacker: arming in `setup()`, READY on return, no readiness marker).
+- `scripts/tests/test_traffic_lifecycle.py` — the traffic handshake, teardown ordering, rebuild→rearm, and
+  `persona_traffic`'s role-profile resolution.
 - `scripts/tests/test_no_god_key.py` — the scoped-key regression guard.
 
 There are no cloud integration tests in pytest. End-to-end testing is opt-in and costs real cloud + LLM
@@ -118,6 +122,7 @@ arena/
   environment/  environment plugin type (backend-neutral interface); plugins/mhbench/ is the MHBench backend
   attacker/     attacker plugin type + implementations
   defender/     defender plugin type + implementations
+  traffic/      traffic plugin type + implementations
 ```
 
 ---
@@ -160,6 +165,8 @@ def defender_spec(self, deployed, cfg) -> DefenderEnvSpec    # host inventory {n
 # SETUP ACCESS (scoped key + bastion routing — used at setup time):
 def attacker_setup_access(self, deployed, mgmt_ip, cfg) -> list[AttackerSetupAccess]
 def defender_setup_access(self, deployed, mgmt_ip, cfg) -> list[DefenderSetupAccess]
+def traffic_spec(self, deployed, cfg) -> TrafficEnvSpec             # victims {name, ip, role, users}
+def traffic_setup_access(self, deployed, mgmt_ip, cfg) -> list[TrafficSetupAccess]  # victims only
 ```
 **Symmetric specs.** `attacker/env_spec.py` and `defender/env_spec.py` MIRROR each other: the same parallel
 type tree with identical fields — `AttackerUser`/`DefenderUser`, `AttackerHost`/`DefenderHost`,
@@ -174,6 +181,7 @@ that system's hosts; a leaked attacker key must open the foothold and nothing el
 ```python
 def attacker_credential(self, deployed, cfg) -> str   # foothold only
 def defender_credential(self, deployed, cfg) -> str   # defender box + victims only
+def traffic_credential(self, deployed, cfg) -> str    # victims only (minted only when the run has traffic)
 # the broad management/provisioning key stays internal to the deploy path — no accessor, never in a spec.
 ```
 Stamp the scoped key + bastion routing into each `SetupAccess` you return (see `_bastion_proxy_args` and
@@ -358,3 +366,69 @@ def box_ingress(self):
             "forward":   [8000]}   # victim -> mgmt -> box passthrough (server-mediated EDR clients)
 ```
 A defender that needs nothing returns `{}` and opens nothing.
+
+---
+
+## Adding a TRAFFIC plugin
+
+Generates benign background activity on the victims, so a defender is graded against realistic noise
+instead of an unrealistically silent estate. Subclass `TrafficPlugin` (`traffic/plugins/base.py`) with a
+`config_type`. Its lifecycle is the defender's (same signals, same `run_setup`/`run_start`/`run_stop`
+wrappers); the differences are noted below.
+
+Existing:
+- `plugins/persona_traffic/` — runs the [persona-traffic](../persona-traffic) daemon (vendored
+  MITRE `pyhuman`, no server) as a systemd unit on each victim. Personas are chosen per host
+  **role** from a profile (`profiles/*.json`, or inline): `{"default": ref, "roles": {role: ref | null}}`,
+  where a ref is a bundled persona name or an inline persona object and `null` opts a role out. Each host
+  writes a labelled activity log (`/var/log/bgtraffic/activity.jsonl`), collected to
+  `output/<exp>/traffic/activity_logs/` — the benign ground truth for scoring. Needs `persona_traffic_dir`.
+
+**The interface:**
+```python
+class MyTraffic(TrafficPlugin, config_type="my_traffic"):
+    type: Literal["my_traffic"]
+    # warmup_seconds: int = 0 is on the base — the lead traffic gets before the defender arms
+
+    @classmethod
+    def ui_schema(cls) -> PluginUISchema: ...
+
+    def build_config(self, experiment_name, env_spec, prepared) -> dict:
+        """The record of what traffic ran where (written to traffic/traffic_config.json). No credentials."""
+
+    async def setup(self, experiment, cfg, bastion_ip=None, access=None) -> PreparedTraffic:
+        """Install + START the generators and BLOCK until they are verified active. `access` is the
+        victims-only TrafficSetupAccess list; the role of each host is on experiment._traffic_env_spec."""
+
+    # optional (the base provides a safe default):
+    async def run(self, config_path, experiment_name, cfg): ...   # a harness-side process; default None
+    async def stop(self, experiment, cfg, access=None) -> None: ...
+    async def collect_logs(self, experiment, cfg, dest, access=None) -> None: ...
+    async def rearm(self, experiment, cfg, access) -> None: ...   # one host, after a defender rebuild
+    async def teardown(self, experiment_name, cfg) -> None: ...
+```
+
+**Where it sits in the run.** The order is environment → traffic → defender → attacker. Traffic is set up
+right after the environment is configured, then runs `warmup_seconds` before the defender arms, so the
+defender never sees the environment without it. Generators must be steady and duration-independent (no
+bursts or phases): the run can start and stop them at any time, and every window should carry the same
+expected load. `persona_traffic` uses a Poisson process at each persona's `events_per_hour`.
+It runs through the whole attack and stops last (after the defender); `_teardown` stops it and collects
+its logs before the environment's host-log collection. **`setup()` raising fails the experiment**: a run
+that asked for traffic is never reported as a quiet run.
+
+**Differences from the defender.**
+- Traffic acts on every host it was given, so `stop()`/`collect_logs()` receive the WHOLE access list,
+  not one primary entry.
+- The generators usually live on the victims, so `run()` defaults to returning `None` (no harness-side
+  process). Override it only if your plugin drives traffic from the harness.
+- **Rebuilds.** When a defender restores a victim (`RebuildHost`), the arena calls
+  `environment.restore_traffic_access()` (MHBench re-injects the traffic key) and then `rearm()` on that
+  host in the background, so the restore is not delayed and the restored host does not go silent — a
+  silent host would tell the defender the restore happened.
+
+**Realism is the plugin's job.** Anything a defender can use to tell traffic from users breaks the
+benchmark: an install step visible in the attack-window logs, all activity descending from one daemon
+process, the traffic key's logins. Keep generators baked into the images where you can, and make the
+activity look like the host's real users.
+

@@ -217,6 +217,17 @@ def issue_scoped_keys(cfg: ExperimentManagerConfig) -> tuple[Path, Path]:
     return out[0], out[1]
 
 
+def issue_traffic_key(cfg: ExperimentManagerConfig) -> Path:
+    """Generate (idempotently) the traffic_key keypair the env issues (victims only)."""
+    p = Path(cfg.mhbench_dir) / "keys" / "traffic_key"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(p), "-N", "", "-q",
+                        "-C", "arena-traffic_key"], check=True)
+        p.chmod(0o600)
+    return p
+
+
 def _inject_bastion_jump(pubkey: str, targets: list[str], bastion_ip: str, mgmt_key: str) -> bool:
     """Add a forward-only entry for pubkey to the bastion's authorized_keys (tunnel to targets only)."""
     if not targets:
@@ -288,6 +299,40 @@ def inject_scoped_keys(experiment: Experiment, bastion_ip: Optional[str], cfg: E
         log(name, f"jump: defender_key forward-only on bastion -> {len(targets)} hosts: {'ok' if jok else 'FAILED'}")
 
 
+def inject_traffic_key(experiment: Experiment, bastion_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
+    """Issue + inject the victims-only traffic key (full shell on victims + forward-only on the bastion).
+
+    MHBench's own configure issues the attacker/defender keys but knows nothing of traffic, so the env
+    plugin does this one itself, only for an experiment that runs traffic. Raises if any victim is missed,
+    since traffic would then fail on that host anyway."""
+    name = experiment.experiment_name
+    if not bastion_ip:
+        raise RuntimeError("inject_traffic_key: no bastion_ip")
+    topo = resolve_topology_path(experiment.environment_spec, cfg)
+    tk_pub = Path(str(issue_traffic_key(cfg)) + ".pub").read_text().strip()
+    mgmt_key = _mhbench_ssh_key(cfg)
+    victims = [(h["name"], str(h["ip_address"])) for h in _iter_victims(topo) if h.get("ip_address")]
+    failed = []
+    for hname, hip in victims:
+        ok = _inject_pubkey(tk_pub, hip, bastion_ip, mgmt_key)
+        log(name, f"per-system key: traffic_key -> {hname} {hip}: {'ok' if ok else 'FAILED'}")
+        if not ok:
+            failed.append(hname)
+    if victims:
+        jok = _inject_bastion_jump(tk_pub, [f"{ip}:22" for _, ip in victims], bastion_ip, mgmt_key)
+        log(name, f"jump: traffic_key forward-only on bastion -> {len(victims)} hosts: {'ok' if jok else 'FAILED'}")
+        if not jok:
+            failed.append("bastion")
+    if failed:
+        raise RuntimeError(f"traffic_key injection failed on: {', '.join(failed)}")
+
+
+def reinject_traffic_key(experiment: Experiment, bastion_ip: str, host_ip: str, cfg: ExperimentManagerConfig) -> bool:
+    """Re-grant the traffic key on one rebuilt victim (a rebuild restores the image's authorized_keys)."""
+    tk_pub = Path(str(issue_traffic_key(cfg)) + ".pub").read_text().strip()
+    return _inject_pubkey(tk_pub, host_ip, bastion_ip, _mhbench_ssh_key(cfg))
+
+
 async def inject_scoped_keys_env(experiment: Experiment, bastion_ip: Optional[str], cfg: ExperimentManagerConfig) -> None:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, inject_scoped_keys, experiment, bastion_ip, cfg)
@@ -338,6 +383,32 @@ def defender_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: O
         out.append(DefenderSetupAccess(name=box["name"], host=str(box["ip_address"]), user="root",
                                ssh_key=key, ssh_common_args=proxy))
     return out
+
+
+def traffic_env_spec(deployed: Optional[DeployedEnvironment], cfg: ExperimentManagerConfig):
+    """Build the TrafficEnvSpec: objective + the victim hosts with their roles and login users."""
+    from ....traffic.env_spec import TrafficEnvSpec, TrafficHost, TrafficUser
+    topo = deployed.topology_spec if deployed else None
+    hosts = []
+    if topo and Path(topo).exists():
+        for h in _iter_victims(topo):
+            ip = h.get("ip_address")
+            hosts.append(TrafficHost(
+                name=h["name"], ip=str(ip) if ip else None, role=_role_from_name(h["name"]),
+                users=[TrafficUser(name=u) for u in _host_users(h.get("vm_type", ""))],
+                telemetry=h.get("vm_type", "").endswith("_instrumented"),
+            ))
+    return TrafficEnvSpec(objective=(deployed.spec if deployed else None) or "none", hosts=hosts)
+
+
+def traffic_setup_access(deployed: Optional[DeployedEnvironment], bastion_ip: Optional[str], cfg: ExperimentManagerConfig):
+    """Build the SetupAccess for each victim (never the defender box or the foothold). The caller stamps the key."""
+    from ....traffic.env_spec import TrafficSetupAccess
+    topo = deployed.topology_spec if deployed else None
+    if not (topo and Path(topo).exists()):
+        return []
+    return [TrafficSetupAccess(name=h["name"], host=str(h["ip_address"]), user="root")
+            for h in _iter_victims(topo) if h.get("ip_address")]
 
 
 def _provision_sync(

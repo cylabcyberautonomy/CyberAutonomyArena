@@ -494,6 +494,7 @@ def schemas_json() -> dict:
     return {
         "attacker": schemas.get("attacker", {}),
         "defender": schemas.get("defender", {}),
+        "traffic": schemas.get("traffic", {}),
         "env_nicknames": ENV_NICKNAMES,
     }
 

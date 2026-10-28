@@ -74,7 +74,7 @@ The body pairs the four pluggable systems (see [`CLAUDE.md`](CLAUDE.md) for the 
 | `environment` | yes | `{environment_plugin, environment_spec}` — `environment_plugin` names a registered env plugin (`mhbench`); `environment_spec` is a topology path **relative to `mhbench_dir`** (e.g. `environments/instrumented/equifax_small_instrumented.json`). |
 | `attacker_plugin` + `attacker_spec` | yes | The attacker as a `(plugin, spec)` pair. `attacker_spec` is that plugin's fields — an inline object (as here) **or** a path to a JSON/YAML file. |
 | `defender` | no | Embedded `{type, ...}`; `type` names a registered defender (`llm_soc`, `deception`, `prompt_injection`, `velociraptor`, `canary`) and the rest are its fields. Omit for an undefended run. A defender needs an `*_instrumented` topology (it requires a defender box). |
-| `traffic` | no | Embedded `{type, ...}` benign background traffic (`caldera_human`). Omit for none. |
+| `traffic` | no | Embedded `{type, ...}`; `type` names a registered traffic plugin (`persona_traffic`). Benign activity on the victims, started before the defender and the attacker (`warmup_seconds` of lead before the defender arms). E.g. `{"type": "persona_traffic", "profile": "equifax_office", "warmup_seconds": 300}`. Omit for none. |
 | `trial`, `priority`, `teardown`, `overwrite`, `output_dir` | no | Scheduling / run options (`priority` higher = admitted sooner; `teardown: false` leaves the env standing; `overwrite: true` cancels+replaces a same-named run). |
 
 Each selected plugin must have its code path set in `config.yaml` (see the Config reference below) — e.g.
@@ -103,6 +103,7 @@ field silently backs several.
 | `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
 | `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |
 | `velociraptor_dir` | `velociraptor` defender | Velociraptor repo (holds `bin/velociraptor`; a Go binary, no venv). |
+| `persona_traffic_dir` | `persona_traffic` traffic | persona-traffic repo (stdlib daemon + vendored pyhuman, copied to the victims). Needs `ansible-playbook` on PATH or in its `.venv`. |
 | `arena_host_ip` | defenders | The arena/manager host's own IP (as seen from the deployed VMs), passed to defenders as `management_ip` for self-protection. **Not** the per-experiment bastion. |
 
 **Tunable parameters** — adjust these to control how the harness runs experiments:
