@@ -16,18 +16,19 @@ not yet wired — see the last section.
 
 ---
 
-## 1. No god key — three scoped credentials
+## 1. No god key — scoped credentials, one per system
 
 MHBench's native deploy injects **one** keypair as `root` on **every** host. Leaked to the attacker,
 that single key is `ssh root@<any-victim>` east–west — it wins the game without exploitation, and bastion
 isolation doesn't cover east–west movement. So the arena forbids a god key anywhere. The environment
-issues exactly three credentials, each scoped to only its own hosts:
+issues one credential per system, each scoped to only its own hosts:
 
 | Credential            | Opens                                   | Who holds it                        | In a spec? |
 |-----------------------|-----------------------------------------|-------------------------------------|------------|
 | **env / management**  | the environment's own VMs (deploy/configure) | the harness (environment plugin)    | **never**  |
 | **attacker key**      | the attacker's foothold box **only**    | injected into the attacker's `SetupAccess` | in `SetupAccess` (setup) |
 | **defender key**      | the defender box **+ the victims** it may act on | injected into the defender's `SetupAccess`  | in `SetupAccess` (setup) |
+| **traffic key**       | the victims **only** (no box, no foothold) — minted only when the experiment runs traffic | injected into the traffic `SetupAccess` | in `SetupAccess` (setup) |
 
 The management key stays inside the environment plugin's deploy path and is **never** placed in any spec
 or `SetupAccess`, so it has no accessor on the plugin interface. The attacker and defender keys are minted
@@ -40,7 +41,7 @@ the adversary only what it already had.
 
 ### Enforcement: `scripts/tests/test_no_god_key.py`
 
-A regression guard greps every plugin file under `attacker/plugins` and `defender/plugins`
+A regression guard greps every plugin file under `attacker/plugins`, `defender/plugins` and `traffic/plugins`
 for the signatures of a management-key read (`openstack_config.ssh_key_path`,
 `_mhbench_ssh_key`, the default `id_ed25519` path, etc.). It deliberately does **not** flag the *correct*
 pattern — consuming the injected `access["ssh_key"]` — because that is exactly what plugins should do.

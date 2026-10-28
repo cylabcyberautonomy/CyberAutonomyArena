@@ -12,9 +12,11 @@ import pytest
 import arena.attacker.plugins   # noqa: F401
 import arena.defender.plugins   # noqa: F401
 import arena.environment.plugins  # noqa: F401
+import arena.traffic.plugins  # noqa: F401
 from arena.attacker.plugins.base import AttackerPlugin
 from arena.defender.plugins.base import DefenderPlugin
 from arena.environment.plugins.base import EnvironmentPlugin
+from arena.traffic.plugins.base import TrafficPlugin
 from arena.environment import build_environment
 from arena.attacker.env_spec import AttackerEnvSpec, AttackerBox
 
@@ -185,6 +187,7 @@ def test_every_declared_plugin_is_registered():
         _discovery_problems("attacker/plugins", AttackerPlugin._registry)
         + _discovery_problems("defender/plugins", DefenderPlugin._registry)
         + _discovery_problems("environment/plugins", EnvironmentPlugin._registry)
+        + _discovery_problems("traffic/plugins", TrafficPlugin._registry)
     )
     assert not problems, "Declared plugins missing from a registry:\n  " + "\n  ".join(problems)
 
@@ -194,6 +197,7 @@ def test_registries_are_non_empty():
     assert AttackerPlugin._registry, "no attacker plugins registered"
     assert DefenderPlugin._registry, "no defender plugins registered"
     assert EnvironmentPlugin._registry, "no environment plugins registered"
+    assert TrafficPlugin._registry, "no traffic plugins registered"
 
 
 # --------------------------------------------------------------------------- attacker conformance
@@ -270,13 +274,44 @@ def test_defender_plugin_conforms(name):
     assert not problems, f"[{name}] defender conformance:\n  " + "\n  ".join(problems)
 
 
+# --------------------------------------------------------------------------- traffic conformance
+
+_TRAFFIC_METHODS = {"build_config": False, "setup": True, "start": True, "stop": True,
+                    "collect_logs": True, "rearm": True, "teardown": True}
+
+
+@pytest.mark.parametrize("name", _real_plugins(TrafficPlugin._registry), ids=lambda n: n)
+def test_traffic_plugin_conforms(name):
+    """Every registered traffic plugin meets the shared TrafficPlugin contract."""
+    cls = TrafficPlugin._registry[name]
+    problems: list[str] = []
+    try:
+        instance, required_extra = _minimal_instance(cls, name)
+    except Exception as e:  # noqa: BLE001
+        pytest.fail(f"[{name}] not instantiable from minimal config: {type(e).__name__}: {e}")
+    if instance.type != name:
+        problems.append(f"instance.type={instance.type!r} != registry key {name!r}")
+    problems += _ui_schema_problems(cls, name, required_extra)
+    problems += _lifecycle_problems(instance, _TRAFFIC_METHODS)
+    try:
+        built = instance.build_config("ci_conformance", None, cls.example_prepared())
+        problems += _config_leak_problems(built, "build_config()")
+        problems += _declared_keys_problems(cls, built)
+        if isinstance(built, dict) and built.get("experiment_name") != "ci_conformance":
+            problems.append(f"build_config()['experiment_name']={built.get('experiment_name')!r} != 'ci_conformance'")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"build_config() raised {type(e).__name__}: {e}")
+    assert not problems, f"[{name}] traffic conformance:\n  " + "\n  ".join(problems)
+
+
 # --------------------------------------------------------------------------- environment conformance
 
 _ENV_ASYNC_METHODS = {"capacity": True, "provision": True, "configure": True, "collect": True,
-                      "teardown": True, "program_ingress": True}
+                      "teardown": True, "program_ingress": True, "restore_traffic_access": True}
 _ENV_SYNC_METHODS = {"resolve_spec": False, "attacker_spec": False, "defender_spec": False,
                      "attacker_setup_access": False, "defender_setup_access": False,
                      "attacker_credential": False, "defender_credential": False,
+                     "traffic_spec": False, "traffic_setup_access": False, "traffic_credential": False,
                      "defender_box": False, "provides_defender_box": False}
 
 
@@ -332,6 +367,18 @@ def test_defender_declared_config_keys_match_table(name):
     assert name in _EXPECTED_DEFENDER_CONFIG_KEYS, (
         f"defender {name!r} has no entry in _EXPECTED_DEFENDER_CONFIG_KEYS — declare its runner contract")
     assert set(DefenderPlugin._registry[name].REQUIRED_CONFIG_KEYS) == _EXPECTED_DEFENDER_CONFIG_KEYS[name]
+
+_EXPECTED_TRAFFIC_CONFIG_KEYS = {
+    "persona_traffic":    {"experiment_name", "assignments"},
+}
+
+
+@pytest.mark.parametrize("name", _real_plugins(TrafficPlugin._registry), ids=lambda n: n)
+def test_traffic_declared_config_keys_match_table(name):
+    """Every shipped traffic plugin is in the contract table, and its class declaration matches it."""
+    assert name in _EXPECTED_TRAFFIC_CONFIG_KEYS, (
+        f"traffic {name!r} has no entry in _EXPECTED_TRAFFIC_CONFIG_KEYS — declare its config contract")
+    assert set(TrafficPlugin._registry[name].REQUIRED_CONFIG_KEYS) == _EXPECTED_TRAFFIC_CONFIG_KEYS[name]
 
 
 if __name__ == "__main__":

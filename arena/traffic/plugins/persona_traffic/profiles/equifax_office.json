@@ -1,0 +1,42 @@
+{
+  "description": "Equifax-style estate: admins tending the web tier, office users on the corporate hosts. Keyed by the env-neutral host role (TrafficHost.role).",
+  "default": "office_worker",
+  "roles": {
+    "webserver": {
+      "name": "web_admin",
+      "description": "An admin checking on the web tier: service state, listening ports, recent logs, a local request.",
+      "seed": 4242,
+      "events_per_hour": 15,
+      "activities": [
+        {
+          "workflow": "ExecuteCommand",
+          "weight": 3.0,
+          "label": "service-health",
+          "extra": [
+            "uptime",
+            "ss -tln",
+            "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/",
+            "df -h /"
+          ]
+        },
+        {
+          "workflow": "ExecuteCommand",
+          "weight": 2.0,
+          "label": "log-review",
+          "extra": [
+            "journalctl -n 30 --no-pager",
+            "ls -la /var/log",
+            "free -m"
+          ]
+        },
+        {
+          "workflow": "ListFiles",
+          "weight": 1.0,
+          "label": "spawn-shell-ls",
+          "extra": []
+        }
+      ]
+    },
+    "database": "office_worker"
+  }
+}

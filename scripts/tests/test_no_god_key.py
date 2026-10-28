@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_PLUGIN_ROOTS = ["attacker/plugins", "defender/plugins"]
+_PLUGIN_ROOTS = ["attacker/plugins", "defender/plugins", "traffic/plugins"]
 
 # God-key read signatures (deliberately NOT matching the intended access["ssh_key"] pattern).
 _PATTERNS = [
