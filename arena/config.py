@@ -45,6 +45,13 @@ class ExperimentManagerConfig(BaseModel):
     max_deployed: int = 10
     attacker_timeout_seconds: Optional[float] = None
     experiment_timeout_seconds: Optional[float] = None
+    # Run window cap when an experiment sets no run_duration_seconds. None: the window closes only when the
+    # attacker finishes (or hits attacker_timeout_seconds), a manual stop, or a defender failure.
+    default_run_duration_seconds: Optional[float] = None
+    # True: wipe every OpenStack server and pkill ansible/ssh host-wide at startup and shutdown. Leave False on a
+    # shared cloud: shutdown then cancels only this manager's in-flight experiments.
+    clean_slate: bool = False
+    dotenv_files: list[Path] = []  # .env files loaded into os.environ at startup (e.g. LLM keys plugin subprocesses inherit)
     ansible_verbosity: int = int(os.environ.get("ANSIBLE_VERBOSITY", "0"))
     defender_ready_timeout_seconds: float = 1800
     attacker_setup_started_timeout_seconds: float = 120

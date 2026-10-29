@@ -137,6 +137,10 @@
               <label for="repeats">Repeats (trials)</label>
               <input id="repeats" type="number" min="1" value="1">
             </div>
+            <div class="form-group">
+              <label for="run-duration">Run window cap (min)</label>
+              <input id="run-duration" type="number" min="1" placeholder="attacker only" title="Close the run window after this many minutes even if the attacker is still going. Blank: the manager default.">
+            </div>
             <div class="form-group grow run-summary-group">
               <label>Batch size</label>
               <div id="combo-count" class="combo-count">0 experiments</div>

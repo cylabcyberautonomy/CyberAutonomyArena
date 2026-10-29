@@ -63,6 +63,12 @@ class EnvironmentPlugin(BaseModel):
         raise NotImplementedError(f"{type(self).__name__} must implement collect()")
 
     @classmethod
+    async def prepare_backend(cls, cfg: ExperimentManagerConfig) -> None:
+        """Point this backend's tooling at the configured target at manager startup. Must not modify the cloud.
+        Runs whether or not clean_slate is on. Default: no-op."""
+        return None
+
+    @classmethod
     async def clean_slate(cls, cfg: ExperimentManagerConfig) -> None:
         """Reset this backend's global state at manager startup. Default: no-op. Must be best-effort."""
         return None

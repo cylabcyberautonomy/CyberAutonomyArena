@@ -128,6 +128,16 @@ stamped for the latency table: `defender/triage.jsonl` (batch size, backlog, old
 
 ---
 
+### The run window
+
+The run is `Running` from the attacker's launch until the first of: the attacker exits (`attacker_exited`), it
+hits `attacker_timeout_seconds` (`attacker_timeout`), `run_duration_seconds` elapses (`duration`), a
+`POST /experiments/{name}/stop` or the dashboard's **stop** button (`manual`), or the defender loop exits
+nonzero (`defender_exited`; the attempt fails and is retried). For every reason but `attacker_exited` the
+arena stops the attacker. It then stops the defender and traffic, collects logs, and tears down. The reason
+is recorded as `run_stop_reason`. `DELETE /experiments/{name}` instead cancels an experiment at any stage,
+without collecting.
+
 ## Config reference
 
 `config/config.yaml` is loaded once at startup by the arena. The dashboard also reads a subset of it to find environment specs. Copy [`config/example_config.yaml`](config/example_config.yaml) to `config/config.yaml` to start — it lists every field with its default. Only `mhbench_dir` and `arena_host_ip` are required; the per-plugin code paths are optional (set the ones for the plugins you run).
@@ -159,6 +169,9 @@ field silently backs several.
 |---|---|---|
 | `max_concurrent_experiments` | `1` | How many experiments may deploy or run at the same time. Teardowns are always prioritized over new deployments when the limit is reached. |
 | `max_retries` | `3` | How many times a failed experiment is automatically retried. Set to `0` to disable retries. |
+| `default_run_duration_seconds` | unset | Run window cap for experiments that set no `run_duration_seconds`. Unset: the window lasts as long as the attacker. |
+| `clean_slate` | `false` | `true` wipes every OpenStack server and kills ansible/ssh host-wide at startup and shutdown. Keep it `false` on a shared cloud; shutdown then cancels only this manager's in-flight experiments. |
+| `dotenv_files` | `[]` | `.env` files loaded into the arena's environment at startup (e.g. LLM keys); plugin subprocesses inherit them. |
 
 ---
 

@@ -508,6 +508,14 @@ def proxy_priority(name: str, priority: int) -> tuple[int, dict]:
     return _proxy_call(req)
 
 
+def proxy_stop(name: str) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"{EXPERIMENT_SERVER}/{urllib.parse.quote(name)}/stop", data=b"{}",
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    return _proxy_call(req)
+
+
 def proxy_delete(name: str) -> tuple[int, dict]:
     req = urllib.request.Request(
         f"{EXPERIMENT_SERVER}/{urllib.parse.quote(name)}", method="DELETE",
@@ -622,6 +630,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(422, {"detail": "priority must be an integer"})
                 return
             status, result = proxy_priority(name, priority)
+            self._json(status, result)
+        elif route.startswith("/api/experiments/") and route.endswith("/stop"):
+            name = urllib.parse.unquote(route[len("/api/experiments/"):-len("/stop")])
+            status, result = proxy_stop(name)
             self._json(status, result)
         else:
             self._respond(404, "text/plain", "Not found")

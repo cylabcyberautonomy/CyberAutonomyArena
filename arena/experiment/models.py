@@ -61,6 +61,7 @@ class ExperimentSpecs(BaseModel):
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
     traffic: Optional[TrafficConfig] = None
+    run_duration_seconds: Optional[float] = None  # longest the run window stays open; None -> cfg.default_run_duration_seconds
     c2c_server: Optional[str] = None
     trial: int = 0
     output_dir: Optional[str] = None
@@ -107,6 +108,7 @@ _CONFIG_KEYS = {
     "attacker": ("config", "plugin", "spec_path"),
     "defender": ("config",),
     "traffic": ("config",),
+    "run": ("duration_seconds",),
 }
 
 
@@ -182,8 +184,15 @@ class Experiment:
     traffic_stopping_at = _Field("traffic", "stopping_at")
     traffic_stopped_at = _Field("traffic", "stopped_at")
 
+    # The run window: from the attacker's launch until the first of attacker exit, the attacker cap, the
+    # run duration, a manual stop, or a defender failure.
+    run_duration_seconds = _Field("run", "duration_seconds")
+    run_started_at = _Field("run", "started_at")
+    run_finished_at = _Field("run", "finished_at")
+    run_stop_reason = _Field("run", "stop_reason")  # attacker_exited | attacker_timeout | duration | manual | defender_exited
+
     def __init__(self, experiment_name, status, environment, attacker=None, defender=None, traffic=None,
-                 trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
+                 run_duration_seconds=None, trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
         env_config = environment if isinstance(environment, EnvironmentConfig) else EnvironmentConfig.model_validate(environment)
         self.metadata = {
@@ -215,6 +224,10 @@ class Experiment:
                 "config": traffic, "pid": None, "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
                 "stopping_at": None, "stopped_at": None,
+            },
+            "run": {
+                "duration_seconds": run_duration_seconds, "started_at": None, "finished_at": None,
+                "stop_reason": None,
             },
         }
 

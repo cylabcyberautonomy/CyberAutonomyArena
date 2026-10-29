@@ -106,6 +106,12 @@ class MHBenchEnvironment(EnvironmentPlugin, config_type="mhbench"):
         await collect_environment(experiment, cfg)
 
     @classmethod
+    async def prepare_backend(cls, cfg: ExperimentManagerConfig) -> None:
+        # Set OS_CLOUD so the openstack CLI + MHBench subprocesses target the configured cloud.
+        from .clean_slate import ensure_os_cloud
+        ensure_os_cloud(cfg)
+
+    @classmethod
     async def clean_slate(cls, cfg: ExperimentManagerConfig) -> None:
         # Backend reset at startup: sets OS_CLOUD and wipes leftover OpenStack resources, or no-ops on GCP.
         from .clean_slate import clean_slate as _mhbench_clean_slate

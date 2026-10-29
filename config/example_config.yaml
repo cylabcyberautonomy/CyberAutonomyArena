@@ -94,4 +94,13 @@ max_retries: 3
 #                                       # Safety backstop for a total hang: aborts + tears down (ExperimentTimedOut),
 #                                       # distinct from attacker_timeout_seconds (which is a scored attacker cap).
 defender_ready_timeout_seconds: 1800    # max time for a defender to finish arming
+# default_run_duration_seconds: 3600    # run window cap when an experiment sets no run_duration_seconds;
+#                                       # unset = the window closes only when the attacker ends (or a stop/defender failure)
+
+# ---- Startup / shutdown --------------------------------------------------------
+clean_slate: false                     # true: wipe EVERY OpenStack server and pkill ansible/ssh host-wide at
+                                       # startup + shutdown. Keep false on a shared cloud: shutdown then cancels
+                                       # only this manager's in-flight experiments.
+# dotenv_files:                        # .env files loaded at startup; plugin subprocesses inherit their keys
+#   - /path/to/Defense-MHBench-compatible/.env
 # ansible_verbosity: 0                  # 0-4 (-vvvv); also reads $ANSIBLE_VERBOSITY

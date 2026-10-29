@@ -189,6 +189,12 @@ async def _wait_attacker(process, pid, timeout, exp_log, name):
             return None, True
 
 
+_TERMINAL_STATUSES = {
+    ExperimentStatus.FINISHED, ExperimentStatus.ERROR, ExperimentStatus.TIMEDOUT,
+    ExperimentStatus.BLOCKED, ExperimentStatus.EXPERIMENT_TIMEOUT,
+}
+_stop_requests: dict[str, asyncio.Event] = {}  # experiment_name -> set to end its run window early
+
 _ACTIVE_STATUSES = {  # non-terminal statuses. Their C2 must survive other experiment runs
     ExperimentStatus.QUEUED, ExperimentStatus.DEPLOYING, ExperimentStatus.DEPLOYED,
     ExperimentStatus.CONFIGURING, ExperimentStatus.CONFIGURED, ExperimentStatus.RUNNING,
@@ -218,6 +224,9 @@ async def lifespan(app: FastAPI):
     for _incalmo_dir in (cfg.incalmo_strategy_dir, cfg.incalmo_llm_dir):
         if _incalmo_dir:
             load_dotenv(_incalmo_dir / ".env")
+    # Load configured .env files (e.g. LLM keys) into os.environ so plugin subprocesses inherit them.
+    for _dotenv in cfg.dotenv_files:
+        load_dotenv(_dotenv)
     registry = Registry(cfg.registry_path)
     _openstack_lock = _PriorityLock(cfg.max_concurrent_openstack_ops)     # concurrent provision ops
     _configure_lock = _PriorityLock(cfg.max_concurrent_configures)        # concurrent configure ops
@@ -225,7 +234,13 @@ async def lifespan(app: FastAPI):
     _attacker_setup_lock = _PriorityLock(cfg.max_concurrent_attacker_setups)  # concurrent C2-attacker bring-up
     _deploy_buffer = asyncio.Semaphore(cfg.max_deployed)                  # cap on DEPLOYING+DEPLOYED, for back-pressure
     _inflight_gate = _PriorityLock(cfg.max_active_experiments)            # hard cap on concurrently-active experiments
-    await _clean_slate()
+    from .environment.plugins.base import EnvironmentPlugin
+    for _env_cls in set(EnvironmentPlugin._registry.values()):
+        await _env_cls.prepare_backend(cfg)
+    if cfg.clean_slate:
+        await _clean_slate()
+    else:
+        logger.warning("clean_slate is off: leaving the cloud and host processes untouched at startup")
     _capacity = CapacityTracker(max_active_vms=cfg.max_active_vms, active_source=registry.load,
                                 max_active_cpus=cfg.max_active_cpus)
     await _capacity.initialize()
@@ -289,7 +304,7 @@ async def _pgrep_f(pattern: str) -> list[int]:
 async def _clean_slate() -> None:
     """On startup, kill all running processes, stop C2 containers, tear down environments."""
     # Reap leftover MHBench/ansible subprocesses from a prior harness. Skip the GCP manager's tree.
-    for pattern in ("MHBench/cli.py", "ansible"):
+    for pattern in (str(cfg.mhbench_dir / "cli.py"), "ansible"):
         try:
             for pid in await _pgrep_f(pattern):
                 if pid == os.getpid() or _has_gcp_ancestor(pid):
@@ -370,11 +385,21 @@ async def _clean_slate() -> None:
 
 
 async def _shutdown_cleanup() -> None:
-    """On Ctrl-C / SIGTERM, run clean-slate to tear down infra, then flush all logs."""
+    """On Ctrl-C / SIGTERM, tear down infra, then flush all logs.
+
+    With cfg.clean_slate, run the cloud-wide clean-slate. Otherwise cancel and tear down only this manager's
+    experiments that are still in flight, by name, so nothing another arena owns is touched. Finished runs
+    are already torn down, and a run kept with teardown=false stays up."""
     try:
-        await _clean_slate()
+        if cfg.clean_slate:
+            await _clean_slate()
+        else:
+            for experiment in registry.load():
+                if experiment.status in _TERMINAL_STATUSES:
+                    continue
+                await _cancel_and_remove(experiment.experiment_name)
     except Exception:
-        logger.exception("Clean-slate on shutdown failed")
+        logger.exception("Shutdown cleanup failed")
     logging.shutdown()
 
 
@@ -498,7 +523,8 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
                   "defender_started_at", "defender_finished_at", "attacker_started_at",
                   "attacker_finished_at", "teardown_started_at", "teardown_finished_at",
                   "traffic_status", "traffic_pid", "traffic_setup_started_at", "traffic_ready_at",
-                  "traffic_started_at", "traffic_stopping_at", "traffic_stopped_at", "traffic_finished_at"):
+                  "traffic_started_at", "traffic_stopping_at", "traffic_stopped_at", "traffic_finished_at",
+                  "run_started_at", "run_finished_at", "run_stop_reason"):
             setattr(experiment, f, None)
         await registry.update(experiment)
         get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
@@ -557,6 +583,7 @@ async def _cancel_and_remove(name: str) -> None:
     # This path never sets teardown_finished_at, so the registry removal is what frees the VM hold.
     await registry.remove(name)
     _capacity.release(name)
+    _stop_requests.pop(name, None)
 
 
 async def _docker_preflight() -> Optional[str]:
@@ -865,17 +892,20 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment.status = ExperimentStatus.RUNNING
     # The attacker emits RUNNING when its process is up. The arena waits for it.
     await attacker_lc.wait(AttackerSignal.RUNNING)
+    experiment.run_started_at = datetime.now(timezone.utc)
     await registry.update(experiment)
 
     returncode = None
     try:
-        returncode, timed_out = await _wait_attacker(
-            process, experiment.pid, cfg.attacker_timeout_seconds, exp_log, name
-        )
-        if not timed_out:
+        returncode, reason = await _run_window(experiment, process, defender_process, exp_log)
+        experiment.run_stop_reason = reason
+        if reason == "attacker_exited":
             status = ExperimentStatus.FINISHED if returncode == 0 else ExperimentStatus.ERROR
         else:
-            exp_log.info("[%s] Attacker exceeded %ss wall-clock cap — stopping", name, cfg.attacker_timeout_seconds)
+            if reason == "attacker_timeout":
+                exp_log.info("[%s] Attacker exceeded %ss wall-clock cap — stopping", name, cfg.attacker_timeout_seconds)
+            else:
+                exp_log.info("[%s] Run window closed (%s) — stopping the attacker", name, reason)
             # Handshake stop: the arena sends Stop, the attacker acks STOPPING -> STOPPED.
             await attacker_lc.send(AttackerCommand.STOP)
             await experiment.attacker.run_stop(experiment, cfg)
@@ -889,13 +919,21 @@ async def _run_experiment(experiment: Experiment) -> None:
                     await asyncio.wait_for(process.wait(), 15)
                 except asyncio.TimeoutError:
                     # SIGKILL did not reap it either: stop blocking and proceed to teardown.
-                    exp_log.error("[%s] Attacker pid %s survived SIGKILL — abandoning wait; marking TimedOut", name, experiment.pid)
-            status = ExperimentStatus.TIMEDOUT
+                    exp_log.error("[%s] Attacker pid %s survived SIGKILL — abandoning wait", name, experiment.pid)
+            if reason == "attacker_timeout":
+                status = ExperimentStatus.TIMEDOUT
+            elif reason == "defender_exited":
+                status = ExperimentStatus.ERROR
+                experiment.error = (f"Defender loop exited mid-run (code {defender_process.returncode}); "
+                                    "the run was no longer defended")
+            else:  # duration | manual: the window closed as planned
+                status = ExperimentStatus.FINISHED
     except Exception as e:
         exp_log.exception("Error waiting on attacker process for '%s'", experiment.experiment_name)
         status = ExperimentStatus.ERROR
         experiment.error = f"Error waiting on attacker process — {e}"
     finally:
+        _stop_requests.pop(name, None)
         # Close the env-mutation serving window first, so the arena rejects any late defender event (409).
         if getattr(experiment, "_env_dynamic", False) and getattr(experiment, "_env_serving", False):
             experiment._env_serving = False
@@ -918,13 +956,15 @@ async def _run_experiment(experiment: Experiment) -> None:
             except Exception:
                 exp_log.exception("Error stopping traffic for '%s'", experiment.experiment_name)
 
-    experiment.attacker_finished_at = datetime.now(timezone.utc)
+    experiment.attacker_finished_at = experiment.run_finished_at = datetime.now(timezone.utc)
     # Terminal lifecycle signal. On a normal finish the attacker exited on its own, so record STOPPED here.
     if attacker_lc.status not in (AttackerSignal.STOPPED, AttackerSignal.FAILED):
         await attacker_lc.emit(AttackerSignal.STOPPED)
-    exp_log.info("[%s] Attacker finished (exit code %s, status: %s)", name, returncode, status)
+    exp_log.info("[%s] Run window closed (reason: %s); attacker exit code %s, status: %s",
+                 name, experiment.run_stop_reason, returncode, status)
     # A provider guardrail refusal can end the attacker at exit 0. Detect it and mark a distinct state.
-    if status in (ExperimentStatus.FINISHED, ExperimentStatus.ERROR) and _attacker_guardrail_block(name, cfg):
+    if (experiment.run_stop_reason != "defender_exited"
+            and status in (ExperimentStatus.FINISHED, ExperimentStatus.ERROR) and _attacker_guardrail_block(name, cfg)):
         exp_log.info("[%s] Attacker LLM was refused by a provider guardrail — marking Blocked", name)
         status = ExperimentStatus.BLOCKED
         experiment.error = "Attacker LLM refused by a provider guardrail (content/safety policy) — see attacker llm.log"
@@ -938,6 +978,45 @@ async def _run_experiment(experiment: Experiment) -> None:
     experiment.status = status
     await registry.update(experiment)
     _write_result(experiment)
+
+
+async def _run_window(experiment: Experiment, process, defender_process, exp_log) -> tuple[Optional[int], str]:
+    """Hold the run open from the attacker's launch until the first of:
+
+    "attacker_exited" (the attacker process ended), "attacker_timeout" (cfg.attacker_timeout_seconds),
+    "duration" (run_duration_seconds, else cfg.default_run_duration_seconds; None = no cap), "manual"
+    (POST .../stop), or "defender_exited" (the defender loop died with a nonzero code). A defender that exits
+    0 has finished on its own; the window stays open. Returns (attacker returncode or None, reason). The
+    caller stops the attacker for every reason except "attacker_exited"."""
+    name = experiment.experiment_name
+    loop = asyncio.get_running_loop()
+    duration = experiment.run_duration_seconds or cfg.default_run_duration_seconds
+    deadline = loop.time() + duration if duration else None
+    attacker_wait = asyncio.ensure_future(
+        _wait_attacker(process, experiment.pid, cfg.attacker_timeout_seconds, exp_log, name))
+    stop_wait = asyncio.ensure_future(_stop_requests.setdefault(name, asyncio.Event()).wait())
+    defender_wait = asyncio.ensure_future(defender_process.wait()) if defender_process is not None else None
+    exp_log.info("[%s] Run window open (cap: %s)", name, f"{duration}s" if duration else "attacker only")
+    try:
+        while True:
+            pending = {attacker_wait, stop_wait} | ({defender_wait} if defender_wait is not None else set())
+            timeout = None if deadline is None else max(0.0, deadline - loop.time())
+            done, _ = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            if attacker_wait in done:
+                returncode, timed_out = attacker_wait.result()
+                return returncode, "attacker_timeout" if timed_out else "attacker_exited"
+            if stop_wait in done:  # a manual stop wins a tie with the defender exiting
+                return None, "manual"
+            if not done:
+                return None, "duration"
+            if defender_wait.result() != 0:
+                return None, "defender_exited"
+            exp_log.info("[%s] Defender loop exited cleanly before the window closed; keeping the run open", name)
+            defender_wait = None
+    finally:
+        for w in (attacker_wait, stop_wait, defender_wait):
+            if w is not None and not w.done():
+                w.cancel()
 
 
 # ---- Guardrail-block detection ----------------------------------------------
@@ -1015,6 +1094,7 @@ async def add_experiment(data: ExperimentSpecs):
         attacker=data.attacker,
         defender=data.defender,
         traffic=data.traffic,
+        run_duration_seconds=data.run_duration_seconds,
         trial=data.trial,
         teardown=data.teardown,
         created_at=now,
@@ -1082,6 +1162,20 @@ async def get_experiment(experiment_name: str):
         return registry.get(experiment_name).flat()
     except KeyError:
         raise HTTPException(status_code=404, detail="Experiment not found")
+
+
+@app.post("/experiments/{experiment_name}/stop")
+async def stop_experiment(experiment_name: str):
+    """End a running experiment's run window early. It then collects and tears down as on a normal finish."""
+    try:
+        experiment = registry.get(experiment_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    if experiment.status != ExperimentStatus.RUNNING:
+        raise HTTPException(status_code=409, detail=f"'{experiment_name}' is {experiment.status.value}, not Running; "
+                                                    "use DELETE to cancel an experiment that is not running")
+    _stop_requests.setdefault(experiment_name, asyncio.Event()).set()
+    return {"experiment_name": experiment_name, "status": "stopping"}
 
 
 @app.delete("/experiments/{experiment_name}")

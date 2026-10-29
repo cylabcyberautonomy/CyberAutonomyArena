@@ -84,7 +84,7 @@ function envLabel(e) {
 }
 
 function phaseCell(e) {
-  // env deploy → attacker → defender → teardown
+  // env deploy → attacker → defender → run window → teardown
   const failed = FAILED_STATUSES.has(e.status);
   const mk = (started, finished, label) => {
     let cls = 'skip';
@@ -97,6 +97,7 @@ function phaseCell(e) {
     ${mk(e.environment_deploy_started_at, e.environment_deploy_finished_at, 'Env deploy')}
     ${mk(e.attacker_started_at, e.attacker_finished_at, 'Attacker')}
     ${mk(e.defender_started_at, e.defender_finished_at, 'Defender')}
+    ${mk(e.run_started_at, e.run_finished_at, 'Run window' + (e.run_stop_reason ? ' (' + e.run_stop_reason + ')' : ''))}
     ${mk(e.teardown_started_at, e.teardown_finished_at, 'Teardown')}
   </div>`;
 }
@@ -172,6 +173,7 @@ function renderRows() {
       <td class="col-time" title="${esc(e.created_at || '')}">${fmtTime(e.created_at)}</td>
       <td class="col-time" title="${esc(e.updated_at || '')}">${fmtTime(e.updated_at)}<br><span class="muted">${relAge(e.updated_at)}</span></td>
       <td class="col-actions">
+        ${e.status === 'Running' ? `<button class="row-btn" data-act="stop" data-name="${esc(e.experiment_name)}" title="End the run window now (stop the attacker, collect, tear down)">stop</button>` : ''}
         ${live ? `<button class="row-btn" data-act="prio" data-name="${esc(e.experiment_name)}" title="Set priority">prio</button>` : ''}
         ${live ? `<button class="row-btn danger" data-act="del" data-name="${esc(e.experiment_name)}" title="Cancel & remove">✕</button>` : ''}
       </td></tr>${errRow}`;
@@ -214,6 +216,11 @@ $('#exp-rows').addEventListener('click', async (ev) => {
       if (!confirm(`Cancel and remove "${name}"?`)) return;
       const r = await fetch('/api/experiments/' + encodeURIComponent(name), { method: 'DELETE' });
       if (!r.ok) alert('Delete failed: ' + (await r.text()));
+      refreshExperiments();
+    } else if (btn.dataset.act === 'stop') {
+      if (!confirm(`End the run window of "${name}" now? The attacker is stopped, then logs are collected and the range torn down.`)) return;
+      const r = await fetch('/api/experiments/' + encodeURIComponent(name) + '/stop', { method: 'POST' });
+      if (!r.ok) alert('Stop failed: ' + (await r.text()));
       refreshExperiments();
     } else if (btn.dataset.act === 'prio') {
       const v = prompt(`New priority for "${name}" (0–1000, higher = sooner):`, '1000');
@@ -639,6 +646,11 @@ $('#env-clear').addEventListener('click', () => {
 
 /* ── Batch submit ─────────────────────────────────────────────────────── */
 function envStem(spec) { return ENV_NICKNAMES[spec] || spec.split('/').pop(); }
+function runDurationSeconds() {  // blank -> the manager's default_run_duration_seconds
+  const m = parseFloat($('#run-duration').value);
+  return m > 0 ? m * 60 : null;
+}
+
 function repeats() { return Math.max(1, parseInt($('#repeats').value, 10) || 1); }
 
 function updateComboCount() {
@@ -676,6 +688,8 @@ $('#submit-form').addEventListener('submit', async (ev) => {
   for (let i = 0; i < reps; i++) for (const atk of attackerList) for (const def of defenderList) for (const spec of specs) {
     const name = [prefix, atk.slug, def.slug, envStem(spec), i].filter(v => v !== '' && v !== null && v !== undefined).join('_');
     const payload = { experiment_name: name, environment: spec, attacker: atk.config, defender: def.config, trial: i };
+    const duration = runDurationSeconds();
+    if (duration) payload.run_duration_seconds = duration;
     try {
       const r = await fetch('/api/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await r.json().catch(() => ({}));

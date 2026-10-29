@@ -39,8 +39,17 @@ one piece of cross-system timing that matters: the defender-readiness handshake.
 
 6. **Attacker setup + run.** Only after the defender is armed, the arena hands the attacker its
    agent-facing spec + `SetupAccess`, the attacker preps its own foothold (so the defender watches that
-   too), and the engagement runs under a wall-clock cap. On expiry the attacker is
-   `SIGTERM`'d (then `SIGKILL`ed if it ignores that) and marked `TimedOut`.
+   too), and the engagement runs inside the **run window** (`arena/main.py` `_run_window`). The window
+   opens when the attacker is running and closes on the first of:
+   - **attacker_exited**: the attacker process ends (`Finished`, or `Error` on a nonzero exit);
+   - **attacker_timeout**: `attacker_timeout_seconds` elapses (`TimedOut`);
+   - **duration**: `run_duration_seconds` (else `default_run_duration_seconds`) elapses (`Finished`);
+   - **manual**: `POST /experiments/{name}/stop` or the dashboard's *stop* button (`Finished`);
+   - **defender_exited**: the defender loop exits nonzero, so the run is no longer defended (`Error`,
+     retried). A defender that exits 0 has finished on its own; the window stays open.
+
+   For every reason but `attacker_exited` the attacker is `SIGTERM`'d (then `SIGKILL`ed if it ignores
+   that). The reason is recorded as `run_stop_reason`, with `run_started_at` / `run_finished_at`.
 
 7. **Collect.** Traffic is stopped and its labelled activity logs (the benign ground truth) are pulled
    first, then `environment.collect()` pulls host-side logs (the scorer's ground truth) into the
