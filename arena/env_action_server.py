@@ -76,16 +76,26 @@ def resolve_socket_path(cfg) -> str:
     return str(Path(runtime) / f"arena-env-{tag}.sock")
 
 
-def _trace_entry(request, result) -> dict:
-    """A small trace record for EnvironmentLifecycle.record_request about one serviced env-mutation event."""
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _trace_entry(request, result, received_ts: Optional[str] = None) -> dict:
+    """A small trace record for EnvironmentLifecycle.record_request about one serviced env-mutation event.
+
+    Latency hop `env_received` -> `env_finished`: `ts` is when the arena received the request and
+    `finished_ts` when the backend had actuated it (a RebuildHost is finished when the VM is rebuilt)."""
+    finished = _now_iso()
     return {
+        "hop": "env_received",
         "kind": request.kind.value,
         "name": request.name,
         "target": request.target,
         "ok": result.ok,
         "ip": result.ip,
         "error": result.error,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": received_ts or finished,
+        "finished_ts": finished,
     }
 
 
@@ -111,6 +121,7 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
     must match this experiment's _env_action_token (constant-time compare) or the handler rejects it 403."""
     from .environment import EnvActionKind, EnvActionRequest, EnvActionResult, EnvRequestUnsupported
 
+    received_ts = _now_iso()
     name = payload.get("experiment_name")
     action = payload.get("action") or {}
 
@@ -161,7 +172,7 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
         task.add_done_callback(_rearm_tasks.discard)
 
     if lc is not None:
-        lc.record_request(_trace_entry(req, result))
+        lc.record_request(_trace_entry(req, result, received_ts))
     return {**result.model_dump(mode="json"), "status": 200}
 
 

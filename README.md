@@ -73,8 +73,9 @@ The body pairs the four pluggable systems (see [`CLAUDE.md`](CLAUDE.md) for the 
 | `experiment_name` | yes | Unique name; also the output-dir name. Re-submitting an existing name needs `overwrite: true`. |
 | `environment` | yes | `{environment_plugin, environment_spec}` — `environment_plugin` names a registered env plugin (`mhbench`); `environment_spec` is a topology path **relative to `mhbench_dir`** (e.g. `environments/instrumented/equifax_small_instrumented.json`). |
 | `attacker_plugin` + `attacker_spec` | yes | The attacker as a `(plugin, spec)` pair. `attacker_spec` is that plugin's fields — an inline object (as here) **or** a path to a JSON/YAML file. |
-| `defender` | no | Embedded `{type, ...}`; `type` names a registered defender (`llm_soc`, `deception`, `prompt_injection`, `velociraptor`, `canary`) and the rest are its fields. Omit for an undefended run. A defender needs an `*_instrumented` topology (it requires a defender box). |
-| `traffic` | no | Embedded `{type, ...}`; `type` names a registered traffic plugin (`persona_traffic`). Benign activity on the victims, started before the defender and the attacker (`warmup_seconds` of lead before the defender arms). E.g. `{"type": "persona_traffic", "profile": "equifax_office", "warmup_seconds": 300}`. Omit for none. |
+| `defender` | no | Embedded `{type, ...}`; `type` names a registered defender (`llm_soc`, `llm_soc_box`, `deception`, `prompt_injection`, `velociraptor`, `canary`) and the rest are its fields. Omit for an undefended run. A defender needs an `*_instrumented` topology (it requires a defender box). |
+| `traffic` | no | Embedded `{type, ...}`; `type` names a registered traffic plugin (`persona_traffic`). Benign activity on the victims, started before the defender and the attacker (`warmup_seconds` of lead before the defender arms) and stopped after the run window closes. E.g. `{"type": "persona_traffic", "profile": "equifax_workload", "warmup_seconds": 300}`. A profile lists one or more generators per host role (persona daemon, stdlib script runner, GHOSTS Lite) plus per-host extras. Omit for none. |
+| `run_duration_seconds` | no | Longest the run window stays open; it also closes when the attacker finishes. Defaults to `default_run_duration_seconds` in `config.yaml` (3600). |
 | `trial`, `priority`, `teardown`, `overwrite`, `output_dir` | no | Scheduling / run options (`priority` higher = admitted sooner; `teardown: false` leaves the env standing; `overwrite: true` cancels+replaces a same-named run). |
 
 Each selected plugin must have its code path set in `config.yaml` (see the Config reference below) — e.g.
@@ -103,7 +104,8 @@ field silently backs several.
 | `deception_dir` (+`_python`) | `deception` defender | Defense/Perry repo (same checkout). |
 | `prompt_injection_dir` (+`_python`) | `prompt_injection` defender | Defense/Perry repo (same checkout). |
 | `velociraptor_dir` | `velociraptor` defender | Velociraptor repo (holds `bin/velociraptor`; a Go binary, no venv). |
-| `persona_traffic_dir` | `persona_traffic` traffic | persona-traffic repo (stdlib daemon + vendored pyhuman, copied to the victims). Needs `ansible-playbook` on PATH or in its `.venv`. |
+| `persona_traffic_dir` | `persona_traffic` traffic | persona-traffic checkout (the `persona` generator kind's daemon; stdlib-only, copied onto the victims). Only needed when a profile uses a persona ref. |
+| `computer_use_env_file` (traffic spec field) | `persona_traffic` traffic | KEY=VALUE file the harness-side `computer_use` driver loads (e.g. a `.env` with `ANTHROPIC_API_KEY`). Unset: the arena process's own environment. The `computer_use` kind drives the desktop of an mhbench `workstation_instrumented` host (`environments/instrumented/equifax_small_desktop_instrumented.json`). |
 | `arena_host_ip` | defenders | The arena/manager host's own IP (as seen from the deployed VMs), passed to defenders as `management_ip` for self-protection. **Not** the per-experiment bastion. |
 
 **Tunable parameters** — adjust these to control how the harness runs experiments:
@@ -344,8 +346,11 @@ Each experiment writes to `output/<experiment_name>/`:
 ```
 output/<experiment_name>/
   experiment/
-    experiment_config.json   ← full Pydantic dump of the Experiment model
-    result.json              ← {"status": "Finished"} or {"status": "Error"}
+    experiment_config.json   ← the submission (environment, attacker, defender, traffic, run duration)
+    experiment_result.json   ← status, every timestamp, run_stop_reason
+    env_actions.jsonl        ← every env-mutation request the defender made, received/finished stamped
+    experiment.log           ← the arena's log for this experiment
+    mhbench.log              ← the environment backend's provision/configure log
   attacker/
     attacker_config.json     ← config dict from build_config()
     attacker.log             ← stdout+stderr of the attacker process
@@ -353,7 +358,17 @@ output/<experiment_name>/
   defender/
     defender_config.json     ← config dict from build_config()
     defender.log             ← stdout+stderr of the defender process
+    *.jsonl                  ← the defender's latency stamps (see docs/latency.md)
+  traffic/                   ← present when the run has traffic
+    traffic_config.json      ← what ran where (no credentials)
+    assignments.json         ← host -> its rendered generators (kind, unit, files)
+    activity_logs/<host>/    ← each host's labelled activity log (the benign ground truth)
+  environment/<host>/        ← each host's ground-truth logs (see below) + clock_offset.json
+  environment/management/    ← the telemetry relay's per-request trace + the mgmt host's clock offset
 ```
+
+Every timestamped file above is a hop in the attacker-action → defender-response chain; [docs/latency.md](docs/latency.md)
+lists each hop, which clock stamped it and how the scorer joins them.
 
 Every failed experiment's output folder is moved to `output/failed/<experiment_name>/`. If the retry budget is not exhausted, the next attempt then runs fresh under `output/`.
 

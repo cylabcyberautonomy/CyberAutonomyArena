@@ -11,7 +11,7 @@ The arena runs cyber-range **experiments**. An experiment pairs four pluggable s
 
 The arena (`arena/main.py`) drives each system through a fixed lifecycle and **never reaches
 inside a plugin**; no plugin reaches into the arena. Swapping any system is choosing a different plugin —
-no arena change. The conceptual reference lives in `docs/` (`architecture.md`, `lifecycle.md`,
+no arena change. The conceptual reference lives in `docs/` (`architecture.md`, `lifecycle.md`, `latency.md`,
 `plugins.md`, `security-model.md`); this file is the practical "how to extend" guide.
 
 ---
@@ -377,12 +377,25 @@ instead of an unrealistically silent estate. Subclass `TrafficPlugin` (`traffic/
 wrappers); the differences are noted below.
 
 Existing:
-- `plugins/persona_traffic/` — runs the [persona-traffic](../persona-traffic) daemon (vendored
-  MITRE `pyhuman`, no server) as a systemd unit on each victim. Personas are chosen per host
-  **role** from a profile (`profiles/*.json`, or inline): `{"default": ref, "roles": {role: ref | null}}`,
-  where a ref is a bundled persona name or an inline persona object and `null` opts a role out. Each host
-  writes a labelled activity log (`/var/log/bgtraffic/activity.jsonl`), collected to
-  `output/<exp>/traffic/activity_logs/` — the benign ground truth for scoring. Needs `persona_traffic_dir`.
+- `plugins/persona_traffic/` — runs a **list of generators per host**, one systemd unit each, chosen per
+  host **role** from a profile (`profiles/*.json`, or inline):
+  `{"default": ref | [ref], "roles": {role: ref | [ref] | null}, "hosts": {host: ref | [ref]}}`. A ref is a
+  bundled persona name, an inline persona object, or `{"generator": kind, ...}`; `null` opts a role out;
+  `hosts` adds extras on top of a host's role list (e.g. a job only `webserver0` can run). Kinds live in
+  `generators.py` and register by subclassing `GeneratorKind`: `persona` (the persona-traffic daemon,
+  vendored MITRE `pyhuman`, needs `persona_traffic_dir`), `script` (the plugin's own stdlib runner,
+  `aux/script_runner.py`: weighted command groups as a Poisson process, `entry: ssh` enters through an SSH
+  login on the host so commands descend from sshd), `ghosts_lite` (CMU SEI GHOSTS Lite from a
+  timeline; binary fetched at install), and `computer_use` (a Claude computer-use agent driving an
+  mhbench `workstation_instrumented` host's XFCE desktop over SSH + xdotool; **harness-side**:
+  `aux/computer_use_driver.py` is launched by `start()` as the plugin's one harness process, so the model
+  key never reaches a victim. Needs `ANTHROPIC_API_KEY` in the arena's environment or a KEY=VALUE file named
+  by `computer_use_env_file`; every action is logged and a recorded log can be replayed without a model via
+  `replay_from`). Script and computer_use specs may target peers with `{{hosts:<role>}}` /
+  `{{ips:<role>}}` / `{{count:<role>}}` and scale their rate with `scale_by_role`. Each generator writes its
+  own labelled activity log (`/var/log/bgtraffic/<name>.jsonl`, or its journal), collected to
+  `output/<exp>/traffic/activity_logs/` — the benign ground truth for scoring. `equifax_workload` is the
+  profile for `docs/workloads/equifax.md`; `equifax_office` is the older single-persona one.
 
 **The interface:**
 ```python

@@ -1,0 +1,213 @@
+{
+  "description": "The Equifax workload model (docs/workloads/equifax.md) as a mixed-generator profile. Corporate hosts: a persona office baseline (A5), an analyst reading the local data extract through an SSH login (A4), and internal web users walking the showcase app on the web tier (A1). Webservers: web operations through an SSH login (A2). webserver0 additionally runs the extract-refresh job as tomcat over the planted SSH aliases (A3), scaled to the number of corporate hosts. Showcase paths are a plausible walk, not verified against the deployed WAR; a 404 is still a benign request. Keyed by the env-neutral host role (TrafficHost.role). Workstations (equifax_small_desktop topology): a computer-use agent on the XFCE desktop (A6) that reads the portal in the browser, keeps notes, and checks the web servers from a terminal.",
+  "default": "office_worker",
+  "roles": {
+    "database": [
+      "office_worker",
+      {
+        "generator": "script",
+        "name": "analyst",
+        "user": "ubuntu",
+        "entry": "ssh",
+        "events_per_hour": 3,
+        "seed": 1104,
+        "think_seconds": 5,
+        "vars": {
+          "FIELD": [
+            "credit_card_company",
+            "salary",
+            "email"
+          ],
+          "REPORT": [
+            "summary_a",
+            "summary_b",
+            "summary_c",
+            "summary_d",
+            "summary_e",
+            "summary_f"
+          ]
+        },
+        "groups": [
+          {
+            "label": "summarise",
+            "weight": 3,
+            "commands": [
+              "mkdir -p ~/reports",
+              "python3 -c \"import json,glob,collections; f=sorted(glob.glob('data_database_*.json'))[0]; d=json.load(open(f)); c=collections.Counter(r.get('${FIELD}') for r in d if isinstance(r,dict) and '_mhb_flag' not in r); open('reports/${REPORT}.txt','w').write(f'{f}: {len(d)} records\\\\n' + '\\\\n'.join(f'{k}: {v}' for k,v in c.most_common(10)))\"",
+              "cat ~/reports/${REPORT}.txt"
+            ]
+          },
+          {
+            "label": "inspect",
+            "weight": 2,
+            "commands": [
+              "ls -la ~",
+              "head -c 2000 ~/data_database_*.json",
+              "grep -c '\"ssn\"' ~/data_database_*.json",
+              "wc -c ~/data_database_*.json"
+            ]
+          },
+          {
+            "label": "tidy",
+            "weight": 1,
+            "commands": [
+              "ls -la ~/reports",
+              "ls -t ~/reports | tail -n +6 | sed 's#^#reports/#' | xargs -r rm -f"
+            ]
+          }
+        ]
+      },
+      {
+        "generator": "script",
+        "name": "web_user",
+        "user": "ubuntu",
+        "entry": "direct",
+        "events_per_hour": 2,
+        "seed": 1101,
+        "think_seconds": 12,
+        "command_timeout": 30,
+        "vars": {
+          "WEB": "{{ips:webserver}}",
+          "UA": [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"
+          ]
+        },
+        "groups": [
+          {
+            "label": "browse",
+            "weight": 3,
+            "commands": [
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/showcase.action",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/tags/ui/index.action",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/validation/index.action",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/person/listPeople.action"
+            ]
+          },
+          {
+            "label": "form",
+            "weight": 2,
+            "commands": [
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/validation/quizBasic.action",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 -d 'name=Pat&age=34&answer=42' http://${WEB}:8080/validation/quizBasic.action",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/person/listPeople.action"
+            ]
+          },
+          {
+            "label": "stray",
+            "weight": 1,
+            "commands": [
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/favicon.ico",
+              "curl -s -o /dev/null -A \"${UA}\" --max-time 10 http://${WEB}:8080/reports/q3.action"
+            ]
+          }
+        ]
+      }
+    ],
+    "webserver": [
+      {
+        "generator": "script",
+        "name": "web_ops",
+        "user": "ubuntu",
+        "entry": "ssh",
+        "events_per_hour": 6,
+        "seed": 1102,
+        "think_seconds": 4,
+        "groups": [
+          {
+            "label": "service-check",
+            "weight": 3,
+            "commands": [
+              "systemctl status tomcat --no-pager",
+              "ss -tln",
+              "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8080/"
+            ]
+          },
+          {
+            "label": "log-review",
+            "weight": 3,
+            "commands": [
+              "ls -la /opt/tomcat/logs",
+              "tail -n 50 /opt/tomcat/logs/catalina.out",
+              "journalctl -n 30 --no-pager"
+            ]
+          },
+          {
+            "label": "capacity",
+            "weight": 2,
+            "commands": [
+              "uptime",
+              "df -h",
+              "free -m",
+              "ps -o pid,user,%cpu,%mem,cmd -u tomcat"
+            ]
+          },
+          {
+            "label": "housekeeping",
+            "weight": 1,
+            "commands": [
+              "ls -la /opt/tomcat/webapps",
+              "find /opt/tomcat/logs -name '*.txt' -mtime +7"
+            ]
+          }
+        ]
+      }
+    ],
+    "workstation": [
+      {
+        "generator": "computer_use",
+        "name": "desktop_user",
+        "sessions_per_hour": 2,
+        "seed": 1105,
+        "max_steps": 25,
+        "effort": "medium",
+        "vars": {
+          "WEB": "{{ips:webserver}}"
+        },
+        "persona": "You are Sam, an IT operations analyst at a credit-reporting company, working on your own Linux workstation (XFCE desktop). Your work today is routine: reading the internal web portal, keeping notes, and looking in on the web servers you administer from the terminal. You are unhurried and methodical, you read what is on screen before acting, and you close what you opened when you are done.",
+        "tasks": [
+          "Open the web browser, go to http://${WEB}:8080/ and read two or three pages of the internal portal. Then open the text editor, write a two-line note on whether the portal looked healthy, save it as ~/notes/portal-check.txt, and close both applications.",
+          "Open a terminal, connect to ubuntu@${WEB} with ssh (your key is already set up), run 'systemctl status tomcat --no-pager' and 'df -h', read the output, type 'exit', and close the terminal.",
+          "Open the spreadsheet application, make a small table with three rows (server, status, checked-by) for the web servers, save it as ~/notes/servers.ods, and close the application.",
+          "Open the file manager, look at the ~/notes folder, open the most recent note in the text editor, add one line with today's date and a short status, save, and close."
+        ]
+      }
+    ]
+  },
+  "hosts": {
+    "webserver0": {
+      "generator": "script",
+      "name": "extract_refresh",
+      "user": "tomcat",
+      "entry": "direct",
+      "events_per_hour": 1,
+      "scale_by_role": "database",
+      "seed": 1103,
+      "think_seconds": 2,
+      "command_timeout": 90,
+      "vars": {
+        "TARGET": "{{hosts:database}}"
+      },
+      "groups": [
+        {
+          "label": "verify-extract",
+          "weight": 9,
+          "commands": [
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${TARGET}_ubuntu 'ls -la ~ && stat ~/data_database_*.json && md5sum ~/data_database_*.json && date -u +%FT%TZ > ~/.extract_status'"
+          ]
+        },
+        {
+          "label": "verify-and-report",
+          "weight": 1,
+          "commands": [
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${TARGET}_ubuntu 'md5sum ~/data_database_*.json > ~/.extract_status'",
+            "mkdir -p /opt/tomcat/work/extract_status && scp -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${TARGET}_ubuntu:.extract_status /opt/tomcat/work/extract_status/${TARGET}"
+          ]
+        }
+      ]
+    }
+  }
+}

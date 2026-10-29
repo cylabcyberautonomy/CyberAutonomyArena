@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 from pydantic import field_validator
 
@@ -225,9 +225,13 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
     # way prepare_box_agent does — box ip from the persisted config's defender_env_spec.box.ip, its
     # scoped-access entry from defender_setup_access. NOT primary_access: for a defender access[0] is a
     # VICTIM (victims-first/box-last), so the passed `access` can't reach the box.
+    # Files pulled off the box at collect time: the agent's log and its per-action latency trace.
+    BOX_LOG_FILES: ClassVar[tuple[str, ...]] = ("box_agent.log", "box_actions.jsonl")
+
     async def collect_logs(self, experiment, cfg: ExperimentManagerConfig, dest: Path, access=None) -> None:
-        """Best-effort: copy /root/box_agent.log off the defender box into dest/box_agent.log. Never raises —
-        a missing box/log/tunnel must not fail the run's teardown."""
+        """Best-effort: copy the box agent's log and its action trace (latency hop box_received, one JSON
+        line per host action) off the defender box into dest/. Never raises — a missing box/log/tunnel must
+        not fail the run's teardown."""
         import json as _json
         import os as _os
         import shlex
@@ -250,15 +254,16 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             port = str(box_acc.get("port", 22))
             ssh = ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
                    "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-p", port, *common,
-                   f"{user}@{box_ip}", "cat /root/box_agent.log"]
+                   f"{user}@{box_ip}"]
             dest.mkdir(parents=True, exist_ok=True)
-            with (dest / "box_agent.log").open("wb") as out:
-                proc = await asyncio.create_subprocess_exec(
-                    *ssh, stdout=out, stderr=asyncio.subprocess.DEVNULL)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=60)
-                except asyncio.TimeoutError:
-                    proc.kill()
+            for fname in self.BOX_LOG_FILES:
+                with (dest / fname).open("wb") as out:
+                    proc = await asyncio.create_subprocess_exec(
+                        *ssh, f"cat /root/{fname}", stdout=out, stderr=asyncio.subprocess.DEVNULL)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        proc.kill()
         except Exception:  # noqa: BLE001 — box-log collection is best-effort; never fail teardown
             pass
 
@@ -379,6 +384,13 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             time.sleep(10)
         else:
             raise RuntimeError(f"defender-box ES did not come up on {box_ip}:9200 within 300s")
+
+        # Latency hop es_ingest: every document gets arena.ingest_ts (box clock) on the way in.
+        stamp = (Path(__file__).parent / "box_es_stamp.sh").read_text()
+        subprocess.run([*ssh_base, target, "cat > /root/box_es_stamp.sh && chmod +x /root/box_es_stamp.sh"],
+                       input=stamp, text=True, check=True, timeout=60)
+        subprocess.run([*ssh_base, target, "/root/box_es_stamp.sh > /root/es_stamp.log 2>&1"],
+                       check=True, timeout=120)
 
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))

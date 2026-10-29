@@ -12,6 +12,7 @@ dependencies = [
     "python-heatclient>=3.0.0",
     "cryptography>=42.0.0",
     "openstacksdk>=2.0.0",
+    "anthropic>=2.3.0",
 ]
 
 [project.scripts]

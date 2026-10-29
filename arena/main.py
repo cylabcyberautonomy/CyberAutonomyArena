@@ -54,6 +54,20 @@ from .experiment import Experiment, ExperimentSpecs, ExperimentStatus, Registry
 from .experiment_log import get_logger, init_logger, log, output_root, register_output_root
 
 
+def _persist_env_request(experiment, entry: dict) -> None:
+    """Latency trace: append one serviced env-mutation event to experiment/env_actions.jsonl."""
+    cfg = globals().get("cfg")  # bound by lifespan(); absent until the app has started
+    if cfg is None:
+        return
+    try:
+        p = output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "experiment" / "env_actions.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:  # noqa: BLE001 — the trace never breaks the action channel
+        pass
+
+
 def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecycle:
     """Return a fresh EnvironmentLifecycle that records env signals and commands on the experiment."""
     persist = _env_signal_recorder(experiment)
@@ -67,7 +81,10 @@ def _env_lc(experiment, command: EnvironmentCommand = None) -> EnvironmentLifecy
         experiment.environment_last_command = cmd.value
         log(experiment.experiment_name, f"environment <- {cmd.value}")
 
-    lc = EnvironmentLifecycle(on_emit=_on_emit, on_command=_on_command)
+    def _on_request(entry: dict) -> None:
+        _persist_env_request(experiment, entry)
+
+    lc = EnvironmentLifecycle(on_emit=_on_emit, on_command=_on_command, on_request=_on_request)
     if command is not None:
         lc.send(command)
     return lc

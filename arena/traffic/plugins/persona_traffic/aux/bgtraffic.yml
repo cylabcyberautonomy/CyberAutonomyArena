@@ -1,121 +1,194 @@
 ---
 # Background-traffic lifecycle on the traffic hosts, driven by PersonaTraffic.
-# `bgtraffic_action` selects the phase:
-#   install  copy the stdlib daemon + vendored pyhuman + this host's persona, preflight it, install a
-#            (stopped) systemd unit
-#   start    start the unit and verify it stays active
-#   stop     stop the unit
-#   collect  fetch each host's labelled activity log back to the control node
 #
-# The daemon is STDLIB-ONLY: victim images have no pip mirror, so nothing is installed beyond copying
-# files. python3 is assumed baked into the image.
+# Each host carries a LIST of generators (persona daemon, script runner, GHOSTS Lite, ...), one systemd
+# unit each. The play is generic over kinds: everything kind-specific is already resolved into the
+# per-host vars the plugin computes (generators.hostvars_for):
+#   bgtraffic_generators  [{kind, name, unit, dir, user, exec_start, check_cmd, log, journal_log}]
+#   bgtraffic_files       [{src, dest}]       control-node spec files -> host paths
+#   bgtraffic_payloads    [{src, dest}]       control-node code dirs/files copied into a generator dir
+#   bgtraffic_archives    [{name, url, dir}]  binaries fetched + unpacked at install (GHOSTS Lite)
+#   bgtraffic_logs        [{name, src}]       the per-generator activity logs to collect
+#   bgtraffic_ssh_users   [user, ...]         local users a runner logs into through sshd (entry: ssh)
+#
+# `bgtraffic_action` selects the phase:
+#   install  ship code + specs, preflight each generator, install (stopped) units
+#   start    start every unit and verify each stays active
+#   stop     stop every unit
+#   collect  fetch each generator's activity log back to the control node
+#
+# Host-side code is STDLIB-ONLY: victim images have no pip mirror, so nothing is installed beyond
+# copying files (and unpacking a fetched archive). python3 is assumed baked into the image.
 - hosts: traffic_hosts
   gather_facts: false
   become: true
   vars:
-    bgtraffic_dest: /opt/persona-traffic
-    bgtraffic_log: /var/log/bgtraffic/activity.jsonl
-    bgtraffic_user: ubuntu
-    bgtraffic_allow_browser: false
-    bgtraffic_allow_gui: false
-    # Shared by the install-time --check and the running unit, so preflight and daemon agree.
-    _bgtraffic_flags: "{{ '--allow-browser ' if bgtraffic_allow_browser else '' }}{{ '--allow-gui ' if bgtraffic_allow_gui else '' }}"
+    bgtraffic_dest: /opt/bgtraffic
+    bgtraffic_log_dir: /var/log/bgtraffic
+    bgtraffic_ssh_key: /etc/bgtraffic/runner_key
 
   tasks:
     # ---- install -------------------------------------------------------------
-    - name: ensure install + log dirs exist
+    - name: ensure base, generator and log dirs exist
       when: bgtraffic_action == 'install'
       file:
         path: "{{ item }}"
         state: directory
         mode: "0755"
-      loop:
-        - "{{ bgtraffic_dest }}"
-        - "{{ bgtraffic_log | dirname }}"
+      loop: "{{ [bgtraffic_dest] + (bgtraffic_generators | map(attribute='dir') | list)
+                + (bgtraffic_files | map(attribute='dest') | map('dirname') | list) }}"
 
-    - name: make the activity log writable by the persona user
+    - name: make the log dir writable by every generator's user
       when: bgtraffic_action == 'install'
       file:
-        path: "{{ bgtraffic_log | dirname }}"
-        owner: "{{ bgtraffic_user }}"
+        path: "{{ bgtraffic_log_dir }}"
+        state: directory
+        mode: "1777"
 
-    - name: copy daemon package + vendored pyhuman
+    - name: copy generator code (daemon packages, the script runner)
       when: bgtraffic_action == 'install'
       copy:
-        src: "{{ item }}"
-        dest: "{{ bgtraffic_dest }}/"
-      loop:
-        - "{{ bgtraffic_src }}/persona_traffic"
-        - "{{ bgtraffic_src }}/vendor"
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: preserve
+      loop: "{{ bgtraffic_payloads }}"
 
-    - name: write this host's persona
+    - name: fetch generator archives (binary generators)
       when: bgtraffic_action == 'install'
-      copy:
-        src: "{{ bgtraffic_persona_src }}"
-        dest: "{{ bgtraffic_dest }}/persona.json"
+      get_url:
+        url: "{{ item.url }}"
+        dest: "/tmp/bgtraffic-{{ item.name }}.zip"
         mode: "0644"
+      loop: "{{ bgtraffic_archives }}"
 
-    - name: preflight persona + deps on this host
+    - name: unpack generator archives
       when: bgtraffic_action == 'install'
-      command:
-        cmd: "python3 -m persona_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --check {{ _bgtraffic_flags }}"
-        chdir: "{{ bgtraffic_dest }}"
-      changed_when: false
+      unarchive:
+        src: "/tmp/bgtraffic-{{ item.name }}.zip"
+        dest: "{{ item.dir }}"
+        remote_src: true
+        mode: "a+rX"
+      loop: "{{ bgtraffic_archives }}"
 
-    - name: install (stopped) systemd unit
+    - name: write each generator's spec files
       when: bgtraffic_action == 'install'
       copy:
-        dest: /etc/systemd/system/bgtraffic.service
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop: "{{ bgtraffic_files }}"
+
+    - name: give each generator dir to its unit's user
+      when: bgtraffic_action == 'install'
+      file:
+        path: "{{ item.dir }}"
+        owner: "{{ item.user }}"
+        recurse: true
+      loop: "{{ bgtraffic_generators }}"
+
+    # entry: ssh — the runner (root) logs into local users through sshd, so commands descend from sshd.
+    - name: ensure the runner key dir exists
+      when: bgtraffic_action == 'install' and bgtraffic_ssh_users | length > 0
+      file:
+        path: "{{ bgtraffic_ssh_key | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: generate the runner key if absent
+      when: bgtraffic_action == 'install' and bgtraffic_ssh_users | length > 0
+      command:
+        cmd: ssh-keygen -t ed25519 -f {{ bgtraffic_ssh_key }} -q -N ""
+        creates: "{{ bgtraffic_ssh_key }}"
+
+    - name: read the runner public key
+      when: bgtraffic_action == 'install' and bgtraffic_ssh_users | length > 0
+      slurp:
+        src: "{{ bgtraffic_ssh_key }}.pub"
+      register: _bg_pub
+
+    - name: authorise the runner key for each actor user
+      when: bgtraffic_action == 'install' and bgtraffic_ssh_users | length > 0
+      authorized_key:
+        user: "{{ item }}"
+        key: "{{ _bg_pub.content | b64decode }}"
+      loop: "{{ bgtraffic_ssh_users }}"
+
+    - name: preflight each generator on this host
+      when: bgtraffic_action == 'install' and item.check_cmd | length > 0
+      command:
+        cmd: "{{ item.check_cmd }}"
+        chdir: "{{ item.dir }}"
+      environment:
+        PYTHONPATH: "{{ item.dir }}"
+      changed_when: false
+      loop: "{{ bgtraffic_generators }}"
+
+    - name: install (stopped) systemd unit per generator
+      when: bgtraffic_action == 'install'
+      copy:
+        dest: "/etc/systemd/system/{{ item.unit }}"
         mode: "0644"
         content: |
           [Unit]
-          Description=Background traffic (persona-traffic) persona daemon
+          Description=Background traffic generator {{ item.name }} ({{ item.kind }})
           After=network.target
 
           [Service]
           Type=simple
-          WorkingDirectory={{ bgtraffic_dest }}
-          Environment=PYTHONPATH={{ bgtraffic_dest }}
-          ExecStart=/usr/bin/python3 -m persona_traffic.daemon --persona {{ bgtraffic_dest }}/persona.json --log {{ bgtraffic_log }} {{ _bgtraffic_flags }}
+          WorkingDirectory={{ item.dir }}
+          Environment=PYTHONPATH={{ item.dir }}
+          ExecStart={{ item.exec_start }}
           Restart=on-failure
-          User={{ bgtraffic_user }}
+          User={{ item.user }}
 
           [Install]
           WantedBy=multi-user.target
+      loop: "{{ bgtraffic_generators }}"
 
-    - name: reload systemd (unit installed, not started)
+    - name: reload systemd (units installed, not started)
       when: bgtraffic_action == 'install'
       systemd:
         daemon_reload: true
 
     # ---- start / stop --------------------------------------------------------
-    - name: start background traffic
+    - name: start every generator
       when: bgtraffic_action == 'start'
       systemd:
-        name: bgtraffic.service
+        name: "{{ item.unit }}"
         state: started
+      loop: "{{ bgtraffic_generators }}"
 
-    - name: verify the daemon stayed up (catches runtime-only failures --check can't)
+    - name: verify each generator stayed up (catches runtime-only failures --check can't)
       when: bgtraffic_action == 'start'
-      command: systemctl is-active bgtraffic.service
+      command: systemctl is-active {{ item.unit }}
       register: _bg_active
       until: _bg_active.stdout == 'active'
       retries: 5
       delay: 2
       changed_when: false
+      loop: "{{ bgtraffic_generators }}"
 
-    - name: stop background traffic
+    - name: stop every generator
       when: bgtraffic_action == 'stop'
       systemd:
-        name: bgtraffic.service
+        name: "{{ item.unit }}"
         state: stopped
       failed_when: false   # best-effort; a host already gone must not fail teardown
+      loop: "{{ bgtraffic_generators }}"
 
     # ---- collect -------------------------------------------------------------
-    - name: fetch activity log to the control node
+    - name: dump the journal of generators that log only to their console
+      when: bgtraffic_action == 'collect' and item.journal_log | length > 0
+      shell: journalctl -u {{ item.unit }} -o json --no-pager > {{ item.journal_log }}
+      failed_when: false
+      changed_when: false
+      loop: "{{ bgtraffic_generators }}"
+
+    - name: fetch each activity log to the control node
       when: bgtraffic_action == 'collect'
       fetch:
-        src: "{{ bgtraffic_log }}"
+        src: "{{ item.src }}"
         dest: "{{ bgtraffic_collect_dest }}/"
         flat: false
       failed_when: false   # a host with no log yet must not fail collection
+      loop: "{{ bgtraffic_logs }}"
