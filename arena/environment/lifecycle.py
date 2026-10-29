@@ -10,7 +10,7 @@ class EnvironmentCommand(str, Enum):
     PROVISION = "Provision"   # bring the network + VMs up
     CONFIGURE = "Configure"   # run setup on the hosts
     ACTIVATE = "Activate"     # open the request-serving window (defender may now mutate topology)
-    DEACTIVATE = "Deactivate" # close the request-serving window (attack phase over)
+    DEACTIVATE = "Deactivate" # close the request-serving window (run window over)
     TEARDOWN = "Teardown"     # tear it all down (collect runs best-effort just before)
 
 

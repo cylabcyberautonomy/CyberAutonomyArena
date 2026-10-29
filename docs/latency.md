@@ -1,6 +1,6 @@
 # Latency instrumentation
 
-A defender's reaction time is a chain of hops: the attacker acts on a host, the sensor emits a record,
+A defender's reaction time is a chain of hops: something happens on a host, the sensor emits a record,
 the record crosses the relay into the box's store, the defender takes it in, the model reasons, the
 defender issues an action, the action lands. This page lists every hop the harness stamps, which
 clock stamped it, where the stamp lands in the output tree, and how a scorer joins them. The goal is a
@@ -43,7 +43,7 @@ measured, the run's host clocks were not synchronised and the number is not trus
 
 ## Reading a run
 
-For one attacker action at time *T* (host clock):
+For one host event at time *T* (host clock):
 
 1. Find its telemetry documents in the box ES by host and `@timestamp` ≈ *T*. `arena.ingest_ts − @timestamp`
    is sensor emission plus transport (hops 1–3).

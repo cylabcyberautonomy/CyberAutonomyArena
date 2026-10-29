@@ -467,7 +467,7 @@ def test_environment_plugin_lifecycle_and_signals():
 
 
 def test_environment_commands_arena_to_env():
-    """The arena sends commands to the environment, recorded for an auditable command/ack trace. Between CONFIGURED and teardown it ACTIVATEs a request-serving window and DEACTIVATEs it at the attack end."""
+    """The arena sends commands to the environment, recorded for an auditable command/ack trace. Between CONFIGURED and teardown it ACTIVATEs a request-serving window and DEACTIVATEs it at the run end."""
     from arena.environment import EnvironmentLifecycle, EnvironmentCommand
     cmds = {c.value for c in EnvironmentCommand}
     assert cmds == {"Provision", "Configure", "Activate", "Deactivate", "Teardown"}

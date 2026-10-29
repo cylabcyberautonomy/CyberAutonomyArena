@@ -425,7 +425,7 @@ output/<experiment_name>/
   environment/management/    ← the telemetry relay's per-request trace + the mgmt host's clock offset
 ```
 
-Every timestamped file above is a hop in the attacker-action → defender-response chain; [docs/latency.md](docs/latency.md)
+Every timestamped file above is a hop in the host-event → defender-response chain; [docs/latency.md](docs/latency.md)
 lists each hop, which clock stamped it and how the scorer joins them.
 
 Every failed experiment's output folder is moved to `output/failed/<experiment_name>/`. If the retry budget is not exhausted, the next attempt then runs fresh under `output/`.

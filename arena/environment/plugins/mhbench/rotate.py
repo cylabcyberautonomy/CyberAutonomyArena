@@ -23,13 +23,13 @@ def _rotate_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     if provision_result.exists():
         bastion_ip = json.loads(provision_result.read_text()).get("mgmt_ip")
     if not bastion_ip:
-        log(name, "No bastion_ip in provision_result.json; skipping pre-attack log rotation.")
+        log(name, "No bastion_ip in provision_result.json; skipping pre-run log rotation.")
         return
 
     init_logger(name, output_root(name, cfg))
     mhbench_log = exp_dir / "mhbench.log"
     mhbench_log.parent.mkdir(parents=True, exist_ok=True)
-    log(name, f"Rotating host logs at the deploy->attack boundary (log: {mhbench_log})...")
+    log(name, f"Rotating host logs at the deploy->run boundary (log: {mhbench_log})...")
     with open(mhbench_log, "a") as lf:
         result = subprocess.run(
             [str(python), str(cli), "rotate-logs", str(topology_path),
@@ -40,7 +40,7 @@ def _rotate_sync(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
     if result.returncode != 0:
         log(name, f"Warning: MHBench rotate-logs exited with code {result.returncode}, see {mhbench_log}")
     else:
-        log(name, "Pre-attack log rotation complete.")
+        log(name, "Pre-run log rotation complete.")
 
 
 async def rotate_environment(experiment: Experiment, cfg: ExperimentManagerConfig) -> None:
