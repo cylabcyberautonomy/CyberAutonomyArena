@@ -85,3 +85,38 @@ def test_llm_soc_collects_the_box_action_trace():
     from arena.defender.plugins.llm_soc import LLMSOCDefenderPlugin
     assert "box_actions.jsonl" in LLMSOCDefenderPlugin.BOX_LOG_FILES
     assert "box_agent.log" in LLMSOCDefenderPlugin.BOX_LOG_FILES
+
+
+# ---------------------------------------------------------------- LLMDetectionAndResponse wiring
+
+def test_llm_soc_passes_strategy_options_through():
+    from arena.defender.plugins.llm_soc import LLMSOCDefenderPlugin
+    from arena.defender.plugins.llm_soc.llm_soc import PreparedLLMSOC
+    plug = LLMSOCDefenderPlugin(type="llm_soc", strategy="LLMDetectionAndResponse", llm_model="endpoint/FAST/x",
+                                strategy_options={"telemetry": "store", "agents": "single"})
+    built = plug.build_config("e", None, PreparedLLMSOC())
+    assert built["strategy"] == "LLMDetectionAndResponse" and built["strategy_options"] == {"telemetry": "store", "agents": "single"}
+    assert LLMSOCDefenderPlugin(type="llm_soc", strategy="FalcoLLM").build_config("e", None, PreparedLLMSOC())["strategy_options"] == {}
+
+
+def test_llm_soc_opens_the_stream_forward_only_in_stream_mode():
+    from arena.defender.plugins.llm_soc import LLMSOCDefenderPlugin
+    store = LLMSOCDefenderPlugin(type="llm_soc", strategy="LLMDetectionAndResponse", strategy_options={"telemetry": "store"})
+    assert store.box_ingress() == {"telemetry": [9200]}
+    stream = LLMSOCDefenderPlugin(type="llm_soc", strategy="LLMDetectionAndResponse", strategy_options={"telemetry": "stream"})
+    assert stream.box_ingress() == {"telemetry": [9200], "forward": [5140]}
+    custom = LLMSOCDefenderPlugin(type="llm_soc", strategy="LLMDetectionAndResponse",
+                                  strategy_options={"telemetry": "stream", "stream_port": 6000})
+    assert custom.box_ingress()["forward"] == [6000]
+    assert LLMSOCDefenderPlugin(type="llm_soc", strategy="FalcoLLM").box_ingress() == {"telemetry": [9200]}
+
+
+def test_llm_soc_box_installs_the_ingest_stamp_too():
+    src = Path("arena/defender/plugins/llm_soc/llm_soc_box.py").read_text()
+    assert "box_es_stamp.sh" in src
+
+
+def test_runner_registers_llm_detection_and_response():
+    src = Path("arena/defender/plugins/llm_soc/runner.py").read_text()
+    assert '"LLMDetectionAndResponse": LLMDetectionAndResponse' in src and '"LLMDetectionAndResponse": PassiveTelemetry' in src
+    assert "strategy_options" in src and "setup_access" in src

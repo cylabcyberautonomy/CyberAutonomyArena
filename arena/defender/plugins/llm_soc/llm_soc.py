@@ -63,6 +63,9 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
     code_python_field = "llm_soc_python"
     strategy: str
     llm_model: str = "openrouter/anthropic/claude-sonnet-5"
+    # Per-strategy settings passed through untouched. LLMDetectionAndResponse reads its two levers here:
+    # {"telemetry": "store"|"stream", "agents": "single"|"swarm", ...} (defaults in Perry's llm_detection_and_response.py).
+    strategy_options: dict = {}
 
     @field_validator("strategy", mode="before")
     @classmethod
@@ -82,10 +85,11 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
                     "field_type": "flat_checkboxes",
                     "label": "Strategy",
                     "key": "strategy",
-                    "options": ["FalcoLLM", "FalcoLLMC2Block"],
+                    "options": ["FalcoLLM", "FalcoLLMC2Block", "LLMDetectionAndResponse"],
                     "short_names": {
                         "FalcoLLM": "falco_llm",
                         "FalcoLLMC2Block": "falco_c2blk",
+                        "LLMDetectionAndResponse": "llm_detection_and_response",
                     },
                 },
                 {
@@ -98,8 +102,14 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             ],
         }
 
+    STREAM_PORT_DEFAULT: ClassVar[int] = 5140
+
     def box_ingress(self) -> dict[str, list[int]]:
-        return {"telemetry": [9200]}
+        ingress: dict[str, list[int]] = {"telemetry": [9200]}
+        if self.strategy == "LLMDetectionAndResponse" and (self.strategy_options or {}).get("telemetry") == "stream":
+            # Stream mode: the sensors ship syslog/json to the mgmt relay, raw-forwarded to the box.
+            ingress["forward"] = [int((self.strategy_options or {}).get("stream_port", self.STREAM_PORT_DEFAULT))]
+        return ingress
 
     def build_config(
         self,
@@ -111,6 +121,7 @@ class LLMSOCDefenderPlugin(DefenderPlugin, config_type="llm_soc"):
             "experiment_name": experiment_name,
             "strategy": self.strategy,
             "llm_model": self.llm_model,
+            "strategy_options": dict(self.strategy_options or {}),
         }
         built.update({k: v for k, v in prepared.model_dump().items() if v is not None})
         return built

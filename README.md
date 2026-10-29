@@ -81,6 +81,51 @@ The body pairs the four pluggable systems (see [`CLAUDE.md`](CLAUDE.md) for the 
 Each selected plugin must have its code path set in `config.yaml` (see the Config reference below) — e.g.
 the example above needs `incalmo_strategy_dir` (attacker) and `llm_soc_dir` (defender).
 
+### The always-on LLM defender (`LLMDetectionAndResponse`)
+
+`llm_soc` / `llm_soc_box` with `"strategy": "LLMDetectionAndResponse"` run Perry's always-on SOC: no Falco alerts, no
+poll interval. Raw sysflow records reach a triage agent as they arrive; it keeps running notes and hands
+flagged hosts to investigators, whose verdicts drive `BlockIP` / `RestoreServer`. Two levers in
+`strategy_options`, so experiment arms differ by one variable at a time:
+
+| Option | Values | Meaning |
+|--------|--------|---------|
+| `telemetry` | `store` (default) / `stream` | `store`: every record is funneled into the box Elasticsearch and tailed by its ingest stamp; investigators may also query it. `stream`: the defender repoints the sensors' exporter to syslog/json over TCP (relay forward port 5140 → box) and keeps its own buffer; nothing is stored. |
+| `agents` | `swarm` (default) / `single` | `single`: one thread triages, investigates flagged hosts one at a time, then returns to triage, so the backlog grows while it reasons. `swarm`: triage runs continuously; investigators run in a pool of `max_parallel_investigations`. |
+
+The endpoint is the third variable, chosen by `llm_model`: `endpoint/<PREFIX>/<model-slug>` reads
+`<PREFIX>_BASE_URL` and `<PREFIX>_API_KEY` from the Defense repo's `.env` (any OpenAI-compatible endpoint, so
+`endpoint/FAST/<slug>` and `endpoint/NORMAL/<slug>` run the same weights on two endpoints). Optional
+`<PREFIX>_TEMPERATURE` (default 0) and `<PREFIX>_EXTRA_BODY` (JSON merged into every request) apply per
+prefix. The served model is logged per call in `defender/token_usage.json`.
+
+For the Kimi K3 experiment, the fast arm is the OpenAI-compatible fast endpoint and the normal arm is the
+same model on OpenRouter (`moonshotai/kimi-k3`), pinned to Moonshot so OpenRouter does not route
+between providers mid-run:
+
+```bash
+# Defense repo .env
+FAST_BASE_URL=https://<fast-endpoint>/v1
+FAST_API_KEY=...
+NORMAL_BASE_URL=https://openrouter.ai/api/v1
+NORMAL_API_KEY=${OPENROUTER_API_KEY}
+NORMAL_EXTRA_BODY={"provider": {"order": ["Moonshot AI"], "allow_fallbacks": false}}
+```
+
+```json
+"defender": {"type": "llm_soc_box", "strategy": "LLMDetectionAndResponse",
+             "llm_model": "endpoint/FAST/<kimi-k3 slug as the fast endpoint names it>",
+             "strategy_options": {"telemetry": "store", "agents": "swarm", "max_parallel_investigations": 4}}
+```
+
+The normal arm is the same spec with `"llm_model": "endpoint/NORMAL/moonshotai/kimi-k3"`.
+
+Other options (defaults in Perry's `defender/strategy/llm/llm_detection_and_response.py`): `investigation_rounds`,
+`page_size`, `triage_max_records`, `allowed_actions`, `default_block_ports`, `confidence_threshold`,
+`action_cooldown_seconds`, `reinvestigate_after_seconds`, `stream_port`, `switch_sensors`. Each stage is
+stamped for the latency table: `defender/triage.jsonl` (batch size, backlog, oldest event age),
+`investigations.jsonl`, `action_trace.jsonl` (see [docs/latency.md](docs/latency.md)).
+
 ---
 
 ## Config reference

@@ -15,18 +15,20 @@ from environment.network import Network, Subnet, Host
 from utility.logging.logging import PerryLogger, setup_action_logger
 from defender.Defender import Defender
 from defender.arsenal.CountArsenal import CountArsenal
-from defender.telemetry import FalcoBasicAnalysis, FalcoAgressiveAnalysis
+from defender.telemetry import FalcoBasicAnalysis, FalcoAgressiveAnalysis, PassiveTelemetry
 from defender.telemetry.telemetry_service import TelemetryService
-from defender.strategy import FalcoLLM, FalcoLLMC2Block
+from defender.strategy import FalcoLLM, FalcoLLMC2Block, LLMDetectionAndResponse
 
 STRATEGY_MAP = {
     "FalcoLLM": FalcoLLM,
     "FalcoLLMC2Block": FalcoLLMC2Block,
+    "LLMDetectionAndResponse": LLMDetectionAndResponse,
 }
 
 TELEMETRY_MAP = {
     "FalcoLLM": FalcoBasicAnalysis,
     "FalcoLLMC2Block": FalcoAgressiveAnalysis,
+    "LLMDetectionAndResponse": PassiveTelemetry,  # LLMDetectionAndResponse ingests on its own; the service loop never polls
 }
 
 experiment_name = config["experiment_name"]
@@ -74,12 +76,21 @@ from defender.orchestrator.RemoteEnvOrchestrator import RemoteEnvOrchestrator
 orchestrator = RemoteEnvOrchestrator.from_config(
     config, experiment_name=experiment_name, network=network, action_logger=action_logger)
 
+# Per-strategy settings (LLMDetectionAndResponse's telemetry/agents levers). The victims' scoped setup access rides
+# along so a stream-mode defender can repoint the sensors' exporter at arm time; the box is excluded.
+_box_ip = ((config.get("defender_env_spec") or {}).get("box") or {}).get("ip")
+strategy_options = {
+    **(config.get("strategy_options") or {}),
+    "setup_access": [a for a in (config.get("defender_setup_access") or []) if a.get("host") != _box_ip],
+    "box_ip": _box_ip,
+}
 strategy = strategy_cls(
     arsenal=arsenal,
     network=network,
     orchestrator=orchestrator,
     telemetry_service=telemetry_service,
     llm_model=config.get("llm_model"),
+    options=strategy_options,
 )
 
 defender = Defender(
@@ -113,6 +124,8 @@ print(f"[{experiment_name}] Defender running", flush=True)
 
 while _running:
     defender.run()
-    time.sleep(10)
+    time.sleep(10)  # LLMDetectionAndResponse does its work in its own threads; this loop only keeps the process alive
 
+if hasattr(strategy, "stop"):
+    strategy.stop()
 print(f"[{experiment_name}] Defender stopped", flush=True)

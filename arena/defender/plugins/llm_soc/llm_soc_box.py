@@ -110,6 +110,12 @@ class LLMSOCBoxDefenderPlugin(LLMSOCDefenderPlugin, config_type="llm_soc_box"):
             time.sleep(10)
         else:
             raise RuntimeError(f"defender-box ES did not come up on {box_ip}:9200 within 300s")
+        # Latency hop es_ingest: every document gets arena.ingest_ts (box clock) on the way in.
+        stamp = (Path(__file__).parent / "box_es_stamp.sh").read_text()
+        subprocess.run([*ssh_base, target, "cat > /root/box_es_stamp.sh && chmod +x /root/box_es_stamp.sh"],
+                       input=stamp, text=True, check=True, timeout=60)
+        subprocess.run([*ssh_base, target, "/root/box_es_stamp.sh > /root/es_stamp.log 2>&1"],
+                       check=True, timeout=120)
         return {"falco_index": "falco", "sysflow_index": "sysflow"}
 
     async def teardown(self, experiment_name: str, cfg: ExperimentManagerConfig) -> None:

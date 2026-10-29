@@ -285,7 +285,12 @@ in `setup()`, then ingests telemetry and executes actions during the run. Subcla
 
 Existing:
 - `plugins/llm_soc/` — an LLM SOC that ingests env telemetry (Falco/Sysflow) from its per-experiment box
-  ES and dispatches LLM agents to act (restore a host, block a C2 IP) in response.
+  ES and dispatches LLM agents to act in response (`FalcoLLM` restores a confirmed host;
+  `FalcoLLMC2Block` blocks a confirmed host's C2 IP). `llm_soc_box` runs the same engine
+  on the defender box.
+  Strategy `LLMDetectionAndResponse` is the always-on variant (no alerts, no poll): levers `strategy_options.telemetry`
+  (`store`|`stream`) and `strategy_options.agents` (`single`|`swarm`); endpoint via `llm_model`
+  `endpoint/<PREFIX>/<slug>`. See README "The always-on LLM defender".
 - `plugins/canary/` — a lightweight checks-only defender for integration testing (no decoys, no LLM).
 - `plugins/deception/` — a decoy/honeypot defender: deploys decoy VMs and plants honey-credentials
   (static + reactive strategies), reacting to box-ES telemetry. **In a separate repo that is not yet
