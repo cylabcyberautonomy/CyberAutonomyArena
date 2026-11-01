@@ -31,12 +31,17 @@ def _mhbench_error(action: str, returncode: int, mhbench_log: Path) -> RuntimeEr
     return RuntimeError(f"MHBench {action} failed (exit {returncode}){detail} (see {mhbench_log})")
 
 
+def _is_kali_vm(vm_type: Optional[str]) -> bool:
+    """True for the shared Kali profile and any dedicated Kali attacker profile."""
+    return str(vm_type or "").startswith("kali")
+
+
 def _kali_ip_from_spec(topology_path: Path) -> Optional[str]:
     topology = json.loads(topology_path.read_text())
     for network in topology.get("networks", []):
         for subnet in network.get("subnets", []):
             for host in subnet.get("hosts", []):
-                if host.get("vm_type") == "kali_running":
+                if _is_kali_vm(host.get("vm_type")):
                     return host.get("ip_address")
     return None
 
@@ -108,7 +113,7 @@ def _iter_victims(topology_path: Path):
             if sub.get("name") in (_ATTACKER_SUBNET, _DEFENDER_SUBNET):
                 continue
             for h in sub.get("hosts", []):
-                if h.get("vm_type") == "kali_running":
+                if _is_kali_vm(h.get("vm_type")):
                     continue
                 yield h
 

@@ -6,21 +6,35 @@
 # sandcat/Caldera agent specifically so that "127.0.0.1" is correct (this host
 # has no floating IP, so nothing off-host can reach it directly - only its own
 # outbound beacon to the C2 works, matching how nmap/ExploitStruts already run
-# here rather than from the harness host). Not baked into the image offline
-# (unlike bake_attacker_tools.yml's git/perl/nikto) since only the LLM
-# abstraction needs it and metasploit-framework is a large, slow install -
-# baking it in would cost every experiment that download regardless of whether
-# it's ever used.
+# here rather than from the harness host).
+#
+# The dedicated Kali attacker profile bakes metasploit-framework and
+# pymetasploit3 offline because its isolated subnet has no egress. The install
+# steps below are therefore conditional and skip whatever is already present;
+# they still run for profiles that do not pre-bake these prerequisites.
 - hosts: "{{ host }}"
   become: true
   become_user: '{{ user }}'
 
   tasks:
+    - name: Check for the Metasploit RPC daemon
+      ansible.builtin.stat:
+        path: /usr/bin/msfrpcd
+      register: msfrpcd_binary
+
+    - name: Check for the Metasploit Python client
+      ansible.builtin.command:
+        argv: [python3, -c, "import pymetasploit3"]
+      register: pymetasploit_client
+      failed_when: false
+      changed_when: false
+
     - name: Install Metasploit Framework (Kali's own repo carries it natively)
       apt:
         name: metasploit-framework
         state: present
         update_cache: true
+      when: not msfrpcd_binary.stat.exists
 
     - name: Install pymetasploit3 (msf_rpc_client.py's RPC client library)
       # extra_args (not the newer break_system_packages param - unsupported by this control
@@ -29,6 +43,7 @@
       pip:
         name: pymetasploit3
         extra_args: --break-system-packages
+      when: pymetasploit_client.rc != 0
 
     - name: Kill any existing msfrpcd process
       shell: pkill -f '[m]sfrpcd' || true
