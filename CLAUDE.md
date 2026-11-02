@@ -34,7 +34,7 @@ plugin, drop a file in the right `plugins/` directory — there is no central li
 ```json
 {
   "experiment_name": "demo",
-  "environment": "environments/instrumented/equifax_small_instrumented.json",
+  "environment": {"environment_plugin": "mhbench", "environment_spec": "environments/instrumented/equifax_small_instrumented.json"},
   "attacker_plugin": "incalmo_strategy",
   "attacker_spec": {"strategy": "GraphSearch"},
   "defender":  {"type": "llm_soc", "strategy": "FalcoLLM"}
@@ -231,15 +231,15 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
     @classmethod
     def ui_schema(cls) -> PluginUISchema: ...
 
-    def build_config(self, experiment_name, env_spec, c2c_url) -> dict:
+    def build_config(self, experiment_name, env_spec, prepared) -> dict:
         """Run config the agent reads. env_spec is the AttackerEnvSpec run spec (objective +
         foothold identity, no keys) — safe to serialize and hand the agent."""
 
-    async def setup(self, experiment, cfg, mgmt_ip, access=None) -> PreparedAttacker:
+    async def setup(self, experiment, cfg, bastion_ip, access=None) -> PreparedAttacker:
         """Prepare the foothold. `access` is the SetupAccess list (setup-time key + routing). Reach the foothold with
         self.primary_access(access).ssh_base(). Return PreparedAttacker()."""
 
-    async def start(self, prepared, config_path, experiment_name, cfg, c2c_url, agent_c2c_url=None, access=None):
+    async def start(self, prepared, config_path, experiment_name, cfg, access=None):
         """Launch the attack process and return it without waiting. Return as soon as it's up — the base
         emits RUNNING after start(), STOPPING/STOPPED around stop(). Readiness is established in setup()."""
 
@@ -257,11 +257,7 @@ base = access.ssh_base()                         # start()/stop()/collect_logs()
 `ssh_base()` returns a ready `ssh` prefix (scoped key + bastion ProxyCommand). Reach the foothold ONLY
 through the `access` you're handed.
 
-**Running a C2.** Do it in your own `setup()`: bring the C2 up, prep the foothold, block until an agent
-beacons in before returning. There is no shared C2 base class — copy `plugins/incalmo_strategy/`'s shape (it
-keeps `launch_c2c`/`wait_c2c_ready`/`wait_c2c_agent`/`stop_c2c` on itself, plus a `sweep_stale_state()` hook
-to reap orphaned C2 tunnels on clean-slate). Set `requires_docker = True` only if the C2 runs as a Docker
-container on the harness host (it gates an early preflight).
+**Running a C2.** Bring the C2 up in `setup()` and wait for an agent beacon before returning. Keep its lifecycle helpers inside the plugin and implement `sweep_stale_state()` for crash recovery, as in `plugins/incalmo_strategy/`. Set `requires_docker = True` when setup needs the harness Docker daemon, including building an image that will run on the foothold; this enables the early Docker preflight.
 
 **Lifecycle.** The arena drives setup → ready → running → stopping → stopped and waits on each; you don't
 emit these. Implement `setup`/`start`/`stop`; the base wraps them in `run_setup`/`run_start`/`run_stop`.

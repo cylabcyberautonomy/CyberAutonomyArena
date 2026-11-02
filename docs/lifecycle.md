@@ -20,11 +20,7 @@ one piece of cross-system timing that matters: the defender-readiness handshake.
    them. Emits `CONFIGURING → CONFIGURED`. Any backend-specific post-step (e.g. MHBench log rotation for a
    clean ground-truth baseline) is internal to the plugin, not a lifecycle stage.
 
-4. **Defender setup + arm** (only if a defender is present). The arena runs `defender.setup()`, opens the
-   box ingress the defender declared via `box_ingress()` (`environment.program_ingress()`), then launches
-   the defender via `defender.run()`. `run()` only *spawns* the defender; arming (standing up ES on the
-   box, placing decoys / honey-credentials, initializing the detection loop) then takes minutes. **The
-   arena blocks here** — see the handshake below.
+4. **Defender setup + arm** (only if a defender is present). The environment opens the ports declared by `box_ingress()` through `program_ingress()`. Then `defender.setup()` blocks until the defense is armed and returns its prepared state. The base emits READY after setup and config generation succeed; only then does `run_start()` launch or adopt the reactive-loop process.
 
 5. **Attacker run.** The arena hands the attacker its agent-facing spec + `SetupAccess`, the attacker
    preps its own foothold, and the engagement runs under a wall-clock cap. On expiry the attacker is
@@ -45,18 +41,9 @@ track and surface per-stage status.
 
 ## Defender readiness — armed in `setup()`
 
-This is the one timing subtlety, and the defender handles it exactly the way the attacker does. A naive
-`run()` returns as soon as its process exists — long before the defense is actually armed. Letting the
-attacker in at that point was a real bug: on one measured run the defender took 3m45s to arm while the
-attacker finished its whole chain in 1m38s, so the detection loop never executed once.
+A running process is not sufficient evidence that the defense is armed. Each defender's `setup()` must wait until its required services, decoys, credentials, and detection loop are ready. It may poll a plugin-specific readiness marker internally.
 
-The fix mirrors the attacker: **all arming happens in `setup()`, which blocks until the defense is
-actually armed** (stand up the box ES, deploy decoys, plant honey-creds; a box-resident defender
-SSH-polls its own box). `run_setup` emits **READY only after `setup()` returns**, and the arena holds
-the attacker behind that READY. There is no separate marker file and no `wait_until_ready` gate —
-**`setup()` returning IS armed == READY**, the same contract as a C2 attacker that blocks on its first
-agent beacon. If `setup()` raises, run_setup emits FAILED and the experiment fails rather than quietly
-handing an undefended range to the attacker — an undefended run is never reported as defended.
+The base `run_setup()` emits READY only after `setup()` returns and the runner configuration is written. The arena holds the attacker behind that signal. If setup fails, the experiment fails rather than reporting an undefended run as defended.
 
 ## Where this lives
 

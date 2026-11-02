@@ -1,5 +1,7 @@
 # Attacker / Defender base symmetry
 
+Historical design and validation record. The staged proposals below include superseded interfaces and open items from that work; they are not the current plugin contract. Use [CLAUDE.md](../CLAUDE.md) for implementation signatures and [lifecycle.md](lifecycle.md) for readiness behavior.
+
 **Goal.** Make `arena/attacker/plugins/base.py` and `arena/defender/plugins/base.py` read as **mirror
 twins** — the same method set, the same parameters, the same bodies wherever behavior is the same —
 the way `attacker/env_spec.py` and `defender/env_spec.py` already mirror each other. **Not** a shared

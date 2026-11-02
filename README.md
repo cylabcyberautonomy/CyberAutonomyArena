@@ -42,7 +42,7 @@ cp config/example_config.yaml config/config.yaml
 uv run uvicorn arena.main:app --port 8000
 ```
 
-On startup the manager tears down any leftover OpenStack resources and clears the registry, so start it before submitting anything.
+On startup the manager clears the registry and, on OpenStack, deletes servers across all projects visible to its credentials along with internal networking resources. Use a dedicated cloud and confirm no other task owns resources before starting or restarting it. Restart the manager after plugin source changes to reload them.
 
 **4. Start the dashboard** (frontend)
 
@@ -94,8 +94,8 @@ field silently backs several.
 
 | Key | Needed by | What it points at |
 |---|---|---|
-| `mhbench_dir` | **always** (the environment backend) | MHBench repo. Env specs resolve as `<mhbench_dir>/environments/<spec>.json`; also holds the scoped keys. A **defender** run needs the `arena-live-provisioning` branch (defender_subnet box + request-ingress CLI). |
-| `mhbench_config` | GCP runs | MHBench `--config` (relative to `mhbench_dir`), e.g. `config/config.gcp.yaml`. Unset = MHBench's OpenStack default. |
+| `mhbench_dir` | **always** (the environment backend) | MHBench repo. Topology paths are absolute or relative to this directory; also holds the scoped keys. A **defender** run needs a topology with a `defender_subnet` box and an MHBench revision supporting `request-ingress`. |
+| `env_backend.mhbench_config` | Non-default MHBench configuration | MHBench `--config` (relative to `mhbench_dir`), e.g. `config/config.gcp.yaml`. Unset = MHBench's OpenStack default. |
 | `incalmo_strategy_dir` (+`_python`) | `incalmo_strategy` attacker | Incalmo repo. |
 | `incalmo_llm_dir` (+`_python`) | `incalmo_llm` attacker | Incalmo repo (same checkout as above; named per plugin). |
 | `sliver_llm_dir` (+`_python`) | `sliver_llm` attacker | Sliver venv/checkout. Defaults to `<output_dir>/.sliver`. |
@@ -188,11 +188,11 @@ arena/attacker/plugins/
 ```python
 import asyncio
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
-from ..base import AttackerPlugin
+from ..base import AttackerPlugin, PreparedAttacker
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
+from ...env_spec import AttackerEnvSpec
 from ....ui_schema import PluginUISchema
 
 
@@ -219,21 +219,21 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
-        c2c_url: str,
+        env_spec: AttackerEnvSpec,
+        prepared: PreparedAttacker,
     ) -> dict:
         return {
             "name": experiment_name,
             "option": self.some_option,
-            "environment": environment.spec if environment else "none",
+            "environment": env_spec.objective or "none",
         }
 
     async def run(
         self,
+        prepared: PreparedAttacker,
         config_path: Path,
         experiment_name: str,
         cfg: ExperimentManagerConfig,
-        c2c_url: str,
     ) -> asyncio.subprocess.Process:
         log_path = cfg.output_dir / experiment_name / "attacker" / "attacker.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,8 +246,8 @@ class MyAttacker(AttackerPlugin, config_type="my_attacker"):
 
 Key points:
 
-- `config_type="my_attacker"` in the class declaration registers it. The same string must appear as `type` in `ui_schema()` and as the `type` literal.
-- If your attacker needs a C2 server, override `launch_c2c`, `wait_c2c_ready`, `wait_c2c_agent`, and `stop_c2c` (and `sweep_stale_state` to reap stale tunnels on clean-slate). See the `IncalmoStrategyAttacker` plugin (`arena/attacker/plugins/incalmo_strategy/`) for a reference implementation.
+- `config_type="my_attacker"` in the class declaration registers it. The same string must appear as `config_type` in `ui_schema()` and as the `type` literal.
+- If your attacker needs a C2 server, bring it up in `setup()` and wait for readiness before returning. Release its resources in `stop()` / `teardown()` and implement `sweep_stale_state()` for crash recovery. See `arena/attacker/plugins/incalmo_strategy/` for an example.
 - `run()` must return an `asyncio.subprocess.Process`. The manager waits for it to exit; exit code 0 → Finished, anything else → Error.
 
 ### Defender plugin
@@ -266,11 +266,11 @@ arena/defender/plugins/
 ```python
 import asyncio
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
-from ..base import DefenderPlugin
+from ..base import DefenderPlugin, PreparedDefender
 from ....config import ExperimentManagerConfig
-from ....environment import DeployedEnvironment
+from ...env_spec import DefenderEnvSpec
 from ....ui_schema import PluginUISchema
 
 
@@ -297,12 +297,13 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
     def build_config(
         self,
         experiment_name: str,
-        environment: Optional[DeployedEnvironment],
+        env_spec: DefenderEnvSpec,
+        prepared: PreparedDefender,
     ) -> dict:
         return {
             "experiment_name": experiment_name,
             "strategy": self.strategy,
-            "topology_spec": environment.topology_spec if environment else None,
+            "objective": env_spec.objective,
         }
 
     async def run(
@@ -320,7 +321,7 @@ class MyDefender(DefenderPlugin, config_type="my_defender"):
         )
 ```
 
-The manager automatically injects `deception_dir`, `management_ip`, and `log_dir` into the config dict before writing it to disk (via `run_defender` in `defender/defender.py`), so you don't need to include those in `build_config`.
+The base class adds `defender_env_spec`, `defender_setup_access`, `management_ip`, `bastion_ip`, and `log_dir` in `run_setup()` before writing the runner config. Keep credential-bearing setup access out of `build_config()`.
 
 ### UI schema field types
 
