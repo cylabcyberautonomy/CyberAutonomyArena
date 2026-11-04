@@ -307,6 +307,8 @@ _EXPECTED_ATTACKER_CONFIG_KEYS = {
     "terminus_llm":     {"model", "objective", "foothold_ip", "max_turns"},
     "sliver_llm":       {"operator_cfg", "listener_addr", "model", "objective", "max_turns"},
     "openshell":        {"agent", "provider_type", "model", "policy", "objective", "foothold_ip", "agent_cmd_template"},
+    "artex":            {"src_dir", "port", "admin_password", "goal", "description", "foothold_ip",
+                         "task_timeout_seconds", "poll_timeout_seconds", "output_dir"},
 }
 _EXPECTED_DEFENDER_CONFIG_KEYS = {
     "canary":           {"experiment_name", "checks", "fail_closed"},
