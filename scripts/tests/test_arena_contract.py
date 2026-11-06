@@ -15,6 +15,7 @@ import pytest
 # Importing the plugin packages triggers auto-registration of every plugin subclass.
 import arena.attacker.plugins  # noqa: F401
 import arena.defender.plugins  # noqa: F401
+import arena.traffic.plugins  # noqa: F401
 import arena.environment.plugins  # noqa: F401 — populate the env registry for registry-driven params
 from arena.environment.plugins.base import EnvironmentPlugin
 from arena.attacker.plugins.base import AttackerPlugin, PreparedAttacker
@@ -73,6 +74,20 @@ def test_registries_have_expected_plugins():
     """Each system type must still offer the plugins the arena selects by name."""
     assert {"incalmo_strategy", "incalmo_llm", "cai_llm", "terminus_llm", "openshell", "sliver_llm"} <= set(AttackerPlugin._registry)
     assert {"llm_soc", "velociraptor", "deception", "prompt_injection", "canary"} <= set(DefenderPlugin._registry)
+    from arena.traffic.plugins.base import TrafficPlugin
+    assert {"persona_traffic"} <= set(TrafficPlugin._registry)
+
+
+def test_traffic_is_optional_and_selected_by_type():
+    """Traffic is optional (absent -> None) and selected by the embedded {type, ...} form, like the defender."""
+    base = {"experiment_name": "t", "environment": ENV, "attacker_plugin": ATTACKER_PLUGIN,
+            "attacker_spec": ATTACKER_SPEC}
+    assert ExperimentSpecs.model_validate(base).traffic is None
+    spec = ExperimentSpecs.model_validate({**base, "traffic": {"type": "persona_traffic",
+                                                              "profile": "equifax_office", "warmup_seconds": 60}})
+    assert spec.traffic.type == "persona_traffic" and spec.traffic.warmup_seconds == 60
+    with pytest.raises(Exception, match="Unknown traffic type"):
+        ExperimentSpecs.model_validate({**base, "traffic": {"type": "nope"}})
 
 
 # ------------------------------------------------------------------ spec validation layer
@@ -679,6 +694,17 @@ def test_env_plugin_produces_both_agent_specs_and_setup_access():
     assert names <= acc_names and "defender_box" in acc_names
     assert all(a.ssh_key for a in dacc)
 
+    # traffic: spec = the victims with roles (no box, no foothold), NO creds; access = exactly those victims
+    from arena.traffic.env_spec import TrafficEnvSpec, TrafficHost
+    tspec = env.traffic_spec(deployed, cfg)
+    assert isinstance(tspec, TrafficEnvSpec) and tspec.box is None
+    assert {h.name for h in tspec.hosts} == names
+    assert {h.role for h in tspec.hosts} >= {"webserver", "database"}
+    assert "ssh_key" not in TrafficHost.model_fields and "ssh_key" not in TrafficEnvSpec.model_fields
+    tacc = env.traffic_setup_access(deployed, "1.2.3.4", cfg)
+    assert {a.name for a in tacc} == names
+    assert all(a.ssh_key and "ProxyCommand" in a.ssh_common_args for a in tacc)
+
 
 def test_defender_subnets_excludes_attacker_and_maps_perimeter(tmp_path):
     """_defender_subnets resolves the defended estate only. It excludes the attacker segment and the defender box subnet, resolves backend names, carries per-host users, and maps the perimeter marker through."""
@@ -783,6 +809,68 @@ def test_env_issues_scoped_per_system_credentials(plugin_name, spec_val):
     dacc = env.defender_setup_access(deployed, "1.2.3.4", cfg)
     assert dacc and all(a.ssh_key == dcred for a in dacc)
     assert foothold_hosts.isdisjoint({a.host for a in dacc})
+
+    # traffic SetupAccess: its own cred, victims only — neither the foothold nor the defender box
+    tcred = env.traffic_credential(deployed, cfg)
+    assert tcred and tcred not in (acred, dcred)
+    tacc = env.traffic_setup_access(deployed, "1.2.3.4", cfg)
+    assert all(a.ssh_key == tcred for a in tacc)
+    assert foothold_hosts.isdisjoint({a.host for a in tacc})
+    box = env.defender_box(deployed, cfg)
+    assert box.ip not in {a.host for a in tacc} and box.name not in {a.name for a in tacc}
+
+
+def test_mhbench_injects_traffic_key_only_when_traffic_runs(tmp_path, monkeypatch):
+    """configure() mints + injects the victims-only traffic key only for an experiment that runs traffic.
+
+    MHBench's own configure issues the attacker/defender keys, so this drives the env plugin's configure()
+    (the real call path), with MHBench's configure + rotation stubbed out."""
+    import asyncio
+    from arena.environment import build_environment
+    from arena.environment.plugins.mhbench import deployer as dep
+    from arena.environment.plugins.mhbench import rotate as rot
+    topo = tmp_path / "topo.json"
+    topo.write_text(json.dumps({"networks": [{"name": "n", "subnets": [
+        {"name": "webserver_subnet", "hosts": [{"name": "webserver0", "vm_type": "webserver", "ip_address": "10.0.0.10"}]},
+        {"name": "attacker_subnet", "hosts": [{"name": "attacker", "vm_type": "kali_running", "ip_address": "10.0.9.10"}]},
+        {"name": "defender_subnet", "hosts": [{"name": "defender", "vm_type": "ubuntu_base", "ip_address": "10.0.250.10"}]},
+    ]}]}))
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    (keys / "traffic_key").write_text("priv")
+    (keys / "traffic_key.pub").write_text("ssh-ed25519 AAAAtraffic arena-traffic_key\n")
+    cfg = SimpleNamespace(mhbench_dir=tmp_path)
+
+    async def no_configure(*a, **k):
+        pass
+
+    async def no_rotate(*a, **k):
+        pass
+
+    monkeypatch.setattr(dep, "configure_environment", no_configure)
+    monkeypatch.setattr(rot, "rotate_environment", no_rotate)
+    monkeypatch.setattr(dep, "resolve_topology_path", lambda spec, cfg: topo)
+    monkeypatch.setattr(dep, "_mhbench_ssh_key", lambda cfg: "/mgmt")
+    monkeypatch.setattr(dep, "log", lambda *a, **k: None)
+    injected, jumps = [], []
+    monkeypatch.setattr(dep, "_inject_pubkey", lambda pub, ip, b, k: injected.append(ip) or True)
+    monkeypatch.setattr(dep, "_inject_bastion_jump", lambda pub, t, b, k: jumps.append(tuple(t)) or True)
+    env = build_environment(ENV)
+
+    asyncio.run(env.configure(SimpleNamespace(experiment_name="e", environment_spec="x", traffic=None),
+                              "1.2.3.4", None, cfg))
+    assert injected == [] and jumps == []
+
+    asyncio.run(env.configure(SimpleNamespace(experiment_name="e", environment_spec="x", traffic=object()),
+                              "1.2.3.4", None, cfg))
+    assert injected == ["10.0.0.10"]           # victims only: not the foothold, not the defender box
+    assert jumps == [("10.0.0.10:22",)]
+
+    # a failed injection fails configure, rather than surfacing later as an unreachable traffic host
+    monkeypatch.setattr(dep, "_inject_pubkey", lambda pub, ip, b, k: False)
+    with pytest.raises(RuntimeError, match="traffic_key injection failed on: webserver0"):
+        asyncio.run(env.configure(SimpleNamespace(experiment_name="e", environment_spec="x", traffic=object()),
+                                  "1.2.3.4", None, cfg))
 
 
 def test_environment_module_exposes_lifecycle():

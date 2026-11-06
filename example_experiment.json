@@ -18,7 +18,7 @@
   },
 
   "traffic": {
-    "type": "caldera_human",
+    "type": "persona_traffic",
     "persona": "office_worker"
   },
 

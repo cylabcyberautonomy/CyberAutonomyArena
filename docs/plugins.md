@@ -1,8 +1,8 @@
 # Adding a plugin
 
-Every swappable system is a plugin. This page is the cross-cutting mechanics shared by all three types;
+Every swappable system is a plugin. This page is the cross-cutting mechanics shared by all four types;
 the per-type specifics (what each must implement + its gotchas) live in the **repo-root `CLAUDE.md`**,
-one section per system (environment / attacker / defender).
+one section per system (environment / attacker / defender / traffic).
 
 ## The shape of a plugin
 
@@ -26,6 +26,7 @@ list to edit**.
 | environment  | `{"environment_plugin": "...", "environment_spec": "..."}` (explicit; `environment_plugin` must name a registered plugin) |
 | attacker     | `"attacker_plugin": "..."` + `"attacker_spec": <inline dict \| path to a JSON/YAML file>` |
 | defender     | `"defender": {"type": "...", ...}` |
+| traffic      | `"traffic": {"type": "...", ...}` |
 
 The attacker's pair form is deliberate: the plugin and its spec are separate, and the spec may be inline
 for quick runs or a file for anything substantial. The environment uses an explicit `{plugin, spec}`;

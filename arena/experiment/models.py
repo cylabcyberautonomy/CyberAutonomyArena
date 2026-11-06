@@ -10,6 +10,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from ..attacker import AttackerConfig
 from ..defender import DefenderConfig
 from ..environment import build_environment
+from ..traffic import TrafficConfig
 from ..environment.environment import EnvironmentConfig
 
 
@@ -59,6 +60,7 @@ class ExperimentSpecs(BaseModel):
     attacker_spec: Optional[Union[dict, str]] = None
     attacker: Optional[AttackerConfig] = None
     defender: Optional[DefenderConfig] = None
+    traffic: Optional[TrafficConfig] = None
     c2c_server: Optional[str] = None
     trial: int = 0
     output_dir: Optional[str] = None
@@ -104,6 +106,7 @@ _CONFIG_KEYS = {
     "environment": ("config", "spec"),
     "attacker": ("config", "plugin", "spec_path"),
     "defender": ("config",),
+    "traffic": ("config",),
 }
 
 
@@ -169,8 +172,17 @@ class Experiment:
     defender_ready_at = _Field("defender", "ready_at")
     defender_stopping_at = _Field("defender", "stopping_at")
     defender_stopped_at = _Field("defender", "stopped_at")
+    traffic = _Field("traffic", "config")
+    traffic_pid = _Field("traffic", "pid")
+    traffic_started_at = _Field("traffic", "started_at")
+    traffic_finished_at = _Field("traffic", "finished_at")
+    traffic_status = _Field("traffic", "lifecycle_status")
+    traffic_setup_started_at = _Field("traffic", "setup_started_at")
+    traffic_ready_at = _Field("traffic", "ready_at")
+    traffic_stopping_at = _Field("traffic", "stopping_at")
+    traffic_stopped_at = _Field("traffic", "stopped_at")
 
-    def __init__(self, experiment_name, status, environment, attacker=None, defender=None,
+    def __init__(self, experiment_name, status, environment, attacker=None, defender=None, traffic=None,
                  trial=0, teardown=True, created_at=None, updated_at=None, priority=0):
         created_at = created_at or datetime.now(timezone.utc)
         env_config = environment if isinstance(environment, EnvironmentConfig) else EnvironmentConfig.model_validate(environment)
@@ -196,6 +208,11 @@ class Experiment:
             },
             "defender": {
                 "config": defender, "pid": None, "started_at": None, "finished_at": None,
+                "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
+                "stopping_at": None, "stopped_at": None,
+            },
+            "traffic": {
+                "config": traffic, "pid": None, "started_at": None, "finished_at": None,
                 "lifecycle_status": None, "setup_started_at": None, "ready_at": None,
                 "stopping_at": None, "stopped_at": None,
             },

@@ -19,6 +19,9 @@ from .attacker.lifecycle import (
 from .defender.lifecycle import (
     DefenderLifecycle, DefenderSignal, DefenderCommand, signal_recorder as _defender_signal_recorder,
 )
+from .traffic.lifecycle import (
+    TrafficLifecycle, TrafficSignal, TrafficCommand, signal_recorder as _traffic_signal_recorder,
+)
 
 
 async def _stop_defender_process(experiment, process, cfg) -> None:
@@ -29,6 +32,20 @@ async def _stop_defender_process(experiment, process, cfg) -> None:
     except Exception:
         pass
 from .defender import run_defender
+from .traffic import run_traffic
+
+
+async def _stop_traffic(experiment, cfg) -> None:
+    """Stop traffic once (run_stop is idempotent), then wait for its harness-side process, if it has one."""
+    await experiment.traffic.run_stop(experiment, cfg)
+    process = getattr(experiment, "_traffic_process", None)
+    if process is not None:
+        try:
+            await process.wait()
+        except Exception:
+            pass
+    if experiment.traffic_finished_at is None:
+        experiment.traffic_finished_at = datetime.now(timezone.utc)
 from .environment import DeployedEnvironment, EnvironmentLifecycle, EnvironmentSignal, EnvironmentCommand
 from .environment.lifecycle import signal_recorder as _env_signal_recorder
 from .environment.capacity import CapacityTracker
@@ -360,6 +377,20 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
         except Exception:
             get_logger(experiment.experiment_name).exception("Failed to stop C2 for '%s'", experiment.experiment_name)
 
+    # Stop traffic and pull its labelled activity logs while the hosts are still up. Best-effort.
+    if experiment.traffic and experiment.traffic_setup_started_at is not None:
+        try:
+            await _stop_traffic(experiment, cfg)
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Traffic stop failed for '%s'", experiment.experiment_name)
+        try:
+            await experiment.traffic.run_collect_logs(
+                experiment, cfg,
+                output_root(experiment.experiment_name, cfg) / experiment.experiment_name / "traffic",
+            )
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Traffic-log collection failed for '%s'", experiment.experiment_name)
+
     # Pull host logs while the range is still up, under _collect_lock. Best-effort: never block teardown.
     try:
         async with _collect_lock:
@@ -392,6 +423,12 @@ async def _teardown(experiment: Experiment, delete_c2: bool = True) -> bool:  # 
             await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             get_logger(experiment.experiment_name).exception("Defender teardown failed for '%s'", experiment.experiment_name)
+
+    if experiment.traffic:
+        try:
+            await experiment.traffic.teardown(experiment.experiment_name, cfg)
+        except Exception:
+            get_logger(experiment.experiment_name).exception("Traffic teardown failed for '%s'", experiment.experiment_name)
 
     # Teardown holds no _openstack_lock, so a failed/finished env reclaims its VMs immediately.
     try:
@@ -442,7 +479,9 @@ async def _handle_failure(experiment: Experiment, reason: Optional[str] = None) 
         experiment.disk_gb_reserved = experiment.vms_reserved = None
         for f in ("environment_deploy_started_at", "environment_deploy_finished_at",
                   "defender_started_at", "defender_finished_at", "attacker_started_at",
-                  "attacker_finished_at", "teardown_started_at", "teardown_finished_at"):
+                  "attacker_finished_at", "teardown_started_at", "teardown_finished_at",
+                  "traffic_status", "traffic_pid", "traffic_setup_started_at", "traffic_ready_at",
+                  "traffic_started_at", "traffic_stopping_at", "traffic_stopped_at", "traffic_finished_at"):
             setattr(experiment, f, None)
         await registry.update(experiment)
         get_logger(name).info("[%s] Attempt failed — retry %d/%d (harness-handled)",
@@ -489,6 +528,11 @@ async def _cancel_and_remove(name: str) -> None:
             await experiment.defender.teardown(experiment.experiment_name, cfg)
         except Exception:
             logger.exception("Defender teardown failed for '%s'", name)
+    if experiment.traffic:
+        try:
+            await experiment.traffic.teardown(experiment.experiment_name, cfg)
+        except Exception:
+            logger.exception("Traffic teardown failed for '%s'", name)
     try:
         await experiment.environment.teardown(experiment, cfg, lc=_env_lc(experiment, EnvironmentCommand.TEARDOWN))
     except Exception:
@@ -678,29 +722,39 @@ async def _run_experiment(experiment: Experiment) -> None:
             )
             return
 
-    # Attacker setup: attach the lifecycle channel so the attacker's run_setup/run_stop can emit signals.
-    attacker_lc = AttackerLifecycle(
-        on_emit=_attacker_signal_recorder(experiment),
-        on_command=_attacker_command_recorder(experiment),
-    )
-    experiment._attacker_lifecycle = attacker_lc
-    # The environment produces the agent-facing AttackerEnvSpec and the harness-only scoped SetupAccess.
-    experiment._attacker_env_spec = experiment.environment.attacker_spec(experiment.deployed_environment, cfg)
-    attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, bastion_ip, cfg)
-    try:
-        # Gate C2 bring-up (requires_docker) under _attacker_setup_lock. Shell agents run ungated.
-        await attacker_lc.send(AttackerCommand.START_SETUP)
-        if getattr(experiment.attacker, "requires_docker", False):
-            async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
-                prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
-        else:
-            prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
-        await registry.update(experiment)
-    except Exception as e:
-        exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
-        await _handle_failure(experiment, f"Attacker setup failed — {e}")
-        return
+    # Order: environment -> traffic -> defender -> attacker. Traffic comes up first, so the defender never
+    # sees the environment without it.
+    if experiment.traffic:
+        try:
+            traffic_lc = TrafficLifecycle(on_emit=_traffic_signal_recorder(experiment))
+            experiment._traffic_lifecycle = traffic_lc
+            await traffic_lc.send(TrafficCommand.START_SETUP)
+            # The environment produces the traffic spec and the victims-only scoped access.
+            experiment._traffic_env_spec = experiment.environment.traffic_spec(experiment.deployed_environment, cfg)
+            experiment._traffic_access = experiment.environment.traffic_setup_access(
+                experiment.deployed_environment, bastion_ip, cfg)
+            experiment._bastion_ip = bastion_ip
+            # Installing on every victim is heavy bastion work, so it shares the configure gate.
+            async with _configure_lock.acquire(_gate_priority(experiment)):
+                _traffic_prepared = await experiment.traffic.run_setup(experiment, cfg)
+            await traffic_lc.send(TrafficCommand.START)
+            experiment._traffic_process = await run_traffic(experiment.traffic, experiment, cfg, _traffic_prepared)
+            experiment.traffic_pid = getattr(experiment._traffic_process, "pid", None)
+            await registry.update(experiment)
+            if experiment.traffic.warmup_seconds > 0:
+                exp_log.info("[%s] Traffic warm-up: %ss before the defender arms", experiment.experiment_name,
+                             experiment.traffic.warmup_seconds)
+                await asyncio.sleep(experiment.traffic.warmup_seconds)
+        except Exception as e:
+            # Traffic was requested, so a run without it must fail, not be reported as a normal run.
+            exp_log.exception("Failed to start traffic for '%s'", experiment.experiment_name)
+            _lc = getattr(experiment, "_traffic_lifecycle", None)
+            if _lc is not None and _lc.status != TrafficSignal.FAILED:
+                await _lc.emit(TrafficSignal.FAILED, str(e))
+            await _handle_failure(experiment, f"Failed to start traffic — {e}")
+            return
 
+    # The defender arms before the attacker, so it watches the attacker's setup as well as its run.
     defender_process = None
     if experiment.defender:
         # Serialize defender arming under the same gate as the harness's configure step.
@@ -754,6 +808,31 @@ async def _run_experiment(experiment: Experiment) -> None:
                     await _lc.emit(DefenderSignal.FAILED, str(e))
                 await _handle_failure(experiment, f"Failed to start defender — {e}")
                 return
+
+    # Attacker setup: attach the lifecycle channel so the attacker's run_setup/run_stop can emit signals.
+    attacker_lc = AttackerLifecycle(
+        on_emit=_attacker_signal_recorder(experiment),
+        on_command=_attacker_command_recorder(experiment),
+    )
+    experiment._attacker_lifecycle = attacker_lc
+    # The environment produces the agent-facing AttackerEnvSpec and the harness-only scoped SetupAccess.
+    experiment._attacker_env_spec = experiment.environment.attacker_spec(experiment.deployed_environment, cfg)
+    attacker_access = experiment.environment.attacker_setup_access(experiment.deployed_environment, bastion_ip, cfg)
+    try:
+        # Gate C2 bring-up (requires_docker) under _attacker_setup_lock. Shell agents run ungated.
+        await attacker_lc.send(AttackerCommand.START_SETUP)
+        if getattr(experiment.attacker, "requires_docker", False):
+            async with _attacker_setup_lock.acquire(_gate_priority(experiment)):
+                prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
+        else:
+            prepared = await _drive_attacker_setup(experiment, cfg, bastion_ip, attacker_lc, attacker_access)
+        await registry.update(experiment)
+    except Exception as e:
+        exp_log.exception("Attacker setup failed for '%s'", experiment.experiment_name)
+        if defender_process:
+            await _stop_defender_process(experiment, defender_process, cfg)
+        await _handle_failure(experiment, f"Attacker setup failed — {e}")
+        return
 
     try:
         await attacker_lc.send(AttackerCommand.START_RUN)
@@ -815,6 +894,12 @@ async def _run_experiment(experiment: Experiment) -> None:
                 experiment.defender_finished_at = datetime.now(timezone.utc)
             except Exception:
                 exp_log.exception("Error stopping defender for '%s'", experiment.experiment_name)
+        # Traffic runs through the whole attack window and stops last.
+        if experiment.traffic and experiment.traffic_ready_at is not None:
+            try:
+                await _stop_traffic(experiment, cfg)
+            except Exception:
+                exp_log.exception("Error stopping traffic for '%s'", experiment.experiment_name)
 
     experiment.attacker_finished_at = datetime.now(timezone.utc)
     # Terminal lifecycle signal. On a normal finish the attacker exited on its own, so record STOPPED here.
@@ -912,6 +997,7 @@ async def add_experiment(data: ExperimentSpecs):
         environment=data.environment,
         attacker=data.attacker,
         defender=data.defender,
+        traffic=data.traffic,
         trial=data.trial,
         teardown=data.teardown,
         created_at=now,
@@ -953,6 +1039,7 @@ async def plugin_schemas():
     over HTTP instead of importing this package and reading the private _registry."""
     from .attacker.plugins.base import AttackerPlugin
     from .defender.plugins.base import DefenderPlugin
+    from .traffic.plugins.base import TrafficPlugin
 
     def _schemas(base):
         out = {}
@@ -963,7 +1050,8 @@ async def plugin_schemas():
                 pass  # a plugin without a schema is API-only, not a dashboard entry
         return out
 
-    return {"attacker": _schemas(AttackerPlugin), "defender": _schemas(DefenderPlugin)}
+    return {"attacker": _schemas(AttackerPlugin), "defender": _schemas(DefenderPlugin),
+            "traffic": _schemas(TrafficPlugin)}
 
 
 @app.get("/experiments")

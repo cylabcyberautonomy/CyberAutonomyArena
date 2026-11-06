@@ -89,6 +89,19 @@ def _trace_entry(request, result) -> dict:
     }
 
 
+_rearm_tasks: set = set()
+
+
+async def _rearm_traffic(exp, host_name: str, cfg) -> None:
+    """After a rebuild: the env re-grants the traffic credential, then traffic restarts its generator there."""
+    try:
+        await exp.environment.restore_traffic_access(exp, exp.deployed_environment, host_name, cfg)
+        await exp.traffic.run_rearm(exp, cfg, host_name)
+    except Exception:  # noqa: BLE001
+        from .experiment_log import get_logger
+        get_logger(exp.experiment_name).exception("traffic rearm after rebuilding %s failed", host_name)
+
+
 async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
                             token: Optional[str] = None, trusted_transport: bool = True) -> dict:
     """Authorize, dispatch, and record one env-mutation event. Returns a dict with the EnvActionResult
@@ -139,6 +152,13 @@ async def handle_env_action(payload: dict, *, registry, cfg, lock=None,
         result = EnvActionResult(kind=req.kind, ok=False, error=str(e))
     except Exception as e:  # noqa: BLE001
         result = EnvActionResult(kind=req.kind, ok=False, error=f"environment error: {e}")
+
+    # A rebuilt host comes back without its traffic generator. Rearm it in the background so the
+    # defender's restore is not delayed and the host does not go conspicuously silent.
+    if result.ok and req.kind == EnvActionKind.REBUILD_HOST and getattr(exp, "traffic", None) is not None:
+        task = asyncio.create_task(_rearm_traffic(exp, req.target, cfg))
+        _rearm_tasks.add(task)  # hold a reference so the task is not garbage-collected mid-run
+        task.add_done_callback(_rearm_tasks.discard)
 
     if lc is not None:
         lc.record_request(_trace_entry(req, result))
