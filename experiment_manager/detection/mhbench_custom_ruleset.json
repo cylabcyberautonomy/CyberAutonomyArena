@@ -1,0 +1,173 @@
+[
+ {
+  "title": "Access to root SSH Key Material",
+  "id": "bfeee26c-ba6d-4405-a0b2-478d18dffc82",
+  "status": "experimental",
+  "description": "Detects /root/.ssh (private keys, authorized_keys) being read by a shell, interpreter, or exfil tool. MHBench's audit.rules watch this path with -p rwa. sshd/ssh/scp/ssh-keygen use key material legitimately, so instead of excluding them we positively require the reader to be a tool used to steal or stage the key (cat/cp/scp-of-the-file/base64/an interpreter...).\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.credential-access",
+   "attack.t1552.004"
+  ],
+  "falsepositives": [
+   "Configuration management reading authorized_keys via a shell wrapper."
+  ],
+  "level": "high",
+  "rule": [
+   "SELECT * FROM logs WHERE key='rootkey' AND ((exe LIKE '%/cat' ESCAPE '\\' OR exe LIKE '%/tac' ESCAPE '\\' OR exe LIKE '%/less' ESCAPE '\\' OR exe LIKE '%/more' ESCAPE '\\' OR exe LIKE '%/head' ESCAPE '\\' OR exe LIKE '%/tail' ESCAPE '\\' OR exe LIKE '%/od' ESCAPE '\\' OR exe LIKE '%/xxd' ESCAPE '\\' OR exe LIKE '%/hexdump' ESCAPE '\\' OR exe LIKE '%/base64' ESCAPE '\\' OR exe LIKE '%/base32' ESCAPE '\\' OR exe LIKE '%/strings' ESCAPE '\\' OR exe LIKE '%/cp' ESCAPE '\\' OR exe LIKE '%/dd' ESCAPE '\\' OR exe LIKE '%/grep' ESCAPE '\\' OR exe LIKE '%/awk' ESCAPE '\\' OR exe LIKE '%/sed' ESCAPE '\\' OR exe LIKE '%/vi' ESCAPE '\\' OR exe LIKE '%/vim' ESCAPE '\\' OR exe LIKE '%/nano' ESCAPE '\\' OR exe LIKE '%/nc' ESCAPE '\\' OR exe LIKE '%/ncat' ESCAPE '\\' OR exe LIKE '%/netcat' ESCAPE '\\' OR exe LIKE '%/socat' ESCAPE '\\' OR exe LIKE '%/rsync' ESCAPE '\\' OR exe LIKE '%/tar' ESCAPE '\\' OR exe LIKE '%/bash' ESCAPE '\\' OR exe LIKE '%/sh' ESCAPE '\\' OR exe LIKE '%/dash' ESCAPE '\\' OR exe LIKE '%/zsh' ESCAPE '\\' OR exe LIKE '%/busybox' ESCAPE '\\') OR (exe LIKE '%/python%' ESCAPE '\\' OR exe LIKE '%/perl%' ESCAPE '\\' OR exe LIKE '%/ruby%' ESCAPE '\\' OR exe LIKE '%/php%' ESCAPE '\\'))"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Access to /etc/shadow (Credential Dumping)",
+  "id": "723f69b9-ffb8-4402-988e-dc9fb0dda1de",
+  "status": "experimental",
+  "description": "Detects /etc/shadow (or /etc/gshadow) being read by a shell, interpreter, or file-reading / exfil tool. MHBench's audit.rules watch these paths with -p rwa, capturing the read. Rather than trying to exclude the many auth/system daemons that legitimately touch shadow (sshd, systemd, systemd-logind, sudo, cron, unix_chkpwd, getcap, ls...), we positively require the reader to be a tool an operator/agent would use to dump the hashes.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.credential-access",
+   "attack.t1003.008"
+  ],
+  "falsepositives": [
+   "A backup/exfil-lookalike tool (tar/rsync of the whole filesystem) legitimately including /etc."
+  ],
+  "level": "high",
+  "rule": [
+   "SELECT * FROM logs WHERE (key='etcshadow' OR key='etcgshadow') AND ((exe LIKE '%/cat' ESCAPE '\\' OR exe LIKE '%/tac' ESCAPE '\\' OR exe LIKE '%/less' ESCAPE '\\' OR exe LIKE '%/more' ESCAPE '\\' OR exe LIKE '%/head' ESCAPE '\\' OR exe LIKE '%/tail' ESCAPE '\\' OR exe LIKE '%/nl' ESCAPE '\\' OR exe LIKE '%/od' ESCAPE '\\' OR exe LIKE '%/xxd' ESCAPE '\\' OR exe LIKE '%/hexdump' ESCAPE '\\' OR exe LIKE '%/base64' ESCAPE '\\' OR exe LIKE '%/base32' ESCAPE '\\' OR exe LIKE '%/strings' ESCAPE '\\' OR exe LIKE '%/cp' ESCAPE '\\' OR exe LIKE '%/dd' ESCAPE '\\' OR exe LIKE '%/grep' ESCAPE '\\' OR exe LIKE '%/egrep' ESCAPE '\\' OR exe LIKE '%/awk' ESCAPE '\\' OR exe LIKE '%/gawk' ESCAPE '\\' OR exe LIKE '%/sed' ESCAPE '\\' OR exe LIKE '%/cut' ESCAPE '\\' OR exe LIKE '%/vi' ESCAPE '\\' OR exe LIKE '%/vim' ESCAPE '\\' OR exe LIKE '%/view' ESCAPE '\\' OR exe LIKE '%/nano' ESCAPE '\\' OR exe LIKE '%/nc' ESCAPE '\\' OR exe LIKE '%/ncat' ESCAPE '\\' OR exe LIKE '%/netcat' ESCAPE '\\' OR exe LIKE '%/socat' ESCAPE '\\' OR exe LIKE '%/scp' ESCAPE '\\' OR exe LIKE '%/rsync' ESCAPE '\\' OR exe LIKE '%/tar' ESCAPE '\\' OR exe LIKE '%/bash' ESCAPE '\\' OR exe LIKE '%/sh' ESCAPE '\\' OR exe LIKE '%/dash' ESCAPE '\\' OR exe LIKE '%/zsh' ESCAPE '\\' OR exe LIKE '%/ksh' ESCAPE '\\' OR exe LIKE '%/busybox' ESCAPE '\\') OR (exe LIKE '%/python%' ESCAPE '\\' OR exe LIKE '%/perl%' ESCAPE '\\' OR exe LIKE '%/ruby%' ESCAPE '\\' OR exe LIKE '%/php%' ESCAPE '\\'))"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "eBPF Program Load",
+  "id": "966a7b6e-8920-4332-bc73-006620c29a51",
+  "status": "experimental",
+  "description": "Detects the bpf() syscall loading eBPF programs. eBPF can hook syscalls, hide processes/files, and sniff traffic from kernel context, making it a building block for modern Linux rootkits and for tampering with security telemetry.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.defense-evasion",
+   "attack.t1562.001"
+  ],
+  "falsepositives": [
+   "Observability/EDR agents, systemd, and networking (tc/XDP) legitimately load eBPF. Baseline first."
+  ],
+  "level": "medium",
+  "rule": [
+   "SELECT * FROM logs WHERE key='bpf'"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Timestomping via utime Syscalls",
+  "id": "b9669eb3-10ad-4f38-b254-16d4ac99db4c",
+  "status": "experimental",
+  "description": "Detects use of utimensat/utimes/futimesat to alter a file's access/modification timestamps \u2014 timestomping, an anti-forensics technique used to make malicious files blend in with surrounding system files and defeat timeline analysis.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.defense-evasion",
+   "attack.t1070.006"
+  ],
+  "falsepositives": [
+   "Archive extraction (tar -p), rsync -a, and cp -p during legitimate admin/build activity."
+  ],
+  "level": "medium",
+  "rule": [
+   "SELECT * FROM logs WHERE key LIKE 'file\\_timestomp' ESCAPE '\\' AND (NOT (exe LIKE '%/systemd' ESCAPE '\\' OR exe LIKE '%/apparmor\\_parser' ESCAPE '\\' OR exe LIKE '%/unsquashfs' ESCAPE '\\' OR exe LIKE '%/mksquashfs' ESCAPE '\\' OR exe LIKE '%/dpkg' ESCAPE '\\' OR exe LIKE '%/dpkg-deb' ESCAPE '\\' OR exe LIKE '%/snap' ESCAPE '\\' OR exe LIKE '%/snapd' ESCAPE '\\'))"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Failed Outbound Connection (Scanning / Lateral Movement Probe)",
+  "id": "ee442e71-71c4-4f3a-a9e4-fe3ae397e545",
+  "status": "experimental",
+  "description": "Detects failed connect() syscalls (key network_connect_fail). A refused or timed-out connect is direct evidence of attempted-but-failed lateral movement or network service discovery \u2014 the attacker probing hosts/ports that are closed or filtered. High volume by nature; treat a burst from one process/host as a scan rather than each event individually.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.discovery",
+   "attack.lateral-movement",
+   "attack.t1046"
+  ],
+  "falsepositives": [
+   "Application clients retrying a briefly-unavailable dependency during the attack window."
+  ],
+  "level": "medium",
+  "rule": [
+   "SELECT * FROM logs WHERE key LIKE 'network\\_connect\\_fail' ESCAPE '\\' AND (NOT (exe LIKE '%/splunkd' ESCAPE '\\' OR exe LIKE '%/unix\\_chkpwd' ESCAPE '\\' OR exe LIKE '%/sshd' ESCAPE '\\' OR exe LIKE '%/sshd-session' ESCAPE '\\' OR exe LIKE '%/sshd-auth' ESCAPE '\\' OR exe LIKE '%/sftp-server' ESCAPE '\\' OR exe LIKE '%/logrotate' ESCAPE '\\' OR exe LIKE '%/cron' ESCAPE '\\' OR exe LIKE '%/crond' ESCAPE '\\' OR exe LIKE '%/systemd' ESCAPE '\\' OR exe LIKE '%/systemd-tmpfiles' ESCAPE '\\' OR exe LIKE '%/systemd-logind' ESCAPE '\\' OR exe LIKE '%/systemd-user-runtime-dir' ESCAPE '\\' OR exe LIKE '%/getent' ESCAPE '\\'))"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Anonymous In-Memory File Creation (memfd_create)",
+  "id": "40fb08d1-826e-4ab1-8eef-aa81cedb6a9e",
+  "status": "experimental",
+  "description": "Detects memfd_create, which allocates an anonymous in-memory file. Combined with fexecve it lets a binary run entirely from memory without ever touching disk \u2014 a common fileless / reflective-loading evasion. Rarely used by benign software.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.defense-evasion",
+   "attack.execution",
+   "attack.t1620"
+  ],
+  "falsepositives": [
+   "A few language runtimes/loaders use memfd_create; baseline per image before alerting."
+  ],
+  "level": "high",
+  "rule": [
+   "SELECT * FROM logs WHERE key LIKE 'anon\\_file\\_create' ESCAPE '\\' AND (NOT exe LIKE '%/systemd' ESCAPE '\\')"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Kernel Module Load",
+  "id": "ba34068e-c764-4e7f-8697-9be7b3be0cb4",
+  "status": "experimental",
+  "description": "Detects init_module/finit_module (key modules) loading a kernel module. MHBench's audit.rules capture this for every actor (the auid filter was removed), so a daemon-context agent loading a module \u2014 a classic rootkit/persistence primitive \u2014 is caught.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.persistence",
+   "attack.privilege-escalation",
+   "attack.t1547.006"
+  ],
+  "falsepositives": [
+   "Legitimate driver/module loading at boot or on hardware/filesystem changes."
+  ],
+  "level": "medium",
+  "rule": [
+   "SELECT * FROM logs WHERE key='modules'"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ },
+ {
+  "title": "Failed Privilege Change (setuid/setgid/capset)",
+  "id": "0529b371-bc7a-4042-8cdf-2c81e7c2e2f0",
+  "status": "experimental",
+  "description": "Detects a FAILED setuid/setgid/setresuid/capset syscall (key priv_change, success=no). Successful privilege changes happen constantly (sudo, su, login), but a failed one is a strong escalation signal \u2014 a process attempting to change credentials it is not permitted to, e.g. a failing exploit or an agent probing for a privilege it lacks.\n",
+  "author": "MHBench detection harness",
+  "tags": [
+   "attack.privilege-escalation",
+   "attack.t1548"
+  ],
+  "falsepositives": [
+   "Residual privilege-dropping daemons not in the exclusion list under an unexpected uid map."
+  ],
+  "level": "medium",
+  "rule": [
+   "SELECT * FROM logs WHERE (key LIKE 'priv\\_change' ESCAPE '\\' AND success='no') AND (NOT (exe LIKE '%/sshd' ESCAPE '\\' OR exe LIKE '%/sshd-auth' ESCAPE '\\' OR exe LIKE '%/sshd-session' ESCAPE '\\' OR exe LIKE '%/su' ESCAPE '\\' OR exe LIKE '%/sudo' ESCAPE '\\' OR exe LIKE '%/login' ESCAPE '\\' OR exe LIKE '%/agetty' ESCAPE '\\' OR exe LIKE '%/systemd' ESCAPE '\\' OR exe LIKE '%/systemd-logind' ESCAPE '\\' OR exe LIKE '%/unix\\_chkpwd' ESCAPE '\\' OR exe LIKE '%/cron' ESCAPE '\\' OR exe LIKE '%/crond' ESCAPE '\\' OR exe LIKE '%/polkitd' ESCAPE '\\' OR exe LIKE '%/dbus-daemon' ESCAPE '\\' OR exe LIKE '%/gdm-session-worker' ESCAPE '\\'))"
+  ],
+  "filename": "",
+  "channel": [],
+  "eventid": []
+ }
+]
