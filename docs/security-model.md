@@ -11,8 +11,7 @@ reach the harness's own control plane. Two invariants carry almost all of that w
 
 Plus one **management-plane isolation** requirement that address-hiding alone cannot satisfy.
 
-This document also records a **known gap** (telemetry isolation on OpenStack) that is designed-for but
-not yet wired — see the last section.
+The last section describes the implemented egress policy and the remaining limits of management-plane isolation.
 
 ---
 
@@ -94,77 +93,14 @@ the environment isolating the management plane, which the environment plugin own
 
 ---
 
-## 4. Known gap — victim egress is not scoped on OpenStack
+## 4. Egress policy and isolation limits
 
-First, two names that collide across the repos:
+The harness host and the per-experiment management host are distinct. The harness runs the manager; MHBench's management host provides the SSH jump path and telemetry relay. Victim telemetry reaches a defender's Elasticsearch through the relay when the defender requests telemetry ingress.
 
-- **harness ES** — the shared Elasticsearch on the **provider network** (`cfg.host_ip = 10.81.1.20`;
-  baked `es_address 10.81.1.25`). This is the harness control plane; victims must never reach it.
-- **relay / mgmt host** — MHBench's `management.host_ip = 10.0.1.10`, on the tenant management network
-  (`10.0.1.0/24`). Per-experiment, victim-reachable **by design**, and hidden from the attacker.
+For non-routed environments, `internet_egress: false` restricts new outbound connections to topology subnet CIDRs and the management host's /32, with DHCP preserved. OpenStack removes default allow-all egress rules before applying this policy. GCP applies the same destination policy with its metadata/DNS endpoint exception. Ingress still requires the destination's own policy; an outbound allowance alone does not establish an application path.
 
-### What already works (telemetry *flow* isolation)
+In routed environments, the permitted control and data destinations are kept separate. Data subnets have no Neutron gateway or router attachment, and guest forwarding guards reject transit traffic entering or leaving a router's control NIC. See MHBench's routing guide for the routed interface and reply-source permissions.
 
-Every telemetry-consuming defender reads its **own per-experiment Elasticsearch on the defender box** —
-there is no shared, persistent harness ES. This is **box mode**, and all three ES defenders (`llm_soc`,
-`deception`, `prompt_injection`) use it:
+`internet_egress` defaults to true. A non-routed victim with unrestricted egress can therefore reach provider-network services through Neutron SNAT if those services accept it. Restricted egress removes the blanket allowance; it does not deny an address already covered by a topology CIDR or the management-host exception, and it preserves the management services allowed by their security group.
 
-- MHBench runs `telemetry_relay.py` (`telemetry_relay.service`) on the per-experiment mgmt host
-  (`10.0.1.10:9200`), forwarding byte-for-byte to a dest from `/etc/telemetry_relay/dests.json`.
-- The defender stands up ES on the isolated box (`DefenderPlugin.prepare_box_es`, on the base) and opens
-  an ssh -L tunnel to read it. It declares the box port it needs via `DefenderPlugin.box_ingress()`
-  (`{"telemetry": [9200]}`), and `MHBenchEnvironment.program_ingress()` both opens that port and points
-  the relay at the box (`request-ingress --telemetry`). Victim sensors ship to the relay → box ES; the
-  runner does **no** `InstallFalco`/sysflow-repoint (the environment owns sensor shipping), and
-  attacker↔box is severed.
-- `prepare_box_es` is **fail-closed**: if there is no defender box it raises — there is no
-  shared-harness-ES fallback. (The old shared ES — a `mhbench-elasticsearch` container on `cfg.host_ip`,
-  bootstrapped by a `deception/setup.py` — has been removed, along with that bootstrap.)
-
-**Why the relay is necessary (and sufficient).** The defender box is on an isolated subnet and victims
-**cannot initiate** connections to it (one-way isolation: box→victims allowed, victim→box blocked). So
-victims can't ship to the box directly; the mgmt-host relay — which victims *can* reach and which *can*
-reach the box — bridges that gap. One interface expresses the whole need: the defender names a port
-(`box_ingress()`), the environment opens it and routes the relay there (`program_ingress()`). There is no
-separate `telemetry_ingest()`/`program_telemetry()`/`TelemetryRoute` interface — that was unbuilt
-fan-out scaffolding with no consumers, and it was **removed**.
-
-`telemetry_relay_ip()` was also **removed**: in box mode the environment's own relay provisioning points
-victim sensors at the relay, so the defender never needs a relay address — it does no sensor install and
-reads only its box ES over the tunnel. (A consequence: the relay's internal IP is no longer in the
-defender's self-protection set; the mgmt/bastion host it runs on is still protected via `bastion_ip`.)
-
-The decoy *deployment* path (the defender asking the environment for *a decoy*) is a separate, richer
-interface that remains deferred; only the *ES consumption* of the decoy defenders was moved to box mode.
-
-### What does NOT work (network *reachability*)
-
-Telemetry flow is isolated; **raw network reachability is not.** On OpenStack
-(`MHBench/src/deployment/network_deployer.py`):
-
-- every topology subnet, including victim subnets, is attached to a router whose **external gateway SNATs
-  to the provider network** (where the harness host and the on-prem infrastructure live), and
-- victim egress defaults to **`0.0.0.0/0`** (`internet_egress = True` by default,
-  `abstractions/network.py`), with **no per-destination scoping**.
-
-So a compromised victim can open a socket **directly** to the harness host (`cfg.host_ip`, `10.81.1.x`)
-and the rest of the provider net — bypassing the relay. Removing the shared harness ES (above) took the
-highest-value target off that path — there is no longer a central telemetry store on the provider net to
-read or tamper with — so what remains is reachability to the harness host/manager and the provider
-network generally. That is now a **defense-in-depth** gap rather than a direct integrity hole, but it
-should still be closed.
-
-Why it isn't already fixed: OpenStack security groups are **allow-only** (no deny rules), so you can't
-"deny `10.81.1.x` while allowing `0.0.0.0/0`." The only egress knob is `internet_egress`, and setting it
-`False` today restricts a victim to its **own CIDR only** — which also severs the relay (`10.0.1.10`),
-because the OpenStack backend, unlike GCP (`gcp_backend.py` adds `management.cidr` to its restricted
-egress-allow set), does **not** allow the management CIDR. GCP's exposure is narrower only by topology (no
-provider subnet to reach; NAT goes to the internet), not by an explicit block of the mgmt host.
-
-> **Fix shape** (MHBench-side, environment-owned): make victim egress an **allow-list** of
-> `{all internal subnet CIDRs} + {management.cidr}` and drop the blanket `0.0.0.0/0` + provider-net
-> reachability — i.e. set instrumented victim subnets to `internet_egress: False` **and** fix the
-> OpenStack backend to include `management.cidr` in the restricted egress-allow (mirroring GCP), so the
-> relay keeps working while the harness ES and the internet become unreachable from victims. Prefer **box
-> mode** as the standing posture. Needs live validation; see the engineering notes for the full change
-> set. Until then, OpenStack victim→control-plane reachability is a documented known limitation.
+OpenStack security groups are allow-only, so unrestricted Internet egress cannot simultaneously exclude an arbitrary provider CIDR. Choose topology egress settings and control-service permissions explicitly; credential scoping and the telemetry relay do not by themselves prevent raw network access to the harness.

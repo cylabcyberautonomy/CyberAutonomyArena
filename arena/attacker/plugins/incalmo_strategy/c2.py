@@ -179,6 +179,7 @@ def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip:
     tar = subprocess.Popen(
         ["tar", "czf", "-", "--exclude=.git", "--exclude=.venv", "--exclude=.venv-c2c",
          "--exclude=incalmo/frontend", "--exclude=output", "--exclude=__pycache__",
+         "--exclude=.env", "--exclude=.env.*",
          "--exclude=incalmo/c2server/payloads/dynamic_payload_*.sh",
          "-C", str(incalmo_dir.parent), incalmo_dir.name], stdout=subprocess.PIPE)
     subprocess.run(ssh + [
@@ -189,7 +190,7 @@ def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip:
     # 5. Run the C2 container on the foothold, bound to 8888 on all interfaces (in-tenant reachable).
     subprocess.run(ssh + [
         f"docker rm -f c2 >/dev/null 2>&1; docker run -d --name c2 -p 0.0.0.0:{_C2_PORT}:{_C2_PORT} "
-        f"-v /incalmo:/incalmo -e UV_PROJECT_ENVIRONMENT=/incalmo/.venv-c2c {_C2C_IMAGE}"],
+        f"-v /incalmo:/incalmo {_C2C_IMAGE}"],
         check=True, timeout=180)
 
     # Setup done. Close the shared master. The tunnel below is its own long-lived connection.
@@ -224,7 +225,7 @@ def setup_c2(experiment_name: str, cfg, access: AttackerSetupAccess, bastion_ip:
     logger.info("[foothold-c2] resilient tunnel supervisor pid=%s 127.0.0.1:%s -> %s:%s (via %s)",
                 tunnel.pid, local_port, foothold_ip, _C2_PORT, bastion_ip)
 
-    # 7. Wait until the C2 serves through the tunnel (first boot runs uv sync).
+    # 7. Wait until the C2 serves through the tunnel.
     url = f"http://127.0.0.1:{local_port}/agents"
     for _ in range(48):
         try:
